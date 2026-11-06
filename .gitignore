@@ -3,8 +3,10 @@ release/
 .DS_Store
 data/projects/*.json
 data/assets/*
+data/knowledge/*
 data/comfyui.json
 data/.port
 data/snapshots/*
 *.log
 .trae-html-share-packages/
+.trae/

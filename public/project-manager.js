@@ -3,6 +3,8 @@
  * 六步任务面板（四态视觉提示 + 论文依据）、画布步骤导航条、项目管理面板。
  * 只负责 DOM 与交互；所有状态以 project.management / /api 返回为准。
  * ==========================================================================*/
+import { openAssetLibrary } from './asset-manager.js';
+
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
@@ -293,10 +295,11 @@ export function openCoverDialog(ctx = {}) {
           <p class="cover-tip">未设置封面时，项目卡片会自动使用<b>项目名称封面</b>（按名称生成的渐变色块）。<br>
             生成封面会调用已配置的 ComfyUI 出图工作流；上传支持 PNG / JPEG / WebP / GIF，单张不超过 4 MB。</p>
           <label class="field"><span>补充画面要求（可选）</span>
-            <input id="cover-prompt" placeholder="如：雨夜霓虹、水墨风、暖色调电影海报…" value="${esc(cover.prompt || '')}"></label>
+            <textarea id="cover-prompt" rows="6" placeholder="如：雨夜霓虹、水墨风、暖色调电影海报…">${esc(cover.prompt || '')}</textarea></label>
           <div class="cover-actions">
             <button class="btn primary" data-act="generate" ${busy ? 'disabled' : ''}>✦ 用 ComfyUI 生成封面</button>
             <button class="btn" data-act="upload" ${busy ? 'disabled' : ''}>⇧ 上传本地图片</button>
+            <button class="btn" data-act="from-library" ${busy ? 'disabled' : ''}>▣ 从资源库选择</button>
             <button class="btn" data-act="reset" ${busy || !cover.url ? 'disabled' : ''}>↺ 使用项目名称封面</button>
           </div>
           ${message ? `<div class="cover-status ${message.startsWith('✗') ? 'err' : ''}">${esc(message)}</div>` : ''}
@@ -327,6 +330,23 @@ export function openCoverDialog(ctx = {}) {
 
     const fileInput = $('cover-file');
     backdrop.querySelector('[data-act="upload"]')?.addEventListener('click', () => fileInput?.click());
+    backdrop.querySelector('[data-act="from-library"]')?.addEventListener('click', () => {
+      if (busy) return;
+      openAssetLibrary({
+        mode: 'pick', accept: 'image',
+        onPick: async (a) => {
+          busy = true; message = '正在应用资源库封面…'; render();
+          try {
+            const d = await api(`/api/projects/${p.id}/cover`, { asset: a.name });
+            applyCover(d.cover);
+            message = '✓ 已从资源库选用封面';
+            toast('项目封面已更新', 'ok');
+            await ctx.onChanged?.();
+          } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
+          busy = false; render();
+        },
+      });
+    });
     fileInput?.addEventListener('change', async () => {
       if (busy) return;
       const file = fileInput.files?.[0];
@@ -372,8 +392,76 @@ export function openCoverDialog(ctx = {}) {
 
 /* ------------------------------------------------------------------ 六步任务面板 */
 let expandedStep = null;
+/** token 数字格式化：≥1000 显示 x.xk（与后端 project-steps 同规则） */
+function fmtTok(n) {
+  n = Number(n) || 0;
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
 /** 执行新步骤前由 app.js 调用，让详情卡自动跟随正在执行的那一步 */
 export function setExpandedStep(id) { expandedStep = id; }
+
+/** 骨架项目第 ① 步内嵌的「上传小说」入口：文件 / 粘贴 / 示例三来源，走 POST /:id/source */
+function renderSourceUpload() {
+  return `<div class="sp-upload" id="sp-upload">
+    <div class="sp-upload-head"><strong>⇧ 上传小说</strong><span>解析原文 → 分集 → 自动完成 ①② 步 · 至少 40 字</span></div>
+    <div class="sp-upload-actions">
+      <button class="btn" data-src="file">选择 .txt / .md 文件</button>
+      <button class="btn" data-src="sample">载入示例小说</button>
+    </div>
+    <textarea id="sp-src-text" rows="4" placeholder="或在这里粘贴小说正文&#10;&#10;第一章 ……"></textarea>
+    <div class="sp-upload-foot">
+      <span class="sp-upload-msg" id="sp-src-msg">数据仅保存在本地 data/</span>
+      <button class="btn primary" data-src="submit">⇧ 上传并完成 ①②</button>
+    </div>
+  </div>`;
+}
+
+function bindSourceUpload(host, ctx) {
+  const box = host.querySelector('#sp-upload');
+  if (!box) return;
+  const ta = box.querySelector('#sp-src-text');
+  const msg = box.querySelector('#sp-src-msg');
+  const state = { text: '', filename: '' };
+  const setMsg = (t, err = false) => { msg.textContent = t; msg.classList.toggle('err', err); };
+  const readFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      state.text = String(reader.result || ''); state.filename = file.name;
+      ta.value = state.text;
+      setMsg(`已载入「${file.name}」· ${state.text.trim().length} 字`);
+    };
+    reader.readAsText(file, 'utf-8');
+  };
+  box.querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', async () => {
+    const act = b.dataset.src;
+    if (act === 'file') {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = '.txt,.md,.markdown,text/plain,text/markdown';
+      input.onchange = () => readFile(input.files?.[0]);
+      input.click();
+    } else if (act === 'sample') {
+      try {
+        const d = await api('/api/novel/sample');
+        state.text = d.text; state.filename = d.filename;
+        ta.value = state.text;
+        setMsg(`示例已载入 · ${state.text.trim().length} 字`);
+      } catch (e) { setMsg(e.message, true); }
+    } else if (act === 'submit') {
+      const text = (ta.value || state.text || '').trim();
+      if (text.length < 40) return setMsg(`正文至少需要 40 字（当前 ${text.length} 字）`, true);
+      b.disabled = true; setMsg('正在解析与分集…');
+      try {
+        const out = await api(`/api/projects/${ctx.project.id}/source`, { text, filename: state.filename });
+        setMsg(`✓ ${out.message}`);
+        await ctx.onSourceUploaded?.(out);
+      } catch (e) {
+        setMsg(e.message, true); b.disabled = false;
+      }
+    }
+  }));
+}
+
 export function renderStepPanel(host, ctx = {}) {
   if (!host) return;
   const project = ctx.project;
@@ -393,20 +481,33 @@ export function renderStepPanel(host, ctx = {}) {
   const failed = (m.steps || []).some((s) => s.status === 'error');
   const overall = failed ? 'error' : running ? 'running' : done === total ? 'done' : 'draft';
   const current = (m.steps || []).find((s) => s.status === 'running') || (m.steps || []).find((s) => s.status === 'pending');
+  // 骨架项目（尚未上传小说）：第 ① 步内嵌上传入口，替代「执行本步」
+  const needSource = !m.source?.text;
   if (!expandedStep || !states[expandedStep]) expandedStep = current?.id || null;
+  // Token 统计：全部步骤累计 + 运行中的实时计数（llm:usage 事件驱动）
+  const sumTok = (m.steps || []).reduce((a, s) => {
+    for (const k of ['prompt', 'completion', 'total', 'calls']) a[k] += s.tokens?.[k] || 0;
+    return a;
+  }, { prompt: 0, completion: 0, total: 0, calls: 0 });
+  const live = running ? ctx.liveTokens : null;
 
   host.innerHTML = `
     <div class="sp-head">
       <div class="sp-head-row"><strong>任务执行步骤</strong><span class="sp-counter">${done}/${total}</span></div>
       <div class="sp-progress"><i class="st-${overall}" style="width:${Math.round(done / total * 100)}%"></i></div>
       <div class="sp-status st-${overall}"><span class="sp-status-dot"></span>${esc(STATUS_TEXT[overall] || overall)}${running ? ' · 画布节点正在生长' : ''}</div>
+      <div class="sp-token"><b>Token 统计</b>
+        <span class="sp-token-total">${sumTok.calls} 次调用 · ${fmtTok(sumTok.total)} tokens（输入 ${fmtTok(sumTok.prompt)} / 输出 ${fmtTok(sumTok.completion)}）</span>
+        ${live ? `<span class="sp-token-live">${live.estimated ? '≈' : ''}${fmtTok(live.total)} tok · 实时</span>` : ''}
+      </div>
       <div class="sp-legend"><span class="lg pending">灰 · 待执行</span><span class="lg running">橙 + 呼吸 · 进行中</span><span class="lg done">绿 ✓ · 完成</span><span class="lg error">红 · 失败可重试</span></div>
     </div>
     <div class="sp-list">${steps.map((def) => {
       const st = states[def.id] || { status: def.auto ? 'done' : 'pending' };
       const isCur = current?.id === def.id && st.status !== 'done';
       const open = expandedStep === def.id;
-      const badge = st.status === 'done' ? `✓ ${st.durationMs ? (st.durationMs / 1000).toFixed(1) + 's' : '已完成'}`
+      const tokBadge = st.tokens?.total ? ` · ${fmtTok(st.tokens.total)} tok` : '';
+      const badge = st.status === 'done' ? `✓ ${st.durationMs ? (st.durationMs / 1000).toFixed(1) + 's' : '已完成'}${tokBadge}`
         : st.status === 'running' ? '进行中…' : st.status === 'error' ? '失败 · 重试' : isCur ? '下一步' : '待执行';
       return `<div class="sp-step st-${esc(st.status)} ${isCur ? 'current' : ''} ${open ? 'open' : ''}" data-step="${esc(def.id)}">
         <div class="sp-row" data-toggle="${esc(def.id)}">
@@ -418,11 +519,16 @@ export function renderStepPanel(host, ctx = {}) {
         ${open ? `<div class="sp-detail">
           <p class="sp-desc">${esc(def.desc)}</p>
           ${st.note ? `<div class="sp-note ${st.status === 'error' ? 'err' : ''}">${esc(st.note)}</div>` : ''}
+          ${def.id === 'upload' && needSource ? renderSourceUpload() : ''}
+          ${st.tokens && (st.tokens.calls > 0 || st.status === 'done') ? `<div class="sp-token-detail"><b>Token 用量</b>
+            <span>累计 ${fmtTok(st.tokens.total)} tok（输入 ${fmtTok(st.tokens.prompt)} / 输出 ${fmtTok(st.tokens.completion)}）· ${st.tokens.calls} 次调用</span>
+            ${st.lastTokens ? `<span>上次运行 ${fmtTok(st.lastTokens.total)} tok（输入 ${fmtTok(st.lastTokens.prompt)} / 输出 ${fmtTok(st.lastTokens.completion)}）</span>` : ''}
+          </div>` : ''}
           <div class="sp-checks"><b>完成检查</b>${def.checklist.map((c) => `<span>○ ${esc(c)}</span>`).join('')}</div>
           <div class="sp-theory"><b>论文依据 · ${esc(def.theory.ref)}</b><p>${esc(def.theory.text)}</p>
             <div class="sp-map">${def.theory.map.map(([k, v]) => `<span><em>${esc(k)}</em>${esc(v)}</span>`).join('')}</div></div>
           <div class="sp-actions">
-            ${st.status !== 'done' ? `<button class="btn primary" data-run="${esc(def.id)}" ${ctx.busy ? 'disabled' : ''}>${st.status === 'error' ? '↻ 重试本步' : '▶ 执行本步'}</button>` : ''}
+            ${st.status !== 'done' && !(def.id === 'upload' && needSource) ? `<button class="btn primary" data-run="${esc(def.id)}" ${ctx.busy ? 'disabled' : ''}>${st.status === 'error' ? '↻ 重试本步' : '▶ 执行本步'}</button>` : ''}
             <button class="btn" data-focus="${esc(def.id)}">⌖ 查看画布节点</button>
             ${st.status === 'done' && !def.auto ? `<button class="btn" data-reset="${esc(def.id)}">重置状态</button>` : ''}
           </div>
@@ -440,11 +546,31 @@ export function renderStepPanel(host, ctx = {}) {
     expandedStep = expandedStep === el.dataset.toggle ? null : el.dataset.toggle;
     renderStepPanel(host, ctx);
   }));
+  bindSourceUpload(host, ctx);
   host.querySelectorAll('[data-run]').forEach((b) => b.addEventListener('click', () => ctx.onRunStep?.(b.dataset.run, false)));
   host.querySelectorAll('[data-focus]').forEach((b) => b.addEventListener('click', () => ctx.onFocus?.(b.dataset.focus)));
   host.querySelectorAll('[data-reset]').forEach((b) => b.addEventListener('click', () => ctx.onReset?.(b.dataset.reset)));
-  $('sp-next')?.addEventListener('click', () => ctx.onRunStep?.(current?.id, false));
-  $('sp-all')?.addEventListener('click', () => ctx.onRunStep?.(null, true));
+  $('sp-next')?.addEventListener('click', () => {
+    // 骨架项目停在第 ① 步：先把上传框露出来，避免「执行」直接抛「尚未上传小说」
+    if (needSource && current?.id === 'upload') {
+      expandedStep = 'upload';
+      renderStepPanel(host, ctx);
+      host.querySelector('#sp-src-text')?.focus();
+      return;
+    }
+    ctx.onRunStep?.(current?.id, false);
+  });
+  $('sp-all')?.addEventListener('click', () => {
+    // 骨架项目先补原著，否则「全部执行」会在第 ① 步立刻失败
+    if (needSource) {
+      expandedStep = 'upload';
+      renderStepPanel(host, ctx);
+      host.querySelector('#sp-src-text')?.focus();
+      ctx.onNeedSource?.();
+      return;
+    }
+    ctx.onRunStep?.(null, true);
+  });
   $('sp-manage')?.addEventListener('click', () => ctx.onManage?.());
   $('sp-reset-all')?.addEventListener('click', () => ctx.onReset?.(null));
 }

@@ -26,6 +26,7 @@ lingximanju/
 │   │   ├── events.mjs          # 事件总线 + SSE 订阅
 │   │   ├── store.mjs           # JSON 原子持久化 + 资产落盘 + 项目快照
 │   │   ├── novel.mjs           # 小说解析 / 三种分集策略 / 角色抽取 / 预览校验
+│   │   ├── assets.mjs          # 资源索引（index.json 打标签/改名/类型）+ 跨项目角色优先匹配
 │   │   ├── project-steps.mjs   # 六步定义（含 scope 与论文依据）/ management / 状态机 / 管理动作
 │   │   ├── graph.mjs           # DAG 拓扑分层 / 上下游 / 自动布局
 │   │   ├── agent.mjs           # Agent 注册表 + 执行上下文
@@ -46,7 +47,10 @@ lingximanju/
 │   ├── pipelines/
 │   │   ├── templates.mjs       # 三套流水线 → 初始画布图
 │   │   └── novel-project.mjs   # 创作项目构建 / 重新分集（复用 novel2video 的 DAG）
-│   └── api/routes.mjs          # REST + SSE + 项目管理 + 六步执行 + ComfyUI 配置 + 产物下载
+│   └── api/
+│       ├── routes.mjs          # 路由聚合器：跨源访问硬化 + 按域分发
+│       ├── http.mjs            # json / readBody 等共用件
+│       └── routes/             # system / comfy / management / media / projects / assets / match 各域实现
 ├── electron/                   # Electron 主进程（多端打包入口，见 README「桌面版安装与分发」）
 ├── examples/                   # workflows/ 两份 API 工作流 + sample-novel.txt 示例小说
 ├── public/
@@ -54,8 +58,9 @@ lingximanju/
 │   ├── styles.css              # 设计系统 + 四态视觉提示
 │   ├── canvas.js               # 无限画布引擎（自研，创作项目层未改动）
 │   ├── nodes.js                # 节点类型与渲染（新增 episode 分集节点）
-│   ├── wizard.js               # 新建创作项目向导 + 创建后六步引导
-│   ├── project-manager.js      # 项目列表 / 六步面板 / 画布步骤条 / 管理面板
+│   ├── wizard.js               # 新建创作项目向导（单屏极简：名称 + 交付物，小说上传可跳过）+ 六步引导
+│   ├── project-manager.js      # 项目列表 / 六步面板（第 ① 步内嵌上传小说入口）/ 画布步骤条 / 管理面板
+│   ├── asset-manager.js        # 全局资源库：类型/标签/来源项目筛选 · 搜索 · 改名打标 · 复用选择
 │   ├── link-picker.js          # 拖拽松手后的「选择下一个节点 / 连接关系」浮层
 │   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片
 │   └── app.js                  # 状态机 / API / SSE / 六步执行 / 快捷键

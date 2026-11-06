@@ -1,6 +1,8 @@
 /* ============================================================================
- * 新建「创作项目」向导：上传小说 → 分集参数 → 交付物 → 六步任务引导
- * 三个阶段都有明确的视觉状态；创建成功后立刻列出任务执行步骤。
+ * 新建「创作项目」向导 —— 单屏极简版
+ * 默认只要「项目名 + 交付物」就能创建；小说上传、分集策略、画幅风格全部
+ * 后置：可折叠现在填，也可跳过，之后在六步任务的第 ① 步随时补传
+ * （骨架项目 + POST /api/projects/:id/source 延迟注入）。
  * 零第三方依赖，原生 ESM。
  * ==========================================================================*/
 const $ = (id) => document.getElementById(id);
@@ -31,21 +33,23 @@ export function openCreationWizard(opts = {}) {
   const steps = opts.steps || [];
   const toast = opts.toast || (() => {});
   const state = {
-    stage: 1, text: '', filename: '', name: '',
+    text: '', filename: '', name: '',
+    showSource: false, showAdvanced: false,
     split: { strategy: 'chapter', targetChars: 1200, maxEpisodes: 4 },
     deliverables: { video: true, pack: true },
     style: 'cinematic', aspect: '16:9',
-    preview: null, busy: false, error: '',
+    busy: false, error: '',
   };
+  const MIN_CHARS = 40;
+  const hasText = () => state.text.trim().length >= MIN_CHARS;
   const root = $('modal-root');
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `<div class="modal wizard-modal" role="dialog" aria-label="新建创作项目">
     <div class="wz-head">
-      <div><h2>＋ 新建创作项目</h2><div class="sub">上传小说 → 分集 → 制作视频 / 导出导演包 · 无限画布全程保留</div></div>
+      <div><h2>＋ 新建创作项目</h2><div class="sub">起个名字就能创建 · 小说上传与分集设置可之后在第 ① 步补做 · 无限画布全程保留</div></div>
       <button class="icon-btn" data-act="close" title="关闭">✕</button>
     </div>
-    <div class="wz-stages" id="wz-stages"></div>
     <div class="wz-body" id="wz-body"></div>
     <div class="wz-foot" id="wz-foot"></div>
   </div>`;
@@ -55,245 +59,223 @@ export function openCreationWizard(opts = {}) {
   document.addEventListener('keydown', onKey);
   backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
 
-  function setError(msg) { state.error = msg; renderStages(); renderFoot(); renderMeta(); }
+  function setError(msg) { state.error = msg; renderFoot(); }
   function summaryText() {
     const d = state.deliverables;
-    return `${state.name.trim() || '自动命名'} · ${state.text.trim().length} 字 · ${state.preview?.episodeCount || 0} 集 · ${d.video && d.pack ? '视频 + 导演包' : d.video ? '仅成片视频' : d.pack ? '仅导演包' : '未选择交付物'}`;
-  }
-
-  function renderStages() {
-    const labels = [
-      ['①', '上传小说', '解析原文与章节'],
-      ['②', '分集拆解', '策略与实时预览'],
-      ['③', '交付设置', '确认六步任务'],
-    ];
-    $('wz-stages').innerHTML = labels.map(([no, name, hint], i) => {
-      const n = i + 1;
-      const cls = n === state.stage ? 'active' : n < state.stage ? 'done' : '';
-      return `<div class="wz-stage ${cls}"><span class="wz-stage-no">${n < state.stage ? '✓' : no}</span>
-        <span><strong>${name}</strong><small>${hint}</small></span></div>${i < 2 ? '<div class="wz-stage-line"></div>' : ''}`;
-    }).join('');
+    const src = hasText() ? `${state.text.trim().length} 字 · 将直接完成 ①②` : '小说稍后在第 ① 步上传';
+    return `${state.name.trim() || '自动命名'} · ${src} · ${d.video && d.pack ? '视频 + 导演包' : d.video ? '仅成片视频' : d.pack ? '仅导演包' : '未选择交付物'}`;
   }
 
   function renderFoot() {
     const foot = $('wz-foot');
-    const valid1 = state.text.trim().length >= 40;
-    const valid2 = valid1 && !!state.preview?.episodeCount;
-    const valid3 = valid2 && (state.deliverables.video || state.deliverables.pack);
-    const nextDisabled = (state.stage === 1 && !valid1) || (state.stage === 2 && !valid2);
+    const noDel = !state.deliverables.video && !state.deliverables.pack;
+    const shortText = state.text.trim().length > 0 && !hasText();
+    let msg = state.error;
+    if (!msg) {
+      if (noDel) msg = '至少要选择一种交付物';
+      else if (shortText) msg = `正文只有 ${state.text.trim().length} 字（需 ≥${MIN_CHARS}）· 将创建空项目，稍后在第 ① 步重新上传`;
+      else msg = hasText() ? '创建后直接进入第 ③ 步 · 小说已在本次一并解析分集' : '创建后从第 ① 步上传小说开始 · 所有数据仅保存在本地 data/';
+    }
     foot.innerHTML = `
-      <div class="wz-foot-msg ${state.error ? 'err' : ''}">${esc(state.error || (state.stage === 3 ? '创建后将立即显示 6 步任务执行清单' : '所有数据仅保存在本地 data/'))}</div>
-      ${state.stage > 1 ? '<button class="btn" data-act="prev">← 上一步</button>' : ''}
-      ${state.stage < 3
-        ? `<button class="btn primary" data-act="next" ${nextDisabled ? 'disabled' : ''}>下一步 →</button>`
-        : `<button class="btn primary" data-act="create" ${(!valid3 || state.busy) ? 'disabled' : ''}>${state.busy ? '创建中…' : '＋ 创建创作项目'}</button>`}`;
-    foot.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => onFoot(b.dataset.act)));
+      <div class="wz-foot-msg ${state.error || noDel ? 'err' : ''}">${esc(msg)}</div>
+      <div class="wz-summary-inline">${esc(summaryText())}</div>
+      <button class="btn primary" data-act="create" ${(noDel || state.busy) ? 'disabled' : ''}>${state.busy ? '创建中…' : '＋ 创建创作项目'}</button>`;
+    foot.querySelector('[data-act="create"]').addEventListener('click', onCreate);
+  }
+
+  function renderBody() {
+    const body = $('wz-body');
+    body.innerHTML = `
+      <div class="field"><label>项目名称（可留空）</label>
+        <input id="wz-name" value="${esc(state.name)}" placeholder="例如：雨夜来信 · 第一季 · 留空自动命名"></div>
+
+      <div class="wz-label">最终交付物（至少一项）</div>
+      <div class="wz-cards two" id="wz-deliver">
+        <button class="wz-card ${state.deliverables.video ? 'selected' : ''}" data-del="video"><span class="wz-card-icon">▶</span><strong>成片视频</strong><small>ComfyUI 真实片段 → ffmpeg 拼接 MP4；Mock 为帧序列预览</small></button>
+        <button class="wz-card ${state.deliverables.pack ? 'selected' : ''}" data-del="pack"><span class="wz-card-icon">▤</span><strong>导演包</strong><small>*.mmxpack.zip · 可导入 ComfyUI MiniMax H3 Director</small></button>
+      </div>
+
+      <details class="wz-fold" id="wz-fold-source" ${state.showSource ? 'open' : ''}>
+        <summary>⇧ 现在上传小说 <em>可跳过 · 之后在第 ① 步也能传</em></summary>
+        <div class="wz-fold-body">
+          <div class="wz-drop" id="wz-drop">
+            <div class="wz-drop-icon">⇧</div>
+            <strong>拖拽 .txt / .md 到这里，或点击选择文件</strong>
+            <span>也支持直接粘贴正文 · 至少 ${MIN_CHARS} 字</span>
+            <div class="wz-drop-actions">
+              <button class="btn" data-act="file">选择文件</button>
+              <button class="btn" data-act="sample">载入示例小说</button>
+            </div>
+          </div>
+          <div class="field"><label>或粘贴小说正文</label><textarea id="wz-text" rows="5" placeholder="雨夜来信&#10;&#10;第一章 没有署名的信&#10;雨下了整夜……">${esc(state.text)}</textarea></div>
+          <div class="wz-meta" id="wz-meta"></div>
+        </div>
+      </details>
+
+      <details class="wz-fold" id="wz-fold-adv" ${state.showAdvanced ? 'open' : ''}>
+        <summary>⚙ 高级选项 <em>分集策略 · 画幅 · 风格</em></summary>
+        <div class="wz-fold-body">
+          <div class="wz-label">分集策略（上传后生效）</div>
+          <div class="wz-cards" id="wz-strategies">${STRATEGIES.map((s) => `
+            <button class="wz-card ${state.split.strategy === s.id ? 'selected' : ''}" data-strategy="${s.id}">
+              <span class="wz-card-icon">${s.icon}</span><strong>${s.name}</strong><small>${s.hint}</small>
+            </button>`).join('')}</div>
+          <div class="modal-grid" style="margin-top:10px">
+            <div class="field"><label>每集目标字数（300–8000）</label><input id="wz-target" type="number" min="300" max="8000" step="100" value="${state.split.targetChars}"></div>
+            <div class="field"><label>最多集数（1–12）</label><input id="wz-max" type="number" min="1" max="12" value="${state.split.maxEpisodes}"></div>
+          </div>
+          <div class="modal-grid" style="margin-top:10px">
+            <div class="field"><label>画幅</label><select id="wz-aspect"><option value="16:9" ${state.aspect === '16:9' ? 'selected' : ''}>16:9 横屏</option><option value="9:16" ${state.aspect === '9:16' ? 'selected' : ''}>9:16 竖屏</option></select></div>
+            <div class="field"><label>画面风格</label><select id="wz-style">${['cinematic', 'noir', 'anime', 'watercolor'].map((v) => `<option value="${v}" ${state.style === v ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+          </div>
+        </div>
+      </details>`;
+
+    $('wz-name').addEventListener('input', (e) => { state.name = e.target.value; renderFoot(); });
+
+    body.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
+      const k = b.dataset.del;
+      state.deliverables[k] = !state.deliverables[k];
+      b.classList.toggle('selected', state.deliverables[k]);
+      state.error = '';
+      renderFoot();
+    }));
+
+    // 折叠区状态记下来，重绘时不丢
+    $('wz-fold-source').addEventListener('toggle', (e) => { state.showSource = e.target.open; });
+    $('wz-fold-adv').addEventListener('toggle', (e) => { state.showAdvanced = e.target.open; });
+
+    // —— 可选的小说上传区 ——
+    const drop = $('wz-drop');
+    const readFile = (file) => {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        state.text = String(reader.result || ''); state.filename = file.name;
+        if (!state.name) { state.name = file.name.replace(/\.(txt|md|markdown)$/i, ''); $('wz-name').value = state.name; }
+        state.error = '';
+        $('wz-text').value = state.text;
+        renderMeta(); renderFoot(); toast(`已载入「${file.name}」`, 'ok');
+      };
+      reader.readAsText(file, 'utf-8');
+    };
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); readFile(e.dataTransfer.files?.[0]); });
+    $('wz-text').addEventListener('input', (e) => { state.text = e.target.value; state.error = ''; renderMeta(); renderFoot(); });
+    body.querySelectorAll('[data-act="file"]').forEach((b) => b.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = '.txt,.md,.markdown,text/plain,text/markdown';
+      input.onchange = () => readFile(input.files?.[0]);
+      input.click();
+    }));
+    body.querySelectorAll('[data-act="sample"]').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        const d = await api('/api/novel/sample');
+        state.text = d.text; state.filename = d.filename;
+        if (!state.name) { state.name = '雨夜来信 · 示例'; $('wz-name').value = state.name; }
+        state.error = '';
+        $('wz-text').value = state.text;
+        renderMeta(); renderFoot(); toast('示例小说已载入', 'ok');
+      } catch (e) { setError(e.message); }
+    }));
+    renderMeta();
+
+    // —— 高级选项 ——
+    body.querySelectorAll('[data-strategy]').forEach((b) => b.addEventListener('click', () => {
+      state.split.strategy = b.dataset.strategy;
+      body.querySelectorAll('[data-strategy]').forEach((x) => x.classList.toggle('selected', x === b));
+    }));
+    $('wz-target').addEventListener('input', (e) => { state.split.targetChars = Number(e.target.value) || 1200; });
+    $('wz-max').addEventListener('input', (e) => { state.split.maxEpisodes = Number(e.target.value) || 4; });
+    $('wz-aspect').addEventListener('change', (e) => { state.aspect = e.target.value; });
+    $('wz-style').addEventListener('change', (e) => { state.style = e.target.value; });
+
+    renderFoot();
   }
 
   function renderMeta() {
     const el = $('wz-meta');
     if (!el) return;
     const chars = state.text.trim().length;
-    const ok = chars >= 40;
-    el.innerHTML = `<span class="wz-k ${ok ? 'ok' : 'warn'}">${ok ? '✓' : '!'} ${chars} 字</span>
+    const ok = chars >= MIN_CHARS;
+    el.innerHTML = `<span class="wz-k ${ok ? 'ok' : chars > 0 ? 'warn' : ''}">${ok ? '✓' : chars > 0 ? '!' : '·'} ${chars} 字</span>
       ${state.filename ? `<span class="wz-k">${esc(cut(state.filename, 26))}</span>` : ''}
-      ${state.preview ? `<span class="wz-k ok">✓ ${state.preview.chapterCount} 章 → ${state.preview.episodeCount} 集</span>` : ''}
-      <span class="wz-k">本地优先</span>`;
+      <span class="wz-k">${ok ? '创建时一并解析分集' : '留空则创建后在第 ① 步上传'}</span>`;
   }
 
-  function renderBody() {
-    const body = $('wz-body');
-    if (state.stage === 1) {
-      body.innerHTML = `
-        <div class="wz-lead"><strong>第 ① 步 · 上传小说与交付设置</strong><span>对应论文式(1) 的输入归一：把长文本整理为可索引的原著语料</span></div>
-        <div class="wz-drop" id="wz-drop">
-          <div class="wz-drop-icon">⇧</div>
-          <strong>拖拽 .txt / .md 到这里，或点击选择文件</strong>
-          <span>也支持直接粘贴正文 · 至少 40 字</span>
-          <div class="wz-drop-actions">
-            <button class="btn" data-act="file">选择文件</button>
-            <button class="btn" data-act="sample">载入示例小说</button>
-          </div>
-        </div>
-        <div class="field"><label>或粘贴小说正文</label><textarea id="wz-text" rows="6" placeholder="雨夜来信&#10;&#10;第一章 没有署名的信&#10;雨下了整夜……">${esc(state.text)}</textarea></div>
-        <div class="field"><label>项目名称（留空自动用书名）</label><input id="wz-name" value="${esc(state.name)}" placeholder="例如：雨夜来信 · 第一季"></div>
-        <div class="wz-meta" id="wz-meta"></div>`;
-      const drop = $('wz-drop');
-      const readFile = (file) => {
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          state.text = String(reader.result || ''); state.filename = file.name;
-          if (!state.name) state.name = file.name.replace(/\.(txt|md|markdown)$/i, '');
-          state.preview = null; state.error = '';
-          $('wz-text').value = state.text; $('wz-name').value = state.name;
-          renderMeta(); renderFoot(); toast(`已载入「${file.name}」`, 'ok');
-        };
-        reader.readAsText(file, 'utf-8');
-      };
-      drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
-      drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-      drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); readFile(e.dataTransfer.files?.[0]); });
-      $('wz-text').addEventListener('input', (e) => { state.text = e.target.value; state.preview = null; state.error = ''; renderMeta(); renderFoot(); });
-      $('wz-name').addEventListener('input', (e) => { state.name = e.target.value; });
-      body.querySelectorAll('[data-act="file"]').forEach((b) => b.addEventListener('click', () => {
-        const input = document.createElement('input');
-        input.type = 'file'; input.accept = '.txt,.md,.markdown,text/plain,text/markdown';
-        input.onchange = () => readFile(input.files?.[0]);
-        input.click();
-      }));
-      body.querySelectorAll('[data-act="sample"]').forEach((b) => b.addEventListener('click', async () => {
-        try {
-          const d = await api('/api/novel/sample');
-          state.text = d.text; state.filename = d.filename;
-          if (!state.name) state.name = '雨夜来信 · 示例';
-          state.preview = null; state.error = '';
-          $('wz-text').value = state.text; $('wz-name').value = state.name;
-          renderMeta(); renderFoot(); toast('示例小说已载入，点「下一步」看分集预览', 'ok');
-        } catch (e) { setError(e.message); }
-      }));
-      renderMeta();
-    } else if (state.stage === 2) {
-      body.innerHTML = `
-        <div class="wz-lead"><strong>第 ② 步 · 分集拆解</strong><span>长篇先压成「集」这一中间粒度，事件→场景→镜头每层只处理合适规模的上下文（式(5) 前置扩展层）</span></div>
-        <div class="wz-label">分集策略</div>
-        <div class="wz-cards" id="wz-strategies">${STRATEGIES.map((s) => `
-          <button class="wz-card ${state.split.strategy === s.id ? 'selected' : ''}" data-strategy="${s.id}">
-            <span class="wz-card-icon">${s.icon}</span><strong>${s.name}</strong><small>${s.hint}</small>
-          </button>`).join('')}</div>
-        <div class="modal-grid" style="margin-top:12px">
-          <div class="field"><label>每集目标字数（300–8000）</label><input id="wz-target" type="number" min="300" max="8000" step="100" value="${state.split.targetChars}"></div>
-          <div class="field"><label>最多集数（1–12）</label><input id="wz-max" type="number" min="1" max="12" value="${state.split.maxEpisodes}"></div>
-        </div>
-        <div class="wz-preview-head"><span>实时分集预览</span><button class="mini-btn" data-act="refresh">↻ 重新计算</button></div>
-        <div class="wz-preview" id="wz-preview"><div class="wz-loading">正在计算分集…</div></div>`;
-      body.querySelectorAll('[data-strategy]').forEach((b) => b.addEventListener('click', () => {
-        state.split.strategy = b.dataset.strategy;
-        body.querySelectorAll('[data-strategy]').forEach((x) => x.classList.toggle('selected', x === b));
-        schedulePreview();
-      }));
-      $('wz-target').addEventListener('input', (e) => { state.split.targetChars = Number(e.target.value) || 1200; schedulePreview(); });
-      $('wz-max').addEventListener('input', (e) => { state.split.maxEpisodes = Number(e.target.value) || 4; schedulePreview(); });
-      body.querySelectorAll('[data-act="refresh"]').forEach((b) => b.addEventListener('click', () => loadPreview(true)));
-      loadPreview();
-    } else {
-      body.innerHTML = `
-        <div class="wz-lead"><strong>第 ③ 步 · 交付物与任务确认</strong><span>创建后在右侧「任务步骤」Tab 逐步执行六步，画布随每一步生长</span></div>
-        <div class="wz-label">最终交付物（至少选一项）</div>
-        <div class="wz-cards two" id="wz-deliver">
-          <button class="wz-card ${state.deliverables.video ? 'selected' : ''}" data-del="video"><span class="wz-card-icon">▶</span><strong>成片视频</strong><small>ComfyUI 真实片段 → ffmpeg 拼接 MP4；Mock 为帧序列预览</small></button>
-          <button class="wz-card ${state.deliverables.pack ? 'selected' : ''}" data-del="pack"><span class="wz-card-icon">▤</span><strong>导演包</strong><small>*.mmxpack.zip · 可导入 ComfyUI MiniMax H3 Director</small></button>
-        </div>
-        <div class="modal-grid" style="margin-top:12px">
-          <div class="field"><label>画幅</label><select id="wz-aspect"><option value="16:9" ${state.aspect === '16:9' ? 'selected' : ''}>16:9 横屏</option><option value="9:16" ${state.aspect === '9:16' ? 'selected' : ''}>9:16 竖屏</option></select></div>
-          <div class="field"><label>画面风格</label><select id="wz-style">${['cinematic', 'noir', 'anime', 'watercolor'].map((v) => `<option value="${v}" ${state.style === v ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-        </div>
-        <div class="wz-label" style="margin-top:14px">创建后立即显示的六步任务</div>
-        <div class="wz-steps">${steps.map((s, i) => `<div class="wz-step-row ${i < 2 ? 'done' : ''}"><span class="wz-step-no">${i < 2 ? '✓' : s.no}</span><span><strong>${esc(s.title)}</strong><small>${esc(s.short)} · ${esc(s.theory?.ref || '')}</small></span><span class="wz-step-state">${i < 2 ? '创建时完成' : '待执行'}</span></div>`).join('')}</div>
-        <div class="wz-summary" id="wz-summary">${esc(summaryText())}</div>`;
-      body.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
-        const k = b.dataset.del;
-        state.deliverables[k] = !state.deliverables[k];
-        if (!state.deliverables.video && !state.deliverables.pack) setError('至少要选择一种交付物');
-        else state.error = '';
-        b.classList.toggle('selected', state.deliverables[k]);
-        const sum = $('wz-summary'); if (sum) sum.textContent = summaryText();
-        renderFoot();
-      }));
-      $('wz-aspect').addEventListener('change', (e) => { state.aspect = e.target.value; });
-      $('wz-style').addEventListener('change', (e) => { state.style = e.target.value; });
-    }
-    renderStages(); renderFoot();
-  }
-
-  let previewTimer = null;
-  function schedulePreview() {
-    clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => loadPreview(), 320);
-  }
-  async function loadPreview(force = false) {
-    if (state.stage !== 2) return;
-    if (state.text.trim().length < 40) { setError('正文至少需要 40 字'); return; }
-    const box = $('wz-preview');
-    if (box) box.innerHTML = '<div class="wz-loading">正在计算分集…</div>';
+  async function onCreate() {
+    if (state.busy) return;
+    if (!state.deliverables.video && !state.deliverables.pack) return setError('至少要选择一种交付物');
+    state.busy = true; state.error = ''; renderFoot();
     try {
-      const d = await api('/api/novel/preview', {
-        text: state.text, filename: state.filename, split: state.split,
+      // 正文不足阈值时按空处理 → 创建骨架，第 ① 步重新上传（后端会再次校验）
+      const text = hasText() ? state.text : '';
+      const project = await api('/api/projects', {
+        kind: 'novel', text, filename: text ? state.filename : '',
+        name: state.name.trim(), split: state.split, deliverables: state.deliverables,
+        style: state.style, aspect: state.aspect,
       });
-      if (!d.ok) { setError(d.message); if (box) box.innerHTML = `<div class="wz-err">${esc(d.message)}</div>`; return; }
-      state.preview = d.preview; state.error = '';
-      if (box) box.innerHTML = `
-        <div class="wz-preview-stat"><span class="ok">✓ ${esc(d.message)}</span><span>章节：${esc(d.preview.chapterTitles.slice(0, 3).join(' / '))}${d.preview.chapterTitles.length > 3 ? ' …' : ''}</span></div>
-        ${d.preview.episodes.map((e) => `<div class="wz-ep"><span class="wz-ep-no">${e.no}</span><span class="wz-ep-main"><strong>${esc(e.title)}</strong><small>${esc(e.summary)}</small><em>钩子：${esc(e.hook)}</em></span><span class="wz-ep-chars">${e.chars} 字</span></div>`).join('')}`;
-      renderFoot(); renderMeta();
-      if (force) toast(`已按「${STRATEGIES.find((s) => s.id === state.split.strategy)?.name}」重算 ${d.preview.episodeCount} 集`, 'ok');
+      close();
+      const skeleton = !project.management?.source?.text;
+      toast(skeleton
+        ? `创作项目「${project.name}」已创建 · 下一步上传小说`
+        : `创作项目「${project.name}」已创建 · ${project.management?.episodes?.length || 0} 集`, 'ok');
+      opts.onCreated?.(project);
+      openStepsGuide({ project, steps, toast, onStart: opts.onStart, onOpenPanel: opts.onOpenPanel });
     } catch (e) {
-      setError(e.message);
-      if (box) box.innerHTML = `<div class="wz-err">${esc(e.message)}</div>`;
+      state.busy = false; setError(e.message); toast(e.message, 'err');
     }
   }
 
-  async function onFoot(act) {
-    if (act === 'close') return close();
-    if (act === 'prev') { state.stage = Math.max(1, state.stage - 1); state.error = ''; renderBody(); return; }
-    if (act === 'next') {
-      if (state.stage === 1 && state.text.trim().length < 40) return setError('正文至少需要 40 字');
-      state.stage = Math.min(3, state.stage + 1); state.error = ''; renderBody(); return;
-    }
-    if (act === 'create') {
-      state.busy = true; renderFoot();
-      try {
-        const project = await api('/api/projects', {
-          kind: 'novel', text: state.text, filename: state.filename,
-          name: state.name.trim(), split: state.split, deliverables: state.deliverables,
-          style: state.style, aspect: state.aspect,
-        });
-        close();
-        toast(`创作项目「${project.name}」已创建 · ${project.management.episodes.length} 集`, 'ok');
-        opts.onCreated?.(project);
-        openStepsGuide({ project, steps, toast, onStart: opts.onStart, onOpenPanel: opts.onOpenPanel });
-      } catch (e) {
-        state.busy = false; setError(e.message); toast(e.message, 'err');
-      }
-    }
-  }
   backdrop.querySelector('[data-act="close"]').addEventListener('click', close);
   renderBody();
   return { close };
 }
 
-/** 创建后的「任务执行步骤」引导：明确列出六步、当前状态与下一步动作 */
+/** 创建后的「任务执行步骤」引导：骨架项目引导去第 ① 步上传小说 */
 export function openStepsGuide({ project, steps = [], toast = () => {}, onStart, onOpenPanel } = {}) {
   const root = $('modal-root');
   const m = project.management || {};
+  const skeleton = !m.source?.text;
   const done = (m.steps || []).filter((s) => s.status === 'done').length;
-  const next = (m.steps || []).find((s) => s.status === 'pending') || null;
+  const next = (m.steps || []).find((s) => s.status !== 'done') || null;
+  const deliverTxt = m.deliverables?.video && m.deliverables?.pack ? '成片视频 + 导演包' : m.deliverables?.pack ? '仅导演包' : '仅成片视频';
+  const sub = skeleton
+    ? `尚未上传小说 · 六步任务全部待执行 · ${deliverTxt} · 无限画布已生成初始节点`
+    : `${m.episodes?.length || 0} 集 · ${(m.source?.totalChars || 0).toLocaleString()} 字 · ${deliverTxt} · 无限画布已生成初始节点`;
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `<div class="modal guide-modal" role="dialog" aria-label="任务执行步骤">
     <div class="guide-head"><span class="guide-badge ok">✓ 已创建</span><h2>${esc(project.name)}</h2>
-      <div class="sub">${m.episodes?.length || 0} 集 · ${(m.source?.totalChars || 0).toLocaleString()} 字 · ${m.deliverables?.video && m.deliverables?.pack ? '成片视频 + 导演包' : m.deliverables?.pack ? '仅导演包' : '仅成片视频'} · 无限画布已生成初始节点</div></div>
+      <div class="sub">${esc(sub)}</div></div>
     <div class="guide-progress"><div class="guide-progress-bar"><i style="width:${Math.round(done / Math.max(1, steps.length) * 100)}%"></i></div><span>${done}/${steps.length} 步已完成</span></div>
     <div class="guide-list">${steps.map((s, i) => {
-      const st = (m.steps || []).find((x) => x.id === s.id)?.status || (i < 2 ? 'done' : 'pending');
+      const st = (m.steps || []).find((x) => x.id === s.id)?.status || 'pending';
       const isNext = next && st !== 'done' && s.id === next.id;
+      const stateTxt = st === 'done' ? (i < 2 ? '创建时已完成' : '已完成')
+        : isNext ? (s.id === 'upload' ? '下一步 · 上传小说' : '下一步') : '待执行';
       return `<div class="guide-row ${st} ${isNext ? 'next' : ''}">
         <span class="guide-no">${st === 'done' ? '✓' : s.no}</span>
         <span class="guide-main"><strong>${esc(s.title)}</strong><small>${esc(s.short)} · ${esc(s.theory?.ref || '')}</small></span>
-        <span class="guide-state">${st === 'done' ? '创建时已完成' : isNext ? '下一步' : '待执行'}</span></div>`;
+        <span class="guide-state">${esc(stateTxt)}</span></div>`;
     }).join('')}</div>
     <div class="guide-tip">状态图例：<span class="lg pending">灰 · 待执行</span><span class="lg running">橙 + 呼吸 · 进行中</span><span class="lg done">绿 ✓ · 已完成</span><span class="lg error">红 · 失败可重试</span>。右侧「任务步骤」Tab 可逐步执行，画布节点同步高亮。</div>
     <div class="modal-actions">
       <button class="btn" data-act="later">稍后再说</button>
       <button class="btn" data-act="panel">查看任务面板</button>
-      <button class="btn primary" data-act="start">▶ 执行第 ${next?.no || 3} 步</button>
+      <button class="btn primary" data-act="start">${skeleton ? '⇧ 上传小说' : `▶ 执行第 ${next?.no || 3} 步`}</button>
     </div>
   </div>`;
   const close = () => backdrop.remove();
   backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
   backdrop.querySelector('[data-act="later"]').addEventListener('click', close);
-  backdrop.querySelector('[data-act="panel"]').addEventListener('click', () => { close(); onOpenPanel?.(); });
-  backdrop.querySelector('[data-act="start"]').addEventListener('click', () => { close(); onStart?.(next?.id); });
+  backdrop.querySelector('[data-act="panel"]').addEventListener('click', () => { close(); onOpenPanel?.(next?.id); });
+  backdrop.querySelector('[data-act="start"]').addEventListener('click', () => {
+    close();
+    if (skeleton) onOpenPanel?.(next?.id || 'upload');
+    else onStart?.(next?.id);
+  });
   root.appendChild(backdrop);
   return { close };
 }

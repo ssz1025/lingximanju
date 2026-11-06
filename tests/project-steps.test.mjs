@@ -143,12 +143,32 @@ test('resetStep 可重置非自动步骤，不能重置自动步骤', () => {
   assert.equal(resetStep(m, 'upload'), null, '自动步骤不应可重置');
 });
 
-test('resetAllSteps 回到初始状态', () => {
-  const m = createManagement({ kind: 'novel', title: 'T' });
+test('resetAllSteps 回到初始状态（已上传小说的项目）', () => {
+  const m = createManagement({
+    kind: 'novel', title: 'T',
+    source: { text: '正文'.repeat(50), chapterCount: 1, totalChars: 200 },
+  });
   startStep(m, 'script'); finishStep(m, 'script');
   resetAllSteps(m);
-  assert.equal(m.steps.filter((s) => s.status === 'done').length, 2, '仅自动两步保持完成');
+  assert.equal(m.steps.filter((s) => s.status === 'done').length, 2, '仅有原著时仅自动两步保持完成');
   assert.equal(m.currentStep, 3);
+});
+
+test('resetAllSteps 骨架项目：六步回到全部待执行', () => {
+  const m = createManagement({ kind: 'novel', title: '骨架', skeleton: true });
+  startStep(m, 'script'); finishStep(m, 'script');
+  resetAllSteps(m);
+  assert.equal(m.steps.filter((s) => s.status === 'done').length, 0, '无原著时 ①② 必须回到待执行，否则出现假完成');
+  assert.equal(m.currentStep, 1, '当前停在第 ① 步');
+});
+
+test('createManagement 骨架模式：六步全 pending 且停在第 ① 步', () => {
+  const m = createManagement({ kind: 'novel', title: '极简', skeleton: true, deliverables: { video: true, pack: true } });
+  assert.equal(m.steps.length, STEPS.length);
+  assert.equal(m.steps.every((s) => s.status === 'pending'), true, '骨架六步全待执行');
+  assert.equal(m.currentStep, 1);
+  assert.equal(m.source.text, '', '尚无原著');
+  assert.equal(m.history[0].detail.includes('骨架'), true, '历史应记录骨架创建');
 });
 
 test('applyManageAction 重命名', () => {
@@ -331,4 +351,49 @@ test('projectIndex 下发 cover 字段（供侧栏卡片渲染）', () => {
   assert.equal(idx2.cover.source, 'comfyui');
   assert.equal(idx2.cover.url, '/assets/x.png');
   assert.equal(idx2.cover.prompt, '海报');
+});
+
+/* ---------------------------------------------------------------- Token 用量统计 */
+test('finishStep 记录本次运行 tokens 并按运行累加，startStep 清空上次明细', () => {
+  const m = createManagement({ kind: 'novel', title: 'T' });
+  startStep(m, 'script');
+  const s1 = finishStep(m, 'script', { ok: true, tokens: { prompt: 100, completion: 40, total: 140, calls: 1 } });
+  assert.equal(s1.tokens.total, 140);
+  assert.equal(s1.tokens.calls, 1);
+  assert.deepEqual(s1.lastTokens, { prompt: 100, completion: 40, total: 140, calls: 1 });
+
+  startStep(m, 'script');
+  assert.equal(m.steps[2].lastTokens, null, '重跑开始时上次运行明细应清空');
+  finishStep(m, 'script', { ok: true, tokens: { prompt: 50, completion: 10, total: 60, calls: 2 } });
+  assert.equal(m.steps[2].tokens.total, 200, 'tokens 按运行累加，重跑不丢历史');
+  assert.equal(m.steps[2].tokens.calls, 3);
+  assert.equal(m.steps[2].lastTokens.total, 60, 'lastTokens 只保留最近一次');
+  assert.ok(m.history[0].detail.includes('200'), '历史应记录 token 汇总');
+});
+
+test('finishStep 未传 tokens 时保持零值，resetStep 清零 tokens', () => {
+  const m = createManagement({ kind: 'novel', title: 'T' });
+  startStep(m, 'script');
+  const s = finishStep(m, 'script');
+  assert.equal(s.tokens.total, 0, 'Mock/auto 步骤无 LLM 调用，tokens 为 0');
+  assert.equal(s.lastTokens, null);
+
+  finishStep(m, 'context', { ok: true, tokens: { prompt: 10, completion: 5, total: 15, calls: 1 } });
+  resetStep(m, 'context');
+  assert.deepEqual(m.steps[3].tokens, { prompt: 0, completion: 0, total: 0, calls: 0 });
+  assert.equal(m.steps[3].lastTokens, null);
+});
+
+test('resetAllSteps 与 projectStats 的 tokens 汇总', () => {
+  const m = createManagement({
+    kind: 'novel', title: 'T',
+    source: { text: '正文'.repeat(50), chapterCount: 1, totalChars: 200 },
+  });
+  finishStep(m, 'script', { ok: true, tokens: { prompt: 100, completion: 30, total: 130, calls: 1 } });
+  finishStep(m, 'context', { ok: true, tokens: { prompt: 220, completion: 70, total: 290, calls: 2 } });
+  const stats = projectStats({ id: 'p', name: 'T', nodes: [], edges: [], management: m });
+  assert.deepEqual(stats.tokens, { prompt: 320, completion: 100, total: 420, calls: 3 });
+
+  resetAllSteps(m);
+  assert.equal(m.steps.every((s) => s.tokens.total === 0 && s.lastTokens === null), true, '全部重置后 tokens 清零');
 });

@@ -135,7 +135,7 @@
 | 双产物 | 第 ⑥ 步后 `final` 节点 `data.directorPack`（可下载 ZIP）/ `data.film`（接入 ComfyUI 后才有 MP4）、`timeline.json` |
 | 项目管理 | 侧栏搜索 / 筛选 / 收藏 / 归档 / 复制 / 标签，管理面板的快照创建与恢复 |
 
-### 6.1 自动化验证（`npm test` → 94 项全通过）
+### 6.1 自动化验证（`npm test` → 112 项全通过）
 
 机制层面的"真的落地"由测试固化，而非仅靠肉眼检查：
 
@@ -153,6 +153,8 @@
 | 交付格式 | `outputModeOf()` 三态映射；导演包 ZIP 经 Python `zipfile.testzip()` 逐条 CRC 校验 |
 | 图调度（DAG 分层） | `tests/graph.test.mjs`：`topoLayers()` 分层、`descendants/ancestors` 上下游子图、`autoLayout()` 自动布局、`validate()` 环检测 |
 | 持久层一致性 | `tests/store.test.mjs`：列表缓存同毫秒连改仍读到最新索引、快照封顶 20 份且同毫秒不互相覆盖 |
+| 极简创建与延迟上传 | `tests/novel-project.test.mjs`：空 text 返回骨架（六步全 pending、停在第 ① 步、不建分集节点但保留画布 DAG）；`attachSource()` 注入节点并完成 ①②；过短正文仍被 40 字校验拦截 |
+| 资源索引与角色复用 | `tests/assets.test.mjs`：按文件名推断类型、`index.json` 自动收录落盘、打标签改名校验、重扫剔除且保护用户元数据、角色名归一化（全角/空白/称谓）、**跨项目角色优先匹配（同名与变体命中、未登记不误配）** |
 | 编排器调度 | `tests/orchestrator.test.mjs`：波次调度、`scope` 白名单、失败与跳过传播、取消与并发保护（全程 mock，无网络请求） |
 | LLM 端点健壮性 | `tests/providers.test.mjs`：挂起端点经 `llmTimeoutMs` 超时后回退 Mock 不永久卡死；调用方已取消时不等完整超时立即失败 |
 

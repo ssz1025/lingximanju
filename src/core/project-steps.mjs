@@ -93,13 +93,24 @@ export const STEPS = [
 export const STEP_BY_ID = Object.fromEntries(STEPS.map((s) => [s.id, s]));
 const uid = (p = 'h') => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 const now = () => Date.now();
+const zeroTokens = () => ({ prompt: 0, completion: 0, total: 0, calls: 0 });
 
-function freshSteps() {
+/**
+ * 初始化六步状态。
+ * opts.pending = true → 骨架项目：六步全部待执行（连① 上传小说也要用户后续完成），
+ * 与「上传后立即创建」的既有行为（auto 步骤直接 done）保持兼容。
+ */
+function freshSteps(opts = {}) {
+  const pending = !!opts.pending;
   return STEPS.map((s) => ({
-    id: s.id, no: s.no, status: s.auto ? 'done' : 'pending',
-    startedAt: s.auto ? now() : null, finishedAt: s.auto ? now() : null,
-    durationMs: 0, note: s.auto ? '新建创作项目时由服务端完成' : '',
-    runs: s.auto ? 1 : 0,
+    id: s.id, no: s.no,
+    status: pending || !s.auto ? 'pending' : 'done',
+    startedAt: pending ? null : s.auto ? now() : null,
+    finishedAt: pending ? null : s.auto ? now() : null,
+    durationMs: 0,
+    note: pending ? '' : s.auto ? '新建创作项目时由服务端完成' : '',
+    runs: pending || !s.auto ? 0 : 1,
+    tokens: zeroTokens(), lastTokens: null,
   }));
 }
 
@@ -114,7 +125,7 @@ export function createManagement(opts = {}) {
     // source:'upload' / 'comfyui' 时 url 指向 /assets/ 下的图片
     cover: { url: '', source: 'name', updatedAt: now(), prompt: '' },
     createdAt: now(), updatedAt: now(), version: 1,
-    history: [{ id: uid(), at: now(), action: 'create', detail: kind === 'novel' ? '新建创作项目（小说分集）' : '标准流水线项目' }],
+    history: [{ id: uid(), at: now(), action: 'create', detail: kind === 'novel' ? (opts.skeleton ? '新建创作项目骨架（待上传小说）' : '新建创作项目（小说分集）') : '标准流水线项目' }],
   };
   if (kind !== 'novel') return { ...base, steps: [], currentStep: 0, deliverables: { video: true, pack: true } };
   return {
@@ -138,8 +149,9 @@ export function createManagement(opts = {}) {
       no: e.no, title: e.title, chars: e.chars, summary: e.summary, hook: e.hook,
       sourceTitles: e.sourceTitles || [],
     })),
-    steps: freshSteps(),
-    currentStep: 3,
+    // 骨架项目（尚未上传小说）：六步全 pending、当前停在第 ① 步
+    steps: freshSteps({ pending: !!opts.skeleton }),
+    currentStep: opts.skeleton ? 1 : 3,
     theory: { paper: 'ViMax · arXiv:2606.07649v2', doc: 'docs/THEORY.md', defaults: { k: 2, anchorRequired: true, ragRequired: true, eventChainRequired: true } },
   };
 }
@@ -182,29 +194,54 @@ export function startStep(m, id) {
   if (!s) return null;
   s.status = 'running'; s.startedAt = now(); s.finishedAt = null; s.note = '智能体执行中…';
   s.runs = (s.runs || 0) + 1;
+  if (!s.tokens) s.tokens = zeroTokens();
+  s.lastTokens = null;                       // 本次运行明细从零开始，完成时写入
   m.currentStep = s.no;
   m.status = 'running';
   logHistory(m, 'step:start', `第 ${s.no} 步 · ${STEP_BY_ID[id]?.title || id}`);
   return s;
 }
 
-export function finishStep(m, id, { ok = true, note = '', durationMs = 0 } = {}) {
+/** 把本次运行的 token 用量累加进步骤：tokens 为全周期累计，lastTokens 为最近一次运行明细 */
+function addTokens(step, usage) {
+  if (!usage) return;
+  const t = step.tokens || zeroTokens();
+  const last = { prompt: 0, completion: 0, total: 0, calls: 0 };
+  for (const k of ['prompt', 'completion', 'total', 'calls']) {
+    const v = Number(usage[k]) || 0;
+    t[k] = (t[k] || 0) + v;
+    last[k] = v;
+  }
+  step.tokens = t;
+  step.lastTokens = last;
+}
+
+export function finishStep(m, id, { ok = true, note = '', durationMs = 0, tokens = null } = {}) {
   const s = m.steps?.find((x) => x.id === id);
   if (!s) return null;
   s.status = ok ? 'done' : 'error';
   s.finishedAt = now(); s.durationMs = durationMs;
   s.note = note || (ok ? '执行完成' : '执行失败，可重试');
+  if (!s.tokens) s.tokens = zeroTokens();
+  addTokens(s, tokens);
   const p = stepProgress(m);
   m.currentStep = p.currentNo;
   m.status = p.failed ? 'error' : p.allDone ? 'done' : 'draft';
-  logHistory(m, ok ? 'step:done' : 'step:error', `第 ${s.no} 步 · ${STEP_BY_ID[id]?.title || id} · ${s.note}`);
+  const tokNote = s.tokens.total ? ` · ${fmtTokens(s.tokens.total)} tokens` : '';
+  logHistory(m, ok ? 'step:done' : 'step:error', `第 ${s.no} 步 · ${STEP_BY_ID[id]?.title || id} · ${s.note}${tokNote}`);
   return s;
+}
+
+/** token 数字格式化：≥1000 显示 x.xk（前端同规则） */
+function fmtTokens(n) {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
 export function resetStep(m, id) {
   const s = m.steps?.find((x) => x.id === id);
   if (!s || STEP_BY_ID[id]?.auto) return null;
   s.status = 'pending'; s.startedAt = null; s.finishedAt = null; s.note = '已重置，等待重新执行'; s.durationMs = 0;
+  s.tokens = zeroTokens(); s.lastTokens = null;
   m.currentStep = s.no; m.status = 'draft';
   logHistory(m, 'step:reset', `第 ${s.no} 步已重置`);
   return s;
@@ -212,8 +249,10 @@ export function resetStep(m, id) {
 
 export function resetAllSteps(m) {
   if (!m.steps?.length) return m;
-  m.steps = freshSteps();
-  m.currentStep = 3; m.status = 'draft';
+  // 骨架项目（还没上传小说）重置后 ①② 必须回到 pending，否则会出现「已完成但无原著」的假状态
+  m.steps = freshSteps({ pending: m.kind === 'novel' && !m.source?.text });
+  m.currentStep = m.kind === 'novel' && !m.source?.text ? 1 : 3;
+  m.status = 'draft';
   logHistory(m, 'steps:reset', '六步任务状态已全部重置（节点状态未改动，可用「从此处重跑」）');
   return m;
 }
@@ -299,6 +338,11 @@ export function projectStats(project) {
   const m = ensureManagement(project);
   const final = nodes.find((n) => n.type === 'final');
   const p = stepProgress(m);
+  // Token 汇总：六步累计 + 最近一次运行（不含标准项目 runs，标准项目见 runs[].tokens）
+  const sumTokens = (m.steps || []).reduce((acc, s) => {
+    for (const k of ['prompt', 'completion', 'total', 'calls']) acc[k] += s.tokens?.[k] || 0;
+    return acc;
+  }, { prompt: 0, completion: 0, total: 0, calls: 0 });
   return {
     nodeCount: nodes.length, edgeCount: edges.length,
     doneNodes: nodes.filter((n) => n.status === 'done').length,
@@ -310,6 +354,8 @@ export function projectStats(project) {
     episodeCount: (m.episodes || []).length,
     runCount: (project.runs || []).length,
     lastRunAt: project.runs?.[0]?.finishedAt || null,
+    tokens: sumTokens,
+    lastRunTokens: project.runs?.[0]?.tokens || null,
     progress: p,
     film: final?.data?.film?.file ? { file: final.data.film.file, bytes: final.data.film.bytes } : null,
     pack: final?.data?.directorPack?.file ? {

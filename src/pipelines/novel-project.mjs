@@ -5,11 +5,15 @@
  * 在原图之上插入「小说上传 / 分集目录」节点，并把原著全文、分集表、交付设置
  * 注入对应节点，使后续智能体真正读到用户上传的内容。
  * 六步任务由 src/core/project-steps.mjs 定义，见 docs/THEORY.md。
+ *
+ * 两种创建路径（产出一致的节点结构）：
+ *   · 上传后创建（text 非空）→ 骨架 + 立即 attachSource，①② 步创建即完成
+ *   · 极简创建（不传 text）  → 只建骨架，六步全待执行，小说上传延后到第 ① 步
  * ==========================================================================*/
 import { buildTemplate } from './templates.mjs';
 import { makeNode, makeEdge } from '../core/agent.mjs';
 import { parseNovel, splitEpisodes, validateNovelInput, extractCharacters } from '../core/novel.mjs';
-import { createManagement, ensureManagement } from '../core/project-steps.mjs';
+import { createManagement, ensureManagement, finishStep } from '../core/project-steps.mjs';
 
 const cut = (s, n) => { const t = String(s || '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
 
@@ -20,10 +24,8 @@ export function outputModeOf(deliverables = {}) {
   return video && pack ? 'both' : video ? 'video' : 'director-pack';
 }
 
-export function buildNovelProject(opts = {}) {
-  const checked = validateNovelInput(opts.text, { filename: opts.filename, split: opts.split });
-  if (!checked.ok) throw new Error(checked.message);
-  const { novel, episodes } = checked;
+/** 交付物与分集参数解析（骨架与完整创建共用） */
+function resolveOpts(opts = {}) {
   const deliverables = {
     video: opts.deliverables?.video !== false,
     pack: opts.deliverables?.pack !== false,
@@ -34,16 +36,83 @@ export function buildNovelProject(opts = {}) {
     targetChars: Number(opts.split?.targetChars) || 1200,
     maxEpisodes: Number(opts.split?.maxEpisodes) || 4,
   };
-  const name = String(opts.name || '').trim().slice(0, 80) || `${novel.title} · 小说分集`;
+  return { deliverables, split };
+}
+
+/**
+ * 极简创建的骨架项目：不上传小说也能先建项目——保留完整 DAG（画布必须保留），
+ * 六步全部待执行；小说解析与分集延后到第 ① 步（attachSource）完成。
+ */
+export function buildNovelSkeleton(opts = {}) {
+  const { deliverables, split } = resolveOpts(opts);
+  const name = String(opts.name || '').trim().slice(0, 80) || '未命名创作项目';
+
+  const project = buildTemplate('novel2video', {
+    name, style: opts.style || 'cinematic',
+    idea: `${name}｜待上传小说`,
+  });
+
+  const idea = project.nodes.find((n) => n.type === 'idea');
+  const script = project.nodes.find((n) => n.type === 'script');
+  const rag = project.nodes.find((n) => n.type === 'rag');
+  const characterNode = project.nodes.find((n) => n.type === 'character');
+  const plan = project.nodes.find((n) => n.type === 'plan');
+  const note = project.nodes.find((n) => n.type === 'note');
+
+  idea.title = '小说上传 · 待开始';
+  idea.data = {
+    text: '', kind: '小说原著',
+    summary: '尚未上传小说 · 执行第 ① 步即可选择文件或粘贴正文',
+  };
+
+  script.title = '剧本生成 · 式(1)';
+  script.agent = 'screenwriter';
+  script.data = { ...(script.data || {}), summary: '待第 ①② 步完成后注入分集梗概' };
+
+  rag.title = '原著索引 / RAG · 式(6)';
+  rag.data = { ...(rag.data || {}), summary: '待上传小说后建立原著索引' };
+
+  characterNode.data = { ...(characterNode.data || {}), summary: '待上传小说后抽取角色并匹配资源库' };
+  plan.data = { ...(plan.data || {}), sceneLimit: 2, shotsPerScene: 3, summary: '待上传小说后展开事件 → 场景 → 镜头' };
+
+  note.data = {
+    ...(note.data || {}),
+    title: '创作项目 · 六步任务',
+    text: '① 上传小说 · 待执行\n② 分集拆解 · 待执行\n③ 剧本与格式统一 · 式(1)\n④ RAG / 角色 / 层次分解 · 式(5)(6)\n⑤ 分镜 · 机位 · 择优 · 式(2)(3)(4)(7)(8)\n⑥ 成片视频 / 导演包交付\n\n右侧「任务步骤」Tab 可逐步执行；画布始终可拖拽、缩放、连线。',
+    summary: '六步任务 · 待上传小说',
+  };
+
+  project.management = createManagement({ kind: 'novel', title: name, deliverables, split, skeleton: true });
+  project.settings = {
+    ...(project.settings || {}),
+    k: 2, concurrency: 3, style: opts.style || 'cinematic', aspect: opts.aspect || '16:9',
+    comfy: { ...(project.settings?.comfy || {}), outputMode: outputModeOf(deliverables) },
+  };
+  project.viewport = { x: 40, y: 20, zoom: 0.6 };
+  return project;
+}
+
+/**
+ * 上传 / 粘贴小说：解析 → 分集 → 注入画布节点，并把第 ①② 步标记完成。
+ * 骨架项目与「上传后创建」的项目共用此入口。
+ */
+export function attachSource(project, opts = {}) {
+  const m = ensureManagement(project);
+  if (m.kind !== 'novel') throw new Error('只有创作项目可以上传小说');
+  const split = { ...(m.split || {}), ...(opts.split || {}) };
+  const checked = validateNovelInput(opts.text, { filename: opts.filename, split });
+  if (!checked.ok) throw new Error(checked.message);
+  const { novel, episodes } = checked;
   const characters = extractCharacters(novel.text);
   const firstEpisodeExcerpt = cut(episodes[0]?.text || novel.text, 1000);
   const logline = cut(episodes[0]?.summary || novel.text, 70);
 
-  // 基础 DAG：idea → script → rag/character → plan → camera → final，另有 note
-  const project = buildTemplate('novel2video', {
-    name, style: opts.style || 'cinematic',
-    idea: `${novel.title}｜${logline}`,
-  });
+  // 重复上传：先清掉旧分集节点与其连线
+  const oldIds = new Set(project.nodes.filter((n) => n.type === 'episode').map((n) => n.id));
+  if (oldIds.size) {
+    project.nodes = project.nodes.filter((n) => !oldIds.has(n.id));
+    project.edges = project.edges.filter((e) => !oldIds.has(e.from) && !oldIds.has(e.to));
+  }
 
   const idea = project.nodes.find((n) => n.type === 'idea');
   const script = project.nodes.find((n) => n.type === 'script');
@@ -54,17 +123,19 @@ export function buildNovelProject(opts = {}) {
 
   idea.title = `小说上传 · ${cut(novel.title, 14)}`;
   idea.data = {
+    ...(idea.data || {}),
     text: cut(novel.text, 160), kind: '小说原著',
     summary: `${novel.title}｜${novel.chapterCount} 章 · ${novel.totalChars} 字 · 拆为 ${episodes.length} 集`,
     novel: { id: novel.id, title: novel.title, filename: novel.filename, totalChars: novel.totalChars, chapterCount: novel.chapterCount },
     chapterTitles: novel.chapters.slice(0, 12).map((c) => c.title),
+    // 原著全文不重复塞进画布节点（太大），统一存 management.source.text
+    fullTextRef: 'management.source.text',
   };
-  // 原著全文不重复塞进画布节点（太大），统一存 management.source.text
-  idea.data.fullTextRef = 'management.source.text';
 
   script.title = '剧本生成 · 式(1)';
   script.agent = 'screenwriter';
   script.data = {
+    ...(script.data || {}),
     text: `《${novel.title}》｜${logline}\n${firstEpisodeExcerpt}`,
     novelTitle: novel.title,
     novelExcerpt: firstEpisodeExcerpt,
@@ -73,7 +144,6 @@ export function buildNovelProject(opts = {}) {
     summary: `等待编剧智能体 · ${episodes.length} 集梗概已注入`,
   };
 
-  rag.title = '原著索引 / RAG · 式(6)';
   rag.data = {
     ...(rag.data || {}),
     originalCorpus: novel.text.slice(0, 12000),
@@ -94,11 +164,10 @@ export function buildNovelProject(opts = {}) {
       kind: '分集',
     },
   }));
-  // 两列时 x=210 会靠近 script(x=380) 但 y≥620 不重叠；保持连线清晰
   for (const n of episodeNodes) {
     project.nodes.push(n);
-    project.edges.push(makeEdge(idea.id, n.id, 'flow'));
-    project.edges.push(makeEdge(n.id, script.id, 'ref'));
+    if (idea) project.edges.push(makeEdge(idea.id, n.id, 'flow'));
+    if (script) project.edges.push(makeEdge(n.id, script.id, 'ref'));
   }
 
   note.data = {
@@ -108,19 +177,43 @@ export function buildNovelProject(opts = {}) {
     summary: '六步任务 · 见右侧「任务步骤」',
   };
 
-  project.management = createManagement({
-    kind: 'novel', title: name,
-    deliverables, split,
-    source: { filename: novel.filename, title: novel.title, totalChars: novel.totalChars, chapterCount: novel.chapterCount, text: novel.text },
-    episodes,
-  });
-  project.settings = {
-    ...(project.settings || {}),
-    k: 2, concurrency: 3, style: opts.style || 'cinematic', aspect: opts.aspect || '16:9',
-    comfy: { ...(project.settings?.comfy || {}), outputMode: outputModeOf(deliverables) },
+  m.source = {
+    filename: novel.filename || '', title: novel.title,
+    totalChars: novel.totalChars, chapterCount: novel.chapterCount,
+    uploadedAt: Date.now(), text: novel.text,
   };
-  project.viewport = { x: 40, y: 20, zoom: 0.6 };
-  return { project, novel, episodes };
+  m.episodes = episodes.map((e) => ({ no: e.no, title: e.title, chars: e.chars, summary: e.summary, hook: e.hook, sourceTitles: e.sourceTitles || [] }));
+  m.split = split;
+
+  const t0 = Date.now();
+  finishStep(m, 'upload', { ok: true, note: `已解析 ${novel.chapterCount} 章 · ${novel.totalChars} 字`, durationMs: Date.now() - t0 });
+  finishStep(m, 'episodes', { ok: true, note: `按 ${split.strategy} 策略拆为 ${episodes.length} 集`, durationMs: Date.now() - t0 });
+  m.updatedAt = Date.now();
+
+  return {
+    novel, episodes,
+    message: `已上传《${novel.title}》· ${novel.chapterCount} 章 ${novel.totalChars} 字 · 拆为 ${episodes.length} 集`,
+  };
+}
+
+/**
+ * 新建创作项目。
+ *   text 非空 → 骨架 + 立即注入（保持原「上传后创建」行为，①② 创建即完成）
+ *   text 为空 → 极简骨架，六步全待执行，小说延后到第 ① 步上传
+ */
+export function buildNovelProject(opts = {}) {
+  const hasText = String(opts.text || '').trim().length > 0;
+  let name = opts.name;
+  if (hasText && !String(name || '').trim()) {
+    // 未命名时保持原行为：用书名命名（校验失败则不建项目）
+    const v = validateNovelInput(opts.text, { filename: opts.filename, split: opts.split });
+    if (!v.ok) throw new Error(v.message);
+    name = `${v.novel.title} · 小说分集`;
+  }
+  const project = buildNovelSkeleton({ ...opts, name });
+  if (!hasText) return { project, novel: null, episodes: [], skeleton: true };
+  const r = attachSource(project, opts);
+  return { project, ...r, skeleton: false };
 }
 
 /**
@@ -129,7 +222,8 @@ export function buildNovelProject(opts = {}) {
  */
 export function refreshEpisodes(project, opts = {}) {
   const m = ensureManagement(project);
-  if (m.kind !== 'novel' || !m.source?.text) throw new Error('当前项目不是小说创作项目，无法重新分集');
+  if (m.kind !== 'novel') throw new Error('当前项目不是小说创作项目，无法重新分集');
+  if (!m.source?.text) throw new Error('尚未上传小说，先完成第 ① 步再重新分集');
   const split = { ...(m.split || {}), ...(opts.split || {}) };
   const checked = validateNovelInput(m.source.text, { filename: m.source.filename, split });
   if (!checked.ok) throw new Error(checked.message);

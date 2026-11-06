@@ -617,6 +617,7 @@ export function renderInspector(node, project, handlers) {
 
     <div class="insp-card"><h4>编辑</h4>${fieldHTML}
       <div class="insp-actions">
+        <button class="btn" data-act="pick-asset">▣ 从资源库选图</button>
         <button class="btn" data-act="rerun">↻ 从此处重跑</button>
         <button class="btn" data-act="focus">⌖ 聚焦</button>
         <button class="btn" data-act="dup">⧉ 复制</button>

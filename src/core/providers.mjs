@@ -243,7 +243,7 @@ function extractJSON(text = '') {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-export function createProviders(settings = {}, log = () => {}) {
+export function createProviders(settings = {}, log = () => {}, onUsage = null) {
   const mode = settings.provider === 'openai' && settings.baseUrl && settings.apiKey ? 'openai' : 'mock';
   const comfy = settings.comfy || null;
   const comfyWorkflows = { image: null, video: null };
@@ -307,7 +307,13 @@ export function createProviders(settings = {}, log = () => {}) {
   // 端点挂起兜底：LLM 调用没有超时会让节点永久卡死；超时按普通失败处理，回退 Mock
   const LLM_TIMEOUT_MS = Number(settings.llmTimeoutMs) || 120_000;
 
-  async function callLLM(system, user, callerSignal) {
+  // Token 用量采集：每次真实 LLM 调用产出一条记录，经 onUsage 回调交给上层归集
+  function reportUsage(record) {
+    if (!onUsage) return;
+    try { onUsage(record); } catch (err) { log('warn', `token 统计回调异常：${err.message}`); }
+  }
+
+  async function callLLM(system, user, callerSignal, meta = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(new Error(`LLM 调用超时（${LLM_TIMEOUT_MS / 1000}s）`)), LLM_TIMEOUT_MS);
     const onAbort = () => ctrl.abort(callerSignal?.reason);
@@ -329,7 +335,19 @@ export function createProviders(settings = {}, log = () => {}) {
       });
       if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 160)}`);
       const json = await res.json();
-      return extractJSON(json?.choices?.[0]?.message?.content || '');
+      const content = json?.choices?.[0]?.message?.content || '';
+      // OpenAI 兼容端点在响应里自带 usage；缺失时按字符估算（CJK 场景 ≈ 2 字符/token）
+      const u = json?.usage || {};
+      const promptTokens = Number(u.prompt_tokens) || Math.ceil(String(system).length / 2);
+      const completionTokens = Number(u.completion_tokens) || Math.ceil(String(content).length / 2);
+      reportUsage({
+        intent: meta.intent || '', model: json?.model || settings.model || 'gpt-4o-mini', ts: Date.now(),
+        promptTokens, completionTokens,
+        totalTokens: Number(u.total_tokens) || promptTokens + completionTokens,
+        calls: 1,
+        estimated: !json?.usage,
+      });
+      return extractJSON(content);
     } finally {
       clearTimeout(timer);
       if (attached) callerSignal.removeEventListener('abort', onAbort);   // 长运行中避免在 run 级 signal 上堆积监听器
@@ -344,9 +362,12 @@ export function createProviders(settings = {}, log = () => {}) {
         const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。` +
           (vars.fragments ? '输入中的 fragments 是原著检索片段（FRAGMENT 标签），镜头/场景描述必须与其人物、道具、环境、光线保持一致，不要引入矛盾设定。' : '');
         const user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(vars, null, 2)}`;
-        const out = await callLLM(system, user, signal);
+        const out = await callLLM(system, user, signal, { intent });
         return mergeDefaults(intent, out, vars);
       } catch (err) {
+        // 失败回退 Mock 也计入调用次数（tokens 为 0），保证「调用了真实端点」这件事可审计
+        reportUsage({ intent, model: settings.model || 'gpt-4o-mini', ts: Date.now(),
+          promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 1, estimated: false, fallback: true });
         log('warn', `模型调用失败，已回退 Mock：${err.message}`);
       }
     }

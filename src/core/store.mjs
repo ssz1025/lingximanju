@@ -98,6 +98,37 @@ export function readAsset(name) {
   return fs.existsSync(file) ? fs.readFileSync(file) : null;
 }
 
+const ASSET_TYPES = {
+  image: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'],
+  video: ['.mp4', '.webm', '.mov'],
+};
+
+/** 全量资产索引：资源库弹窗与复用选择都从这里取数 */
+export function listAssets() {
+  if (!fs.existsSync(ASSET_DIR)) return [];
+  return fs.readdirSync(ASSET_DIR)
+    .map((name) => {
+      try {
+        const st = fs.statSync(path.join(ASSET_DIR, name));
+        if (!st.isFile()) return null;
+        const ext = path.extname(name).toLowerCase();
+        const type = ASSET_TYPES.image.includes(ext) ? 'image'
+          : ASSET_TYPES.video.includes(ext) ? 'video' : 'other';
+        return { name, url: `/assets/${name}`, type, ext: ext.slice(1), size: st.size, mtime: st.mtimeMs };
+      } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+export function deleteAsset(name) {
+  const safe = String(name).replace(/[^a-zA-Z0-9_.-]/g, '');
+  const file = path.join(ASSET_DIR, safe);
+  if (!fs.existsSync(file)) return false;
+  fs.unlinkSync(file);
+  return true;
+}
+
 /* ---------------- 项目快照：手动版本点，可随时恢复 ---------------- */
 const snapshotDirOf = (id) => path.join(SNAPSHOT_DIR, String(id).replace(/[^a-zA-Z0-9_-]/g, ''));
 const SNAPSHOT_KEEP = 20;   // 与 listSnapshots 展示上限一致：每份都是项目全量副本，必须封顶

@@ -161,7 +161,8 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/bootstrap` | 项目列表 + 最近项目 + 节点类型注册表 + 模板列表 |
-| POST | `/api/projects` | 新建项目（可带 `template`） |
+| POST | `/api/projects` | 新建项目（可带 `template`）；`kind:'novel'` 且不带 `text` 时创建**极简骨架**（六步全 pending，小说延后到第 ① 步） |
+| POST | `/api/projects/:id/source` | **延迟上传小说**：解析 + 分集 + 注入节点 + 完成 ①② 步（骨架项目的第 ① 步入口） |
 | GET / PUT / DELETE | `/api/projects/:id` | 读取 / 保存画布快照 / 删除项目 |
 | POST | `/api/projects/:id/template` | 应用流水线模板，重建节点图 |
 | POST | `/api/projects/:id/run` | 启动编排，body 可带 `nodeId`（单节点及下游重跑） |
@@ -177,6 +178,9 @@
 | POST | `/api/comfyui/analyze` | 分析 API 工作流并列出可注入节点 |
 | POST | `/api/comfyui/run-test` | 试跑一次工作流并返回下载到的资产 |
 | GET | `/api/events` | SSE 事件流 |
+| GET | `/api/assets` | 资源库全量索引（`index.json` 元数据：类型 / 名称 / 标签 / 来源项目）+ 统计 |
+| PATCH / DELETE | `/api/assets/:file` | 改名 / 打标签 / 改类型；删除（被项目引用时 409 拒绝） |
+| POST | `/api/assets/reindex` | 重扫 `data/assets/`：收录新文件、剔除已删除文件 |
 | GET | `/assets/*` | 生成的 SVG / PNG / MP4 / ZIP 资产 |
 
 设计原则：**画布是唯一事实来源**。前端编辑节点/连线后 PUT 全量快照；后端编排时改动通过 SSE 增量推送，前端合并后再 PUT 落盘，避免双写冲突。
@@ -506,7 +510,7 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | `npm test` → **94 项全部通过**（`novel` 16 / `project-steps` 27 / `novel-project` 11 / `knowledge` 11 / `comfy-lib` 8 / `comfy-lib-api` 5 / `graph` 6 / `store` 4 / `orchestrator` 4 / `providers` 2），零依赖、毫秒级 |
+| 单元测试 | `npm test` → **112 项全部通过**（`novel` 16 / `project-steps` 32 / `novel-project` 13 / `knowledge` 11 / `comfy-lib` 8 / `comfy-lib-api` 5 / `graph` 6 / `store` 4 / `assets` 8 / `orchestrator` 4 / `providers` 5），零依赖、毫秒级 |
 | 后端 HTTP 闭环 | 新建创作项目 → 第 ③ 步 → 全部执行：`6/6` 步、42 节点 / 64 连线（2 集）、6 镜头、8 条 anchor、14 条 ref、0 失败，导演包 25 文件 CRC 全通过 |
 | 上传内容生效 | 剧本场景来自原著章节（「第一章 没有署名的信」/「第四章 回到码头」），角色抽取为沈砚 / 林夏等原著人物 |
 | 项目管理 | 重命名 / 收藏 / 标签 / 备注 / 归档 / 交付设置 / 复制 / 快照 / 恢复 / 删除全部通过，原有 4 个示例项目未受影响 |

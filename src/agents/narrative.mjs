@@ -1,6 +1,7 @@
 // 叙事组 / 资产组 / 镜头规划智能体
 import { defineAgent } from '../core/agent.mjs';
 import { hash } from '../core/artwork.mjs';
+import { matchCharacters, registerAsset } from '../core/assets.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
   saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
 
@@ -145,23 +146,53 @@ defineAgent({
 
 defineAgent({
   id: 'character', label: '角色造型智能体', group: '资产', icon: '◉', color: '#f472b6',
-  description: '抽取角色、生成三视图定妆资产，供所有镜头以 ref 边复用',
+  description: '抽取角色、生成三视图定妆资产，供所有镜头以 ref 边复用；优先匹配资源库已生成的角色',
   async run(ctx) {
     const script = findScript(ctx) || { characters: [] };
     ctx.progress(0.2);
     const res = await ctx.providers.generate('characters', { characters: script.characters }, ctx.signal);
+    const wanted = res.characters || [];
+    // 优先匹配：资源库里已有同名角色定妆图（可来自其他项目）→ 直接复用，不再重复生成
+    const { map: matched, reused } = matchCharacters(wanted);
+    if (reused) ctx.log('info', `资源库命中 ${reused}/${wanted.length} 位已生成角色，直接复用定妆图（可打标签共享给其他项目）`);
     const characters = [];
-    for (let i = 0; i < (res.characters || []).length; i++) {
-      const c = res.characters[i];
+    let generated = 0;
+    for (let i = 0; i < wanted.length; i++) {
+      const c = wanted[i];
+      const hit = matched[c.name];
+      if (hit) {
+        characters.push({
+          ...c, portraitUrl: `/assets/${hit.file}`, assetKind: '三视图',
+          reused: true, matchedAssetId: hit.id, matchedFrom: hit.sourceProjectName || hit.sourceProjectId || '资源库',
+        });
+        ctx.progress(0.2 + (i + 1) / (wanted.length + 1) * 0.7);
+        continue;
+      }
       const img = await ctx.providers.image({
         kind: 'character', label: c.name, prompt: c.appearance,
         style: ctx.settings.style, seed: `${ctx.project.id}-${c.name}`,
       }, ctx.signal);
-      characters.push({ ...c, portraitUrl: img.url, assetKind: '三视图' });
-      ctx.progress(0.2 + (i + 1) / (res.characters.length + 1) * 0.7);
+      // 登记进资源库：类型=角色 + 名称=角色名，后续项目按名匹配即可复用
+      const file = String(img.url || '').startsWith('/assets/') ? img.url.slice(8) : '';
+      if (file) {
+        registerAsset({
+          file, kind: 'character', name: c.name,
+          tags: ['角色', c.role || c.name].filter(Boolean),
+          sourceProjectId: ctx.project.id, sourceProjectName: ctx.project.name,
+        });
+      }
+      characters.push({ ...c, portraitUrl: img.url, assetKind: '三视图', reused: false });
+      generated++;
+      ctx.progress(0.2 + (i + 1) / (wanted.length + 1) * 0.7);
     }
-    ctx.patch({ characters, registry: characters.map((c) => c.name), summary: `${characters.length} 位角色 · 三视图已锁定` });
-    ctx.log('info', `角色资产库就绪，后续镜头通过 ref 边引用，避免跨镜头身份漂移`);
+    ctx.patch({
+      characters, registry: characters.map((c) => c.name),
+      reusedCount: reused, generatedCount: generated,
+      summary: `${characters.length} 位角色 · 复用 ${reused} · 新生成 ${generated} · 三视图已锁定`,
+    });
+    ctx.log('info', reused
+      ? `角色资产库就绪：复用 ${reused} 张、新生成 ${generated} 张；后续镜头通过 ref 边引用，避免跨镜头身份漂移`
+      : '角色资产库就绪，后续镜头通过 ref 边引用，避免跨镜头身份漂移');
   },
 });
 

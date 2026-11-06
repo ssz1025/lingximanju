@@ -3,6 +3,7 @@ import { CanvasController } from './canvas.js';
 import { NODE_TYPES, PALETTE_ORDER, typeOf, STATUS_LABEL } from './nodes.js';
 import * as UI from './panels.js';
 import { openLinkPicker, closeLinkPicker, isLinkPickerOpen } from './link-picker.js';
+import { openAssetLibrary } from './asset-manager.js';
 import { openCreationWizard } from './wizard.js';
 import * as PM from './project-manager.js';
 
@@ -11,6 +12,7 @@ const state = {
   project: null, projects: [], templates: [], agents: [], selected: [],
   running: false, logs: [], movedByUser: false, nodeCountBeforeRun: 0,
   steps: [], stats: {}, projectStats: {}, stepBusy: false,
+  liveTokens: null,   // 本次运行的实时 token 计数（llm:usage 事件驱动，落库后清空）
 };
 let saveTimer = null;
 let renderScheduled = false;
@@ -227,13 +229,23 @@ function handleEvent(e) {
     p.management = e.management;
     // e.stats 是「单个项目」的统计；state.stats 是侧栏用的「全部项目」统计，二者不能混用
     if (e.stats) state.projectStats = e.stats;
+    state.liveTokens = null;   // 步骤落库后以持久化数据为准，清实时计数
     renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
+    return;
+  }
+
+  // 单次 LLM 调用的 token 用量：实时累加展示（步骤完成后由 project:meta 的持久化数据接管）
+  if (e.type === 'llm:usage') {
+    state.liveTokens = e.tokens ? { ...e.tokens, estimated: !!e.estimated } : null;
+    updateRunUI();
+    renderStepPanel();
     return;
   }
 
   switch (e.type) {
     case 'run:start':
       state.running = true; state.nodeCountBeforeRun = p.nodes.length;
+      state.liveTokens = null;
       state.logs = []; updateRunUI();
       UI.toast('编排已启动，画布会随智能体执行自动生长', 'ok');
       break;
@@ -292,12 +304,15 @@ function handleEvent(e) {
     case 'run:done':
     case 'run:error':
       state.running = false;
+      state.liveTokens = null;
       updateRunUI();
       if (e.type === 'run:error' && e.status !== 'cancelled') UI.toast(e.message || '运行异常结束', 'err');
       else if (e.status === 'cancelled') UI.toast('运行已取消，已完成节点保留');
       else {
         const s = e.summary || {};
-        UI.toast(`编排完成 · ${s.nodeCount || 0} 节点 · ${s.waves || 0} 波 · ${((s.durationMs || 0) / 1000).toFixed(1)}s`, 'ok');
+        const tk = s.tokens?.total;
+        const tokNote = tk ? ` · ${(tk >= 1000 ? (tk / 1000).toFixed(1) + 'k' : tk)} tokens` : '';
+        UI.toast(`编排完成 · ${s.nodeCount || 0} 节点 · ${s.waves || 0} 波 · ${((s.durationMs || 0) / 1000).toFixed(1)}s${tokNote}`, 'ok');
       }
       syncProject().then(() => {
         if (!state.movedByUser && state.project && state.project.nodes.length > state.nodeCountBeforeRun + 6) {
@@ -369,7 +384,9 @@ function updateRunUI() {
   $('btn-stop').hidden = !state.running;
   const box = $('run-status');
   box.className = `run-status ${state.running ? 'running' : ''}`;
-  $('run-status-text').textContent = state.running ? '智能体运行中…' : '就绪';
+  const t = state.liveTokens;
+  const tok = state.running && t?.total ? ` · ${(t.total >= 1000 ? (t.total / 1000).toFixed(1) + 'k' : t.total)} tok` : '';
+  $('run-status-text').textContent = state.running ? `智能体运行中…${tok}` : '就绪';
 }
 
 function projectListCtx() {
@@ -386,11 +403,21 @@ function renderProjectListOnly() { PM.renderProjectList($('project-list'), proje
 function stepPanelCtx() {
   return {
     project: state.project, steps: state.steps, busy: state.stepBusy,
+    liveTokens: state.liveTokens,
     onRunStep: (id, all) => runStep(id, all),
     onReset: (id) => resetSteps(id),
     onFocus: (id) => focusStepNodes(id),
     onManage: () => openManagePanel(),
     onCreate: () => openWizard(),
+    // 骨架项目第 ① 步：上传小说成功后刷新项目（节点注入 + ①② 完成）
+    onSourceUploaded: async (out) => {
+      UI.toast(out.message, 'ok');
+      await refreshProjects();
+      await loadProject(state.project.id);
+      PM.setExpandedStep('episodes');
+      renderStepPanel();
+    },
+    onNeedSource: () => UI.toast('先上传小说（①② 会自动完成），再执行后续步骤', 'err'),
   };
 }
 function renderStepPanel() { PM.renderStepPanel($('insp-steps'), stepPanelCtx()); }
@@ -476,7 +503,13 @@ function openWizard() {
       switchInspector('steps');
     },
     onStart: (stepId) => { switchInspector('steps'); runStep(stepId, false); },
-    onOpenPanel: () => switchInspector('steps'),
+    // 骨架项目引导「⇧ 上传小说」：打开步骤面板并展开第 ① 步的上传入口
+    onOpenPanel: (stepId) => {
+      if (stepId) PM.setExpandedStep(stepId);
+      switchInspector('steps');
+      renderStepPanel();
+      if (stepId === 'upload') setTimeout(() => document.getElementById('sp-src-text')?.focus(), 60);
+    },
   });
 }
 
@@ -641,6 +674,23 @@ async function onAction(act, id) {
       window.location.href = `/api/projects/${state.project.id}/film`;
       break;
     }
+    case 'pick-asset': {
+      const n = state.project?.nodes.find((x) => x.id === id);
+      if (!n) break;
+      openAssetLibrary({
+        mode: 'pick', accept: 'image',
+        onPick: (a) => {
+          // character 节点写角色头像；其余节点写 poster——它是卡片与检查器预览的首位兜底字段
+          if (n.type === 'character' && n.data.characters?.[0]) n.data.characters[0].portraitUrl = a.url;
+          else n.data.poster = a.url;
+          canvas.updateNode(id);
+          persist();
+          renderInspector();
+          UI.toast('已从资源库选用图片', 'ok');
+        },
+      });
+      break;
+    }
     case 'download-pack': exportPack(false); break;
     case 'regen-pack': exportPack(true); break;
     default: break;
@@ -715,6 +765,7 @@ function bindUI() {
   $('btn-arrange').addEventListener('click', () => arrange());
   $('btn-fit').addEventListener('click', () => canvas.fitView());
   $('btn-help').addEventListener('click', UI.openHelp);
+  $('btn-asset-lib').addEventListener('click', () => openAssetLibrary({ mode: 'manage' }));
   $('btn-settings').addEventListener('click', () => UI.openSettings(state.project, (settings) => {
     state.project.settings = settings;
     persist(true);

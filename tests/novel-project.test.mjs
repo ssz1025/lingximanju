@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildNovelProject, refreshEpisodes, outputModeOf } from '../src/pipelines/novel-project.mjs';
+import { buildNovelProject, attachSource, refreshEpisodes, outputModeOf } from '../src/pipelines/novel-project.mjs';
 import { STEPS, stepProgress } from '../src/core/project-steps.mjs';
 
 const FILLER = '她把伞收起来，靠在门边，雨水顺着伞尖滴在地板上，一滴，又一滴，久久没有停。';
@@ -134,12 +134,46 @@ test('refreshEpisodes 保留原著全文与源信息', () => {
   assert.equal(project.management.source.chapterCount, 4);
 });
 
-test('buildNovelProject 空文本被校验拦截并抛出可读错误', () => {
-  assert.throws(
-    () => buildNovelProject({ text: '', filename: '', name: '空项目', split: { strategy: 'chapter', maxEpisodes: 4 }, deliverables: { video: true, pack: true } }),
-    /40/,
-    '过短正文应抛出含字数提示的错误',
-  );
+test('buildNovelProject 空文本 → 极简骨架：六步全待执行、不建分集节点', () => {
+  const { project, skeleton, episodes } = buildNovelProject({
+    text: '', filename: '', name: '空项目', split: { strategy: 'chapter', maxEpisodes: 4 },
+    deliverables: { video: true, pack: true },
+  });
+  assert.equal(skeleton, true, '不传 text 应返回骨架而非抛错');
+  assert.equal(episodes.length, 0, '骨架没有分集');
+  const m = project.management;
+  assert.equal(m.steps.filter((s) => s.status === 'done').length, 0, '骨架六步全待执行');
+  assert.equal(m.steps[0].id, 'upload');
+  assert.equal(m.currentStep, 1, '当前停在第 ① 步');
+  assert.equal(m.source.text, '', '尚无原著');
+  assert.equal(project.nodes.filter((n) => n.type === 'episode').length, 0, '骨架不建分集节点');
+  assert.ok(project.nodes.length >= 5, '画布 DAG 必须保留');
+});
+
+test('attachSource 延迟上传小说 → 注入节点并完成 ①②', () => {
+  const { project } = buildNovelProject({
+    text: '', name: '骨架上传', split: { strategy: 'chapter', maxEpisodes: 4 },
+    deliverables: { video: true, pack: true },
+  });
+  const r = attachSource(project, {
+    text: NOVEL, filename: 'long.txt', split: { strategy: 'chapter', maxEpisodes: 4 },
+  });
+  assert.ok(r.episodes.length >= 1, '应产出分集');
+  const m = project.management;
+  assert.equal(m.steps.find((s) => s.id === 'upload').status, 'done', '① 应完成');
+  assert.equal(m.steps.find((s) => s.id === 'episodes').status, 'done', '② 应完成');
+  assert.ok(m.source.text.includes('第1章'), '原著全文应落盘到 management.source');
+  assert.ok(project.nodes.some((n) => n.type === 'episode'), '应生成分集节点');
+  const script = project.nodes.find((n) => n.type === 'script');
+  assert.ok(script.data.novelEpisodes?.length >= 1, '分集梗概应注入剧本节点');
+  assert.equal(stepProgress(m).done, 2, '进度应为 2/6');
+});
+
+test('attachSource 过短正文仍被校验拦截', () => {
+  const { project } = buildNovelProject({
+    text: '', name: '骨架短文', split: { strategy: 'chapter' }, deliverables: { video: true, pack: true },
+  });
+  assert.throws(() => attachSource(project, { text: '太短' }), /40/, '过短正文应抛出含字数提示的错误');
 });
 
 test('buildNovelProject 未选交付物时抛出错误', () => {

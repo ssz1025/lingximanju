@@ -66,7 +66,7 @@ cd lingximanju
 ### 自动化测试
 
 ```bash
-npm test        # node --test tests/*.test.mjs —— 94 项断言全部通过
+npm test        # node --test tests/*.test.mjs —— 112 项断言全部通过
 npm run check   # 关键文件语法检查
 ```
 
@@ -75,14 +75,15 @@ npm run check   # 关键文件语法检查
 | 测试文件 | 覆盖内容 | 用例数 |
 |---|---|---|
 | `tests/novel.test.mjs` | 章节识别（`第X章`/`Chapter N`/数字标题）、书名提取、三种分集策略与上下限钳制、尾集吸收溢出不丢原文、输入校验、角色抽取、预览不泄漏全文 | 16 |
-| `tests/project-steps.test.mjs` | 六步定义与论文映射完整性、步骤状态机、进度百分比、管理动作（重命名 / 收藏 / 归档 / 标签 / 备注 / 交付物 / 分集参数 / **项目封面**）、统计与索引字段、历史长度上限 | 27 |
-| `tests/novel-project.test.mjs` | 项目骨架构建、分集节点与 management 对齐、连线引用完整性、原著全文注入、刷新分集后画布同步、非法输入的报错语义 | 11 |
+| `tests/project-steps.test.mjs` | 六步定义与论文映射完整性、步骤状态机、进度百分比、管理动作（重命名 / 收藏 / 归档 / 标签 / 备注 / 交付物 / 分集参数 / **项目封面**）、统计与索引字段、历史长度上限、**骨架项目重置语义** | 32 |
+| `tests/novel-project.test.mjs` | 项目骨架构建、**极简骨架（六步全待执行）与延迟上传小说（attachSource）**、分集节点与 management 对齐、连线引用完整性、原著全文注入、刷新分集后画布同步、非法输入的报错语义 | 13 |
 | `tests/knowledge.test.mjs` | 式(6)：512/128 分块与重叠、BM25 召回排序、`processChain` 逐条检索 / 0.7 阈值 / 分数累加、单命中保底、缓存落盘往返、FRAGMENT 标签 | 11 |
 | `tests/comfy-lib.test.mjs` / `tests/comfy-lib-api.test.mjs` | 工作流库数据模型、批量导入去重与 `(2)` 后缀、REST 切换选中 / 重命名 / 删除、批量真实试跑与 SSE 进度 | 13 |
 | `tests/graph.test.mjs` | 图算法纯函数：拓扑分层、上下游子图、自动布局、DAG 环检测 | 6 |
 | `tests/store.test.mjs` | 持久层：uid / 资产路径清洗、项目存取与列表缓存失效、快照封顶 20 份 | 4 |
+| `tests/assets.test.mjs` | 资源索引：按文件名推断类型、自动收录与 `index.json` 落盘、打标签改名校验、重扫剔除与用户元数据保护、角色名归一化、**跨项目角色优先匹配**、统计聚合 | 8 |
 | `tests/orchestrator.test.mjs` | 编排器集成：波次调度、`scope` 白名单、失败与跳过传播、取消与并发保护（全程 mock） | 4 |
-| `tests/providers.test.mjs` | LLM 端点健壮性：挂起端点超时后回退 Mock 不卡死、调用方已取消时立即失败 | 2 |
+| `tests/providers.test.mjs` | LLM 端点健壮性：挂起端点超时后回退 Mock 不卡死、调用方已取消时立即失败 | 5 |
 
 端到端闭环（真实 HTTP：创建 → 分步 → 全量执行 → 管理动作 → 快照恢复 → 复制 → 导演包下载 → 封面上传 / 生成 / 重置 → 清理）另有 jsdom 运行时验证，覆盖向导、步骤面板、管理面板、侧栏筛选与封面弹窗。
 

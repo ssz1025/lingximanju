@@ -61,7 +61,15 @@ export async function runProject(projectId, opts = {}) {
   const scopeTypes = new Set(opts.scope || []);
   const inScope = (id) => !scopeTypes.size || scopeTypes.has(project.nodes.find((n) => n.id === id)?.type);
   const providers = createProviders(settings, (level, message) =>
-    emit('log', { projectId, runId, level, message }));
+    emit('log', { projectId, runId, level, message }),
+  // Token 归集：providers 每次真实 LLM 调用回调一次 → 运行级累加并实时广播
+  (record) => {
+    stats.tokens.prompt += record.promptTokens || 0;
+    stats.tokens.completion += record.completionTokens || 0;
+    stats.tokens.total += record.totalTokens || 0;
+    stats.tokens.calls += record.calls || 0;
+    emit('llm:usage', { projectId, runId, ...record, tokens: { ...stats.tokens } });
+  });
 
   let saveTimer = null;
   const scheduleSave = () => {
@@ -76,7 +84,8 @@ export async function runProject(projectId, opts = {}) {
   emit('run:start', { projectId, runId, mode: providers.mode, comfy: providers.comfyActive, concurrency, nodeId: opts.nodeId || null });
   emit('log', { projectId, runId, level: 'info', message: `启动编排 · LLM=${providers.mode} · 生成后端=${providers.comfyActive ? '本地 ComfyUI' : 'Mock 自绘'} · 并发=${concurrency} · best-of-k=${settings.k || 2}` });
 
-  const stats = { waves: 0, executed: 0, failed: 0, cost: 0 };
+  const stats = { waves: 0, executed: 0, failed: 0, cost: 0,
+    tokens: { prompt: 0, completion: 0, total: 0, calls: 0 } };
   let outcome = 'done';
 
   try {
@@ -217,6 +226,7 @@ export async function runProject(projectId, opts = {}) {
     id: runId, startedAt, finishedAt, status: outcome,
     nodeCount: stats.executed, waves: stats.waves, failed: stats.failed,
     durationMs: finishedAt - startedAt, cost: Number(stats.cost.toFixed(3)), provider: providers.mode,
+    tokens: { ...stats.tokens },
   };
   project.runs = [summary, ...(project.runs || [])].slice(0, 20);
   flush();
