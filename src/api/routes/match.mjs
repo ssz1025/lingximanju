@@ -8,8 +8,8 @@ export const MATCH = {
   deliverable: /^\/api\/projects\/([^/]+)\/(director-pack|film)$/,
   cover: /^\/api\/projects\/([^/]+)\/cover$/,
   coverGenerate: /^\/api\/projects\/([^/]+)\/cover\/generate$/,
-  // AI 生成封面提示词：按项目名 / 简介 / 小说摘要产出可编辑的文生图提示词
-  coverPrompt: /^\/api\/projects\/([^/]+)\/cover\/prompt$/,
+  // 封面对话式创作：对话历史 + 参考图 → AI 回复 + 提示词 + 下一步建议
+  coverChat: /^\/api\/projects\/([^/]+)\/cover\/chat$/,
   // 角色管理：从小说提取角色 / 生成角色多视图（字面尾段，先于通用模式）
   charExtract: /^\/api\/projects\/([^/]+)\/characters\/extract$/,
   charViews: /^\/api\/projects\/([^/]+)\/characters\/views$/,

@@ -13,62 +13,8 @@ import { executeSteps, broadcastMeta } from '../../core/step-runner.mjs';
 import { createProviders } from '../../core/providers.mjs';
 import { extractCharacters } from '../../core/novel.mjs';
 import { CHARACTER_VIEWS, buildExtractVars, buildViewPrompt, mergeExtracted } from '../../core/characters.mjs';
-
-/** 封面生成提示词：片名 + 原著/剧本梗概 + 电影海报视觉要求（中文提示词可直接喂 SDXL） */
-function buildCoverPrompt(project, m, custom = '') {
-  const name = String(project.name || m.title || '未命名影片').slice(0, 40);
-  const idea = (project.nodes || []).find((n) => n.type === 'idea');
-  const script = (project.nodes || []).find((n) => n.type === 'script');
-  const gist = [
-    script?.data?.script?.logline || script?.data?.logline || '',
-    (m.episodes || [])[0]?.summary || '',
-    String(idea?.data?.text || '').replace(/\s+/g, ' ').slice(0, 90),
-    String(m.source?.text || '').replace(/\s+/g, ' ').slice(0, 90),
-  ].filter(Boolean).join('，').slice(0, 180);
-  const base = `电影海报风格的项目封面插画，片名《${name}》，${gist || '一部富有戏剧张力的故事'}，` +
-    `cinematic movie poster, dramatic cinematic lighting, rich atmosphere, centered composition, ` +
-    `highly detailed, film grain, no text, no watermark, no lettering`;
-  const extra = String(custom || '').trim().slice(0, 400);
-  return extra ? `电影海报风格的项目封面插画，片名《${name}》，${extra}，cinematic movie poster, dramatic lighting, no text, no watermark` : base;
-}
-
-/** 封面提示词 AI 生成的 LLM 输入：项目名 + 简介 / 剧本梗概 + 分集摘要 + 小说节选 + 用户补充要求 */
-function buildCoverVars(project, m, custom = '') {
-  const name = String(project.name || m.title || '未命名影片').slice(0, 40);
-  const idea = (project.nodes || []).find((n) => n.type === 'idea');
-  const script = (project.nodes || []).find((n) => n.type === 'script');
-  const logline = script?.data?.script?.logline || script?.data?.logline || '';
-  return {
-    title: name,
-    genre: String(script?.data?.script?.genre || script?.data?.genre || ''),
-    logline: String(logline).slice(0, 200),
-    episodes: (m.episodes || []).slice(0, 6)
-      .map((e) => `第${e.no}集《${e.title}》：${String(e.summary || '').replace(/\s+/g, ' ').slice(0, 120)}`),
-    idea: String(idea?.data?.text || '').replace(/\s+/g, ' ').slice(0, 300),
-    novelExcerpt: String(m.source?.text || '').replace(/\s+/g, ' ').slice(0, 1500),
-    custom: String(custom || '').trim().slice(0, 400),
-    style: project.settings?.style || '',
-  };
-}
-
-/** dataURL → 合法图片二进制；失败抛错（与封面上传同校验：魔数 + 6MB 上限） */
-function parseImagePayload(dataUrl, label = '图片', allowGif = true) {
-  const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || '').trim());
-  if (!match) throw new Error(`${label}仅支持 PNG / JPEG / WebP / GIF 图片`);
-  const buf = Buffer.from(match[2], 'base64');
-  if (!buf.length || buf.length > 6 * 1024 * 1024) throw new Error(`${label}大小需在 1B–6MB 之间`);
-  const head = buf.subarray(0, 8).toString('hex');
-  const valid = match[1] === 'png' ? head.startsWith('89504e47')
-    : match[1] === 'jpeg' ? head.startsWith('ffd8ff')
-    : match[1] === 'webp' ? head.startsWith('52494646')
-    : /^47494638/.test(head);
-  if (!valid) throw new Error(`${label}内容与声明格式不符`);
-  if (match[1] === 'gif' && !allowGif) throw new Error(`${label}不支持 GIF（ComfyUI 参考图仅支持 PNG / JPEG / WebP）`);
-  return { buf, ext: match[1] === 'jpeg' ? 'jpg' : match[1] };
-}
-
-/** 参考图上限：与 ComfyUI LoadImage 插槽数量同量级，防止把整个资源库都上传一遍 */
-const MAX_COVER_REFS = 6;
+// 封面智能体（agents 统一目录）：提示词构建 / 参考图解析 / 对话编排都在那里
+import { designCoverPrompt, MAX_COVER_REFS, parseImagePayload, resolveChatRefs, coverChat } from '../../agents/cover-agent.mjs';
 
 export async function handleManagement(req, res, url) {
   const { pathname } = url;
@@ -144,12 +90,12 @@ export async function handleManagement(req, res, url) {
     }
   }
 
-  // ---------- 项目封面：上传 / ComfyUI 生成 / AI 提示词 / 恢复名称封面 ----------
+  // ---------- 项目封面：上传 / ComfyUI 生成 / AI 对话式创作 / 恢复名称封面 ----------
   const coverMatch = pathname.match(MATCH.cover);
   const coverGenMatch = pathname.match(MATCH.coverGenerate);
-  const coverPromptMatch = pathname.match(MATCH.coverPrompt);
-  if (coverMatch || coverGenMatch || coverPromptMatch) {
-    const id = (coverMatch || coverGenMatch || coverPromptMatch)[1];
+  const coverChatMatch = pathname.match(MATCH.coverChat);
+  if (coverMatch || coverGenMatch || coverChatMatch) {
+    const id = (coverMatch || coverGenMatch || coverChatMatch)[1];
     const project = loadProject(id);
     if (!project) return json(res, { error: '项目不存在' }, 404), true;
     const m = ensureManagement(project);
@@ -162,27 +108,26 @@ export async function handleManagement(req, res, url) {
       return out;
     };
 
-    // AI 生成封面提示词：调用已配置的 LLM，按项目名 / 简介 / 小说摘要产出可编辑的文生图提示词（不落盘）
-    if (coverPromptMatch && method === 'POST') {
+    // 封面对话式创作：对话历史 + 参考图（VLM 看图）→ AI 回复 + 提示词草稿 + 下一步建议
+    if (coverChatMatch && method === 'POST') {
       const body = await readBody(req);
-      const providers = createProviders(project.settings,
-        (level, msg) => emit('log', { projectId: id, level, message: `封面提示词 · ${msg}` }));
       try {
-        const out = await providers.generate('coverPrompt', buildCoverVars(project, m, body.custom));
-        const prompt = String(out?.prompt || '').trim();
-        if (!prompt) throw new Error('模型未返回有效提示词');
-        // 来源判定以「prompt 是否真由模型产出」为准：LLM 缺字段被 Mock 补位也算回退，不冒充 AI
-        const promptFromMock = Boolean(out.__fallback) || (out.__mockKeys || []).includes('prompt');
-        const source = promptFromMock ? 'fallback' : providers.mode === 'openai' ? 'llm' : 'template';
+        const refs = resolveChatRefs(body.refs);
+        const out = await coverChat({
+          project, m, messages: body.messages, refs,
+          log: (level, msg) => emit('log', { projectId: id, level, message: `封面对话 · ${msg}` }),
+        });
+        // 提示词草稿随对话即时保存（不改动封面图本身），生成成功后再经 cover 动作落定
+        m.cover = { ...m.cover, prompt: out.prompt };
+        saveProject(project);
         return json(res, {
-          ok: true, prompt, negative: String(out.negative || '').trim(), style: String(out.style || ''),
-          source, fellBack: promptFromMock && providers.mode === 'openai',
-          message: source === 'llm' ? 'AI 已根据项目资料生成封面提示词，可编辑后再生成'
-            : providers.mode === 'openai' ? 'LLM 未返回有效提示词，已回退内置模板生成，可编辑后再生成'
-            : '未配置大模型（设置 → 模型），已用内置模板生成；配置后可由 AI 按项目资料生成',
+          ok: true, ...out,
+          message: out.source === 'llm' ? 'AI 已根据项目资料与参考图生成封面提示词'
+            : out.fellBack ? 'LLM 未返回有效结果，已回退内置模板生成提示词'
+            : '未配置大模型（设置 → 模型），已用内置模板生成提示词',
         }), true;
       } catch (err) {
-        return json(res, { error: `封面提示词生成失败：${err.message}` }, 502), true;
+        return json(res, { error: `封面对话失败：${err.message}` }, 502), true;
       }
     }
 
@@ -194,9 +139,14 @@ export async function handleManagement(req, res, url) {
       }
       const body = await readBody(req);
       const wf = parseWorkflow(config.imageWorkflow, '出图工作流');
-      // 文本框内容即完整提示词（AI 生成或用户精调）原样使用；为空才按项目资料自动套片名模板
+      // 文本框内容即完整提示词（AI 生成或用户精调）原样使用；为空时交由独立提示词 agent 按项目资料设计（模板兜底）
       const rawPrompt = String(body.prompt || '').trim().slice(0, 2000);
-      const prompt = rawPrompt || buildCoverPrompt(project, m, '');
+      let prompt = rawPrompt;
+      if (!prompt) {
+        const designed = await designCoverPrompt({ project, m, requirement: String(body.requirement || '') });
+        prompt = designed.prompt;
+        emit('log', { projectId: id, level: 'info', message: `封面提示词 · 由提示词 agent 生成（${designed.source}）` });
+      }
       const negative = String(body.negative || '').trim().slice(0, 600) || config.negativePrompt;
 
       // 参考图收集：refs=[{asset|dataUrl}]（也接受纯文件名字符串），按给定顺序对应 LoadImage 插槽
@@ -236,13 +186,12 @@ export async function handleManagement(req, res, url) {
         });
         const url = result.primary?.url;
         if (!url) return json(res, { error: 'ComfyUI 未返回封面图片' }, 502), true;
-        const out = commitCover({ url, source: 'comfyui', prompt });
-        if (!out.ok) return json(res, out, 400), true;
-        // 收录进资源库：类型=封面，带项目来源，其他项目可直接从资源库复用
-        const cf = String(url).startsWith('/assets/') ? String(url).slice(8) : '';
-        if (cf) registerAsset({ file: cf, kind: 'cover', name: `${project.name} 封面`, sourceProjectId: id, sourceProjectName: project.name });
-        return json(res, { ok: true, cover: m.cover, url, prompt,
-          promptId: result.promptId, durationMs: result.durationMs, message: out.message }), true;
+        // 不直接设为封面：先入资源库，由前端放大预览，用户确认后才经 POST /cover {asset} 落定
+        const file = String(url).startsWith('/assets/') ? String(url).slice(8) : '';
+        if (!file) return json(res, { error: '生成结果不是可用的资源文件' }, 502), true;
+        registerAsset({ file, kind: 'cover', name: `${project.name} 封面`, sourceProjectId: id, sourceProjectName: project.name });
+        return json(res, { ok: true, generated: { file, url }, prompt,
+          promptId: result.promptId, durationMs: result.durationMs, message: '封面已生成，预览确认后保存' }), true;
       } catch (err) {
         return json(res, { error: `封面生成失败：${err.message}` }, 502), true;
       }

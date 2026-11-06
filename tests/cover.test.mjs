@@ -18,7 +18,7 @@ import { Readable } from 'node:stream';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'lxm-cover-'));
 process.env.LINGXIMANJU_DATA_DIR = TMP;
 
-const { saveProject, writeAssetBinary } = await import('../src/core/store.mjs');
+const { saveProject, writeAssetBinary, loadProject } = await import('../src/core/store.mjs');
 const { createProviders } = await import('../src/core/providers.mjs');
 const { parseWorkflow, runWorkflow } = await import('../src/core/comfyui.mjs');
 const { saveComfyConfig } = await import('../src/core/comfy-config.mjs');
@@ -112,6 +112,34 @@ async function api(method, pathname, body) {
   return out;
 }
 
+/* ---------------- 独立封面提示词 agent：coverPromptDesign / designCoverPrompt ---------------- */
+test('coverPromptDesign intent（Mock）：产出完整连贯中文描述句，而非关键词堆砌', async () => {
+  const providers = createProviders({});
+  const out = await providers.generate('coverPromptDesign', {
+    title: '雨夜来信', logline: '一封没有署名的信把侦探引到案发地',
+    requirement: '霓虹雨夜、俯瞰视角', style: 'anime',
+  });
+  assert.match(out.prompt, /为漫剧《雨夜来信》设计/, '完整句式带片名语境');
+  assert.match(out.prompt, /霓虹雨夜、俯瞰视角/, '用户画面要求融入描述句');
+  assert.match(out.prompt, /光影|构图/, '涵盖光影与构图要素');
+  assert.match(out.prompt, /画面聚焦|画面呈现/, '是通顺的描述句而非标签拼接');
+  assert.match(out.prompt, /no text/, '负向禁止画面出现文字');
+  assert.match(out.negative, /watermark/);
+  assert.equal(out.style, 'anime');
+});
+
+test('designCoverPrompt agent（Mock 环境）：独立产出提示词并明示 template 来源', async () => {
+  const { designCoverPrompt } = await import('../src/agents/cover-agent.mjs');
+  const project = { id: 'prj_dcp', name: '雾都孤影', mode: 'idea2video', nodes: [], edges: [] };
+  const m = { settings: {} };
+  const r = await designCoverPrompt({ project, m, requirement: '大桥上的追逐' });
+  assert.ok(r.prompt.length > 20, '返回完整提示词');
+  assert.match(r.prompt, /雾都孤影/);
+  assert.match(r.prompt, /大桥上的追逐/, 'requirement 进入设计');
+  assert.equal(r.source, 'template', '零 Key 明示模板来源');
+  assert.equal(r.fellBack, false);
+});
+
 /* ---------------- 封面提示词：coverPrompt intent ---------------- */
 test('coverPrompt intent（Mock）：按项目资料产出可直接使用的封面提示词', async () => {
   const providers = createProviders({});
@@ -196,18 +224,20 @@ test('coverPrompt intent：LLM 缺 prompt 字段 → Mock 补位但打 __mockKey
   }
 });
 
-/* ---------------- REST：/cover/prompt ---------------- */
-test('POST /api/projects/:id/cover/prompt：未配置大模型 → 内置模板生成，明示来源', async () => {
+/* ---------------- REST：/cover/chat（对话式封面创作，取代旧 /cover/prompt） ---------------- */
+test('POST /api/projects/:id/cover/chat：未配置大模型 → 内置模板兜底出提示词，明示来源不冒充 AI', async () => {
   saveProject({ id: 'prj_cp', name: '雾都孤影', mode: 'idea2video', nodes: [
     { id: 'n1', type: 'idea', data: { text: '侦探与记者在雾都追查一桩旧案' } },
   ], edges: [], createdAt: Date.now(), updatedAt: Date.now() });
-  const r = await api('POST', '/api/projects/prj_cp/cover/prompt', { custom: '霓虹夜景' });
+  const r = await api('POST', '/api/projects/prj_cp/cover/chat', {
+    messages: [{ role: 'user', content: '霓虹夜景' }],
+  });
   assert.equal(r.status, 200);
   assert.equal(r.data.ok, true);
-  assert.equal(r.data.source, 'template');
+  assert.equal(r.data.source, 'template', '零 Key 走 Mock 兜底，来源明示为模板');
   assert.equal(r.data.fellBack, false);
-  assert.match(r.data.prompt, /片名《雾都孤影》/);
-  assert.match(r.data.prompt, /霓虹夜景/, '用户补充要求进入提示词');
+  assert.match(r.data.prompt, /为漫剧《雾都孤影》设计/, '兜底提示词由独立设计 agent 产出完整描述句');
+  assert.match(r.data.reply, /霓虹夜景/, '用户的画面要求在回复中被确认');
   assert.ok(r.data.negative.length > 0);
   assert.ok(r.data.message.includes('内置模板'), '响应明示模板来源，不冒充 AI');
 });
@@ -291,8 +321,11 @@ test('POST /cover/generate：提示词文本框内容原样直用（不套模板
   assert.equal(wf['11'].inputs.image, 'coverref2.png', '参考图 2 ← 插槽 2');
   assert.equal(wf['6'].inputs.text, '完整提示词X，直用不应被再包裹', '文本框内容即完整提示词，原样注入不套模板');
   assert.equal(wf['7'].inputs.text, '自定义负向词', '自定义负向提示词生效');
-  assert.equal(r.data.cover.source, 'comfyui');
-  assert.ok(r.data.url.startsWith('/assets/'));
+  // 新契约：生成结果只入资源库，不直接落封面；前端确认后才经 POST /cover {asset} 保存
+  assert.ok(r.data.generated?.file, '返回 generated {file,url} 供前端确认');
+  assert.ok(r.data.generated.url.startsWith('/assets/'));
+  assert.equal(loadProject('prj_cg').cover?.source, undefined, '生成即保存已移除：项目封面未被改动');
+  assert.match(r.data.message, /确认/);
 });
 
 test('POST /cover/generate：提示词留空才套项目资料模板；非法参考图被拒绝', async () => {
@@ -301,7 +334,7 @@ test('POST /cover/generate：提示词留空才套项目资料模板；非法参
   const before = submitted.length;
   const r = await api('POST', '/api/projects/prj_cg2/cover/generate', { prompt: '' });
   assert.equal(r.status, 200);
-  assert.match(submitted[before]['6'].inputs.text, /片名《界上花》/, '留空时按项目资料套片名模板');
+  assert.match(submitted[before]['6'].inputs.text, /为漫剧《界上花》设计/, '留空时由独立提示词 agent 按项目资料设计完整描述句');
 
   const direct = await api('POST', '/api/projects/prj_cg2/cover/generate', { prompt: '雨夜霓虹' });
   assert.equal(direct.status, 200);

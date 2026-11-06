@@ -4,6 +4,7 @@
  * 只负责 DOM 与交互；所有状态以 project.management / /api 返回为准。
  * ==========================================================================*/
 import { openAssetLibrary } from './asset-manager.js';
+import { openAIChat } from './ai-chat.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -268,203 +269,114 @@ export function renderProjectList(host, ctx = {}) {
   }
 }
 
-/* ------------------------------------------------------------------ 项目封面设置弹窗
- * 来源：ComfyUI 出图生成（可带多参考图）/ 本地上传 / 清除后回退「项目名称封面」。
- * 提示词可由 AI 按项目名 / 简介 / 小说摘要先生成一版，用户编辑后再生成封面。
- * 卡片缩略图与这里共用同一套 nameCoverHTML 渲染，视觉一致。
+/* ------------------------------------------------------------------ 项目封面：对话式创作
+ * 与封面助手 AI 对话：直接给选项 → 一键生成封面（自动产出提示词并保存 → ComfyUI 文生图）；
+ * 或上传 / 从资源库选参考图（单图或多图）→ AI 结合参考图重写提示词 → 用户确认后
+ * 调用 ComfyUI 多参考图生图。对话交互由可复用的 ai-chat.js 组件承载。
  * ---------------------------------------------------------------- */
 export function openCoverDialog(ctx = {}) {
   const p = ctx.project;
   if (!p) return;
-  const root = $('modal-root') || document.body;
   const toast = ctx.toast || (() => {});
+  const comfyReady = Boolean(ctx.comfy?.imageWorkflow);
   let cover = { ...readCover(p) };
-  let busy = false;
-  let message = '';
-  let draft = String(cover.prompt || '');  // 文本框草稿：重绘不丢失用户输入
-  let coverNegative = '';                  // AI 生成的负向提示词，生成时随请求提交
-  let promptBusy = false;                  // AI 提示词生成中（LLM 秒级，与出图 busy 分开，避免误显 1–2 分钟遮罩）
-  let refs = [];                           // 多参考图（有序）：{file?, name, url, dataUrl?, bytes?}
-  /** 同步到列表索引与完整项目两处，避免弹窗关闭后卡片短暂回退 */
+  let refs = [];                    // 参考图（有序）：{file?, name, url, dataUrl?, bytes?}
+  let lastPrompt = '';              // 最近一次 AI 提示词（后端已存草稿）
+  let lastNegative = '';
+  let lastGenerated = null;         // 待确认的生成结果 {file,url}：确认后才保存为封面
+  /** 同步到列表索引与完整项目两处，避免关闭后卡片短暂回退 */
   const applyCover = (next) => {
     cover = { ...next };
     p.cover = cover;
     if (p.management) p.management.cover = cover;
   };
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  const close = () => { if (!busy && !promptBusy) backdrop.remove(); };
-  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+  const refsPayload = () => refs.map((r) => (r.file ? { asset: r.file } : { dataUrl: r.dataUrl }));
 
-  const sourceLabel = () => cover.source === 'comfyui' ? '✦ ComfyUI 生成'
-    : cover.source === 'upload' ? '⇧ 本地上传' : '项目名称封面（默认）';
-
-  let rendered = false;                    // 首次渲染后才允许显示；重渲染压制 modalIn 动画重播（避免弹窗晃动）
-
-  function render() {
-    const preview = cover.url
-      ? `<img src="${esc(cover.url)}?t=${encodeURIComponent(String(cover.updatedAt || ''))}" alt="项目封面">`
-      : nameCoverHTML({ name: p.name });
-    backdrop.className = 'modal-backdrop' + (rendered ? ' no-anim' : '');
-    backdrop.innerHTML = `<div class="modal cover-modal" role="dialog" aria-label="项目封面设置">
-      <div class="pmm-head"><div><h2>🖼 项目封面</h2><div class="sub">${esc(p.name)} · ${esc(sourceLabel())}</div></div>
-        <button class="icon-btn" data-act="close" ${busy || promptBusy ? 'disabled' : ''} aria-label="关闭">✕</button></div>
-      <div class="cover-body">
-        <div class="cover-preview">${preview}
-          ${busy ? '<div class="cover-busy"><span class="cover-spinner"></span><b>ComfyUI 正在生成封面</b><small>约 1–2 分钟，请勿关闭窗口</small></div>' : ''}
-        </div>
-        <div class="cover-side">
-          <p class="cover-tip">未设置封面时，项目卡片会自动使用<b>项目名称封面</b>（按名称生成的渐变色块）。<br>
-            生成封面会调用已配置的 ComfyUI 出图工作流；上传支持 PNG / JPEG / WebP / GIF，单张不超过 4 MB。</p>
-          <label class="field"><span class="cover-field-head">画面提示词<small class="cover-count" id="cover-count">${draft.length} 字</small></span>
-            <textarea id="cover-prompt" rows="7" placeholder="输入完整文生图提示词（原样使用，不套片名 / 风格模板）；留空则按项目资料自动生成。也可点「✦ AI 生成提示词」按项目名称、简介、小说总结自动写好一版">${esc(draft)}</textarea></label>
-          <div class="cover-actions">
-            <button class="btn" data-act="ai-prompt" ${busy || promptBusy ? 'disabled' : ''}>${promptBusy ? '✦ 提示词生成中…' : '✦ AI 生成提示词'}</button>
-            <button class="btn primary" data-act="generate" ${busy || promptBusy ? 'disabled' : ''}>✦ 用 ComfyUI 生成封面</button>
-            <div class="cover-actions-row">
-              <button class="btn" data-act="upload" ${busy || promptBusy ? 'disabled' : ''}>⇧ 上传本地图片</button>
-              <button class="btn" data-act="from-library" ${busy || promptBusy ? 'disabled' : ''}>▣ 从资源库选择</button>
-              <button class="btn" data-act="reset" ${busy || promptBusy || !cover.url ? 'disabled' : ''}>↺ 恢复名称封面</button>
-            </div>
-          </div>
-          <div class="cover-refs">
-            <div class="cover-refs-head"><b>参考图（可选 · 多张）</b>
-              <button class="btn sm" data-act="pick-refs" ${busy ? 'disabled' : ''}>▣ 资源库多选</button>
-              <button class="btn sm" data-act="upload-refs" ${busy ? 'disabled' : ''}>⇧ 本地上传</button>
-              ${refs.length ? `<button class="btn sm" data-act="clear-refs" ${busy ? 'disabled' : ''}>✕ 清空</button>` : ''}
-            </div>
-            ${refs.length ? `<div class="cover-ref-grid">${refs.map((r, i) => `
-              <div class="cover-ref" title="${esc(r.name)}"><img src="${esc(r.url)}" alt="${esc(r.name)}">
-                <span class="cover-ref-no">${i + 1}</span>
-                <button class="cover-ref-del" data-act="del-ref" data-i="${i}" ${busy ? 'disabled' : ''} title="移除">✕</button></div>`).join('')}</div>
-              <small class="cover-ref-note">参考图按顺序对应工作流的 LoadImage 插槽（共 ${refs.length} 张）</small>`
-              : '<small class="cover-ref-note">不选参考图时按工作流默认方式生成；多张参考图按顺序注入工作流的多个 LoadImage 插槽（仅 PNG / JPEG / WebP）</small>'}
-          </div>
-          ${message ? `<div class="cover-status ${message.startsWith('✗') ? 'err' : ''}">${esc(message)}</div>` : ''}
-          <div class="cover-note">${ctx.comfy?.imageWorkflow ? '✓ 已检测到 ComfyUI 出图工作流' : '⚠ 未检测到 ComfyUI 出图工作流，生成前请先在设置中导入'}</div>
-          <input type="file" id="cover-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
-          <input type="file" id="ref-files" accept="image/png,image/jpeg,image/webp" multiple hidden>
-        </div>
-      </div>
-      <div class="modal-actions"><button class="btn" data-act="close" ${busy ? 'disabled' : ''}>关闭</button></div>
-    </div>`;
-
-    backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
-    const promptInput = $('cover-prompt');
-    promptInput?.addEventListener('input', () => {
-      draft = promptInput.value;
-      const counter = $('cover-count');
-      if (counter) counter.textContent = `${draft.length} 字`;
-    });
-
-    // AI 生成封面提示词：按项目名 / 简介 / 小说摘要产出可编辑的完整提示词
-    backdrop.querySelector('[data-act="ai-prompt"]')?.addEventListener('click', async () => {
-      if (busy || promptBusy) return;
-      const custom = promptInput?.value || '';
-      promptBusy = true; message = ''; render(); // 提示词是 LLM 秒级调用，状态只反馈在按钮上，不盖左侧图片区
-      try {
-        const d = await api(`/api/projects/${p.id}/cover/prompt`, { custom });
-        draft = String(d.prompt || '');
-        coverNegative = String(d.negative || '');
-        message = `✓ ${d.message}`;
-        toast(d.fellBack ? '已用内置模板生成提示词' : '封面提示词已生成', d.fellBack ? 'warn' : 'ok');
-      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
-      promptBusy = false; render();
-    });
-
-    backdrop.querySelector('[data-act="generate"]')?.addEventListener('click', async () => {
-      if (busy) return;
-      const prompt = promptInput?.value || '';
-      busy = true; message = refs.length ? `正在按参考图（${refs.length} 张）生成封面…` : ''; render();
-      try {
-        const d = await api(`/api/projects/${p.id}/cover/generate`, {
-          prompt, negative: coverNegative,
-          refs: refs.map((r) => (r.file ? { asset: r.file } : { dataUrl: r.dataUrl })),
-        });
-        applyCover(d.cover);
-        draft = String(d.prompt || prompt);
-        const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
-        message = `✓ 封面已由 ComfyUI 生成${secs}${refs.length ? ` · 参考图 ${refs.length} 张` : ''}`;
-        toast('项目封面已生成', 'ok');
-        await ctx.onChanged?.();
-      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
-      busy = false; render();
-    });
-
-    // 多参考图：资源库多选（按勾选顺序）/ 本地多选上传；按顺序对应 LoadImage 插槽
-    backdrop.querySelector('[data-act="pick-refs"]')?.addEventListener('click', () => {
-      if (busy) return;
-      openAssetLibrary({
-        mode: 'pick', multi: true, accept: 'image',
-        onPick: (list) => {
-          const chosen = (Array.isArray(list) ? list : [list])
-            .filter((a) => /\.(png|jpe?g|webp)$/i.test(a.file))
-            .map((a) => ({ file: a.file, name: a.name, url: a.url }));
-          refs = [...refs, ...chosen].slice(0, 6);
-          render();
-        },
+  /** 与封面助手对话一轮：AI 回复 + 提示词；autoGenerate=true 时链式直接调 ComfyUI 出图 */
+  async function roundChat(ui, opts = {}) {
+    try {
+      const d = await api(`/api/projects/${p.id}/cover/chat`, { messages: ui.history(), refs: refsPayload() });
+      lastPrompt = String(d.prompt || '');
+      lastNegative = String(d.negative || '');
+      if (d.fellBack) toast('LLM 未返回有效结果，已用内置模板生成提示词', 'warn');
+      ui.addMessage({
+        role: 'assistant',
+        text: d.reply || d.message || '已写好封面提示词，确认后即可生成。',
+        promptBlock: { prompt: lastPrompt, negative: lastNegative },
+        suggestions: d.suggestions,
+        actions: [
+          { label: '✦ 生成封面', act: 'generate', primary: true, disabled: !comfyReady },
+          { label: '↺ 换一版', act: 'regen' },
+          ...(refs.length ? [{ label: '＋ 补充参考图', act: 'pick-refs' }, { label: '✕ 清空参考图', act: 'clear-refs' }] : []),
+        ],
       });
-    });
-    backdrop.querySelector('[data-act="upload-refs"]')?.addEventListener('click', () => $('ref-files')?.click());
-    backdrop.querySelector('[data-act="clear-refs"]')?.addEventListener('click', () => { refs = []; render(); });
-    backdrop.querySelectorAll('[data-act="del-ref"]').forEach((btn) => btn.addEventListener('click', () => {
-      refs.splice(Number(btn.dataset.i) || 0, 1);
-      render();
-    }));
-    $('ref-files')?.addEventListener('change', async () => {
-      const input = $('ref-files');
-      const files = [...(input?.files || [])];
-      if (input) input.value = '';
-      if (busy || !files.length) return;
-      const added = [];
-      let total = refs.reduce((s, r) => s + (r.bytes || 0), 0);
-      for (const file of files) {
-        if (refs.length + added.length >= 6) break;
-        if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { message = '✗ 参考图仅支持 PNG / JPEG / WebP'; continue; }
-        if (file.size > 2 * 1024 * 1024) { message = '✗ 单张参考图不超过 2 MB，请压缩后再上传'; continue; }
-        if (total + file.size > 3.5 * 1024 * 1024) { message = '✗ 本地参考图总计不超过 3.5 MB，超出请改用「资源库多选」'; break; }
-        total += file.size;
-        try {
-          const dataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(String(reader.result));
-            reader.onerror = () => reject(new Error('读取图片失败'));
-            reader.readAsDataURL(file);
-          });
-          added.push({ dataUrl, name: file.name, url: dataUrl, bytes: file.size });
-        } catch (err) { message = `✗ ${err.message}`; }
-      }
-      refs = [...refs, ...added].slice(0, 6);
-      if (added.length) message = `✓ 已添加 ${added.length} 张本地参考图`;
-      render();
-    });
+      if (opts.autoGenerate && comfyReady) await doGenerate(ui);
+    } catch (err) {
+      ui.addMessage({ role: 'assistant', text: `✗ ${err.message}` });
+    }
+  }
 
-    const fileInput = $('cover-file');
-    backdrop.querySelector('[data-act="upload"]')?.addEventListener('click', () => fileInput?.click());
-    backdrop.querySelector('[data-act="from-library"]')?.addEventListener('click', () => {
-      if (busy) return;
-      openAssetLibrary({
-        mode: 'pick', accept: 'image',
-        onPick: async (a) => {
-          busy = true; message = '正在应用资源库封面…'; render();
-          try {
-            const d = await api(`/api/projects/${p.id}/cover`, { asset: a.file });
-            applyCover(d.cover);
-            message = '✓ 已从资源库选用封面';
-            toast('项目封面已更新', 'ok');
-            await ctx.onChanged?.();
-          } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
-          busy = false; render();
-        },
+  /** 生成结果放大预览：确认才保存为项目封面；放弃则图片保留在资源库可复用（模块级实现，见文末） */
+  const openGenerated = (g, ui) => openGeneratedConfirm({
+    project: p, ui, generated: g,
+    applyCover, onChanged: () => ctx.onChanged?.(), toast,
+  });
+
+  /** 用户确认提示词后调 ComfyUI 生图（约 1–2 分钟）；生成后先放大预览，确认才保存封面 */
+  async function doGenerate(ui) {
+    ui.setBusy(true, 'ComfyUI 正在生成封面（约 1–2 分钟）…');
+    try {
+      const d = await api(`/api/projects/${p.id}/cover/generate`, {
+        prompt: lastPrompt, negative: lastNegative, refs: refsPayload(),
       });
+      const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
+      const g = d.generated || {};
+      ui.addMessage({
+        role: 'assistant',
+        text: `✓ 封面已生成${secs}${refs.length ? ` · 参考图 ${refs.length} 张` : ''}，请在大图预览中确认后保存`,
+        images: [g.url].filter(Boolean),
+        actions: [
+          { label: '✓ 保存为封面', act: 'confirm-cover', primary: true },
+          { label: '↺ 重新生成', act: 'regen' },
+          { label: '＋ 换参考图', act: 'pick-refs' },
+        ],
+      });
+      const handle = openGenerated(g, ui);
+      if (handle?.generated) lastGenerated = handle.generated;
+    } catch (err) {
+      ui.addMessage({ role: 'assistant', text: `✗ ${err.message}` });
+    }
+    ui.setBusy(false);
+  }
+
+  /** 追加参考图后自动让 AI 结合图片重写提示词（用户确认后再生图） */
+  function refsAdded(ui, added) {
+    refs = [...refs, ...added].slice(0, 6);
+    ui.addMessage({
+      role: 'user',
+      text: `已添加 ${added.length} 张参考图（共 ${refs.length} 张），请结合参考图重新生成提示词`,
+      images: added.map((r) => r.url),
     });
-    fileInput?.addEventListener('change', async () => {
-      if (busy) return;
-      const file = fileInput.files?.[0];
-      if (!file) return;
-      if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) { message = '✗ 仅支持 PNG / JPEG / WebP / GIF 图片'; render(); return; }
-      if (file.size > 4 * 1024 * 1024) { message = '✗ 图片超过 4 MB，请压缩后再上传'; render(); return; }
-      busy = true; message = '正在上传封面…'; render();
+    return roundChat(ui);
+  }
+
+  // 参考图 / 封面上传的隐藏文件输入（无需挂到 DOM 即可 click）
+  const refInput = document.createElement('input');
+  refInput.type = 'file';
+  refInput.accept = 'image/png,image/jpeg,image/webp';
+  refInput.multiple = true;
+  refInput.addEventListener('change', async () => {
+    const files = [...(refInput.files || [])];
+    refInput.value = '';
+    if (!files.length) return;
+    const added = [];
+    let total = refs.reduce((s, r) => s + (r.bytes || 0), 0);
+    for (const file of files) {
+      if (refs.length + added.length >= 6) break;
+      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { chat.addMessage({ role: 'assistant', text: '✗ 参考图仅支持 PNG / JPEG / WebP' }); continue; }
+      if (file.size > 2 * 1024 * 1024) { chat.addMessage({ role: 'assistant', text: '✗ 单张参考图不超过 2 MB，请压缩后再上传' }); continue; }
+      if (total + file.size > 3.5 * 1024 * 1024) { chat.addMessage({ role: 'assistant', text: '✗ 本地参考图总计不超过 3.5 MB，超出请改用「资源库选参考图」' }); break; }
+      total += file.size;
       try {
         const dataUrl = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -472,35 +384,155 @@ export function openCoverDialog(ctx = {}) {
           reader.onerror = () => reject(new Error('读取图片失败'));
           reader.readAsDataURL(file);
         });
-        const d = await api(`/api/projects/${p.id}/cover`, { dataUrl });
-        applyCover(d.cover);
-        message = '✓ 封面图片已上传';
-        toast('项目封面已上传', 'ok');
-        await ctx.onChanged?.();
-      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
-      busy = false; render();
-      fileInput.value = '';
-    });
+        added.push({ dataUrl, name: file.name, url: dataUrl, bytes: file.size });
+      } catch (err) { chat.addMessage({ role: 'assistant', text: `✗ ${err.message}` }); }
+    }
+    if (added.length) await refsAdded(chat, added);
+  });
+  const coverInput = document.createElement('input');
+  coverInput.type = 'file';
+  coverInput.accept = 'image/png,image/jpeg,image/webp,image/gif';
+  coverInput.addEventListener('change', async () => {
+    const file = coverInput.files?.[0];
+    coverInput.value = '';
+    if (!file) return;
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) return chat.addMessage({ role: 'assistant', text: '✗ 仅支持 PNG / JPEG / WebP / GIF 图片' });
+    if (file.size > 4 * 1024 * 1024) return chat.addMessage({ role: 'assistant', text: '✗ 图片超过 4 MB，请压缩后再上传' });
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('读取图片失败'));
+        reader.readAsDataURL(file);
+      });
+      const d = await api(`/api/projects/${p.id}/cover`, { dataUrl });
+      applyCover(d.cover);
+      chat.addMessage({ role: 'assistant', text: '✓ 封面图片已上传', images: [cover.url] });
+      toast('项目封面已上传', 'ok');
+      await ctx.onChanged?.();
+    } catch (err) { chat.addMessage({ role: 'assistant', text: `✗ ${err.message}` }); }
+  });
 
-    backdrop.querySelector('[data-act="reset"]')?.addEventListener('click', async () => {
-      if (busy || !cover.url) return;
-      busy = true; message = ''; render();
-      try {
-        const d = await api(`/api/projects/${p.id}/cover`, undefined, 'DELETE');
-        applyCover(d.cover);
-        message = '✓ 已恢复为项目名称封面';
-        toast(message, 'ok');
-        await ctx.onChanged?.();
-      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
-      busy = false; render();
-    });
+  const chat = openAIChat({
+    title: '🖼 项目封面',
+    subtitle: `${p.name} · 对话式封面创作`,
+    placeholder: '描述你想要的封面（如「水墨风、留白多、带点孤寂感」）…',
+    welcome: {
+      role: 'assistant',
+      text: `我是封面创作助手，已了解《${p.name}》的资料${cover.url ? '，当前已有封面，可随时替换' : ''}。`
+        + `${comfyReady ? '可以一句话告诉我方向，或直接选择：' : '⚠ 尚未配置 ComfyUI 出图工作流，生成前请先在设置中导入「导出(API)」工作流；也可以直接上传图片作封面。'}`,
+      actions: [
+        { label: '✦ 一键生成封面', act: 'one-click', primary: true, disabled: !comfyReady },
+        { label: '⇧ 上传参考图', act: 'upload-refs' },
+        { label: '▣ 资源库选参考图', act: 'pick-refs' },
+        { label: '⇧ 上传图片作封面', act: 'upload-cover' },
+        { label: '▣ 资源库选图作封面', act: 'from-library-cover' },
+        { label: '↺ 恢复名称封面', act: 'reset-cover', disabled: !cover.url },
+      ],
+    },
+    actions: {
+      // 一键生成封面：自动生成提示词并保存 → 直接链式调用 ComfyUI 文生图
+      'one-click': async (ui) => {
+        ui.addMessage({ role: 'user', text: '一键生成封面' });
+        await roundChat(ui, { autoGenerate: true });
+      },
+      'regen': async (ui) => {
+        ui.addMessage({ role: 'user', text: '换一版不一样的' });
+        await roundChat(ui);
+      },
+      'generate': (ui) => doGenerate(ui),
+      'confirm-cover': async (ui) => {
+        if (!lastGenerated) return ui.addMessage({ role: 'assistant', text: '✗ 没有待确认的生成结果，请先生成封面' });
+        try {
+          const d = await api(`/api/projects/${p.id}/cover`, { asset: lastGenerated.file });
+          applyCover(d.cover);
+          ui.addMessage({ role: 'assistant', text: '✓ 已保存为项目封面', images: [cover.url] });
+          toast('项目封面已保存', 'ok');
+          await ctx.onChanged?.();
+        } catch (err) { ui.addMessage({ role: 'assistant', text: `✗ ${err.message}` }); }
+      },
+      'pick-refs': (ui) => openAssetLibrary({
+        mode: 'pick', multi: true, accept: 'image',
+        onPick: async (list) => {
+          const chosen = (Array.isArray(list) ? list : [list])
+            .filter((a) => /\.(png|jpe?g|webp)$/i.test(a.file))
+            .map((a) => ({ file: a.file, name: a.name, url: a.url }));
+          if (!chosen.length) return;
+          await refsAdded(ui, chosen);
+        },
+      }),
+      'upload-refs': () => refInput.click(),
+      'clear-refs': async (ui) => {
+        refs = [];
+        ui.addMessage({ role: 'user', text: '已清空参考图，回到纯文生图' });
+        await roundChat(ui);
+      },
+      'upload-cover': () => coverInput.click(),
+      'from-library-cover': (ui) => openAssetLibrary({
+        mode: 'pick', accept: 'image',
+        onPick: async (a) => {
+          try {
+            const d = await api(`/api/projects/${p.id}/cover`, { asset: a.file });
+            applyCover(d.cover);
+            ui.addMessage({ role: 'assistant', text: '✓ 已从资源库选用封面', images: [cover.url] });
+            toast('项目封面已更新', 'ok');
+            await ctx.onChanged?.();
+          } catch (err) { ui.addMessage({ role: 'assistant', text: `✗ ${err.message}` }); }
+        },
+      }),
+      'reset-cover': async (ui) => {
+        try {
+          const d = await api(`/api/projects/${p.id}/cover`, undefined, 'DELETE');
+          applyCover(d.cover);
+          ui.addMessage({ role: 'assistant', text: '✓ 已恢复为项目名称封面' });
+          toast('已恢复为项目名称封面', 'ok');
+          await ctx.onChanged?.();
+        } catch (err) { ui.addMessage({ role: 'assistant', text: `✗ ${err.message}` }); }
+      },
+    },
+    onSend: ({ ui }) => roundChat(ui),
+  });
+  return chat;
+}
 
-    rendered = true;                       // 后续重渲染不再重播 modalIn 入场动画
-  }
-
-  root.appendChild(backdrop);
-  render();
-  return { close };
+/* ------------------------------------------------------------------ 封面生成确认弹窗（模块级，便于单元测试） */
+/** 生成结果放大预览：确认才保存为项目封面；放弃则图片保留在资源库可复用。
+ * 依赖显式注入：project（含 id）/ ui（对话面板，addMessage）/ generated {file,url} /
+ * applyCover（写回封面）/ onChanged / toast。返回 { wrap, generated } 便于调用方登记待确认项。 */
+export function openGeneratedConfirm({ project, ui = { addMessage: () => {} }, generated, applyCover = () => {}, onChanged, toast: toastFn = () => {} }) {
+  if (!generated?.file || !generated?.url) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML = `<div class="modal cover-confirm-modal" role="dialog" aria-label="封面确认">
+      <div class="pmm-head"><div><h2>👁 封面预览确认</h2><div class="sub">保存后生效为项目封面；放弃则图片仍存于资源库</div></div>
+        <button class="icon-btn" data-x aria-label="关闭">✕</button></div>
+      <img class="cover-confirm-img" src="${esc(generated.url)}" alt="生成的封面" title="点击图片可关闭，稍后从对话里重新确认">
+      <div class="modal-actions">
+        <button class="btn" data-skip>✕ 放弃</button>
+        <button class="btn primary" data-save>✓ 保存为封面</button>
+      </div></div>`;
+  (document.getElementById('modal-root') || document.body).appendChild(wrap);
+  const done = () => wrap.remove();
+  wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
+  wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
+  wrap.querySelector('.cover-confirm-img').addEventListener('click', done);
+  wrap.querySelector('[data-skip]').addEventListener('click', () => {
+    done();
+    ui.addMessage({ role: 'assistant', text: '已放弃本次封面，图片已存入资源库，可从资源库再次选用' });
+  });
+  wrap.querySelector('[data-save]').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const d = await api(`/api/projects/${project.id}/cover`, { asset: generated.file });
+      applyCover(d.cover);
+      ui.addMessage({ role: 'assistant', text: '✓ 已保存为项目封面', images: [d.cover?.url].filter(Boolean) });
+      toastFn('项目封面已保存', 'ok');
+      await onChanged?.();
+      done();
+    } catch (err) { toastFn(err.message, 'err'); btn.disabled = false; }
+  });
+  return { wrap, generated };
 }
 
 /* ------------------------------------------------------------------ 六步任务面板 */

@@ -19,6 +19,10 @@ const SCHEMAS = {
   spatial: '转场说明：{fromCam,toCam,spatialNotes,axisRule,cameraPath}',
   review: '评审：{reason, highlights:[字符串]}',
   coverPrompt: '封面文生图提示词：{prompt:string(可直接喂 SDXL 的完整正向提示词), negative:string(负向提示词), style:string}（输出该 JSON 对象本身，不要加外层键名包裹）',
+  // 独立封面提示词 agent：只做提示词设计优化，不承担对话职责
+  coverPromptDesign: '封面提示词设计师：把项目资料、用户画面要求与参考图，设计优化成一句完整、连贯、有画面感的中文封面描述（40~120 字，须涵盖主体、场景/动作、光影、构图、风格氛围，是一句通顺的话而不是关键词堆砌），prompt 末尾可追加少量英文质量词（如 cinematic movie poster, highly detailed, no text）。输出 {prompt:string(上述完整描述句), negative:string(负向提示词，含 text/watermark 等), style:string}（输出该 JSON 对象本身，不要加外层键名包裹）',
+  // 封面创作助手对话：回复 + 可直接使用的提示词 + 用户可点击的下一步建议
+  coverChat: '封面创作助手对话：{reply:string(对用户的自然回复，一两句话), prompt:string(可直接喂 SDXL 的完整正向提示词，融合项目资料、对话要求与参考图), negative:string(负向提示词), suggestions:[string,2~3条用户可直接点击的下一步建议]}（输出该 JSON 对象本身，不要加外层键名包裹）',
   // 项目信息 AI 补全：按一句话构想产出创作设定各字段（bible）
   storyIdea: '项目信息补全：{title, genre, audience, logline, tone, artStyle, firstEpisodeTheme, worldview}（logline 为一句话简介，worldview 200 字以内）',
   // AI 生成小说：先出分章大纲，再逐章写正文
@@ -271,6 +275,41 @@ function mockGenerate(intent, vars = {}) {
         style: vars.style || theme.styleHint,
       };
     }
+    case 'coverPromptDesign': {
+      // 独立封面提示词 agent 的确定性兜底：输出完整连贯的中文描述句（非关键词堆砌）+ 少量英文质量词
+      const title = String(vars.title || '').trim().slice(0, 40) || shortTitle(idea) || '未命名故事';
+      const gist = String(vars.logline || vars.summary || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+        || String(idea).replace(/\s+/g, ' ').trim().slice(0, 120);
+      const custom = String(vars.requirement || vars.custom || '').trim().slice(0, 200);
+      const anime = vars.style === 'anime' || theme.styleHint === 'anime';
+      const subject = custom
+        ? `画面聚焦于${custom}的核心戏剧瞬间`
+        : gist ? `画面呈现「${gist}」中最具张力的关键瞬间` : '画面呈现故事中最具张力的戏剧性瞬间';
+      return {
+        prompt: `为漫剧《${title}》设计的一张电影感封面插画：${subject}，` +
+          `主角居于画面视觉中心，逆光与冷暖对比强化戏剧氛围，构图讲究留白与视线引导，` +
+          `整体呈现${anime ? '高清赛璐璐动漫质感' : '写实电影质感'}，细节丰富，画面中不出现任何文字。` +
+          `cinematic movie poster, highly detailed, dramatic lighting, no text, no watermark`,
+        negative: 'text, watermark, logo, lettering, caption, low quality, blurry, deformed, bad anatomy',
+        style: vars.style || theme.styleHint,
+      };
+    }
+    case 'coverChat': {
+      // 封面对话确定性回退：提示词交给独立设计 agent 的兜底模板（带上用户要求），再补一段回复与建议
+      const nRefs = Array.isArray(vars.refs) ? vars.refs.length : 0;
+      const lastUser = [...(Array.isArray(vars.history) ? vars.history : [])].reverse().find((x) => x?.role === 'user');
+      const custom = String(lastUser?.content || '').trim();
+      const base = mockGenerate('coverPromptDesign', { ...vars, requirement: custom });
+      const lead = nRefs
+        ? `已结合 ${nRefs} 张参考图的构图与配色基调，`
+        : (custom ? `按「${custom.slice(0, 40)}」的要求，` : '');
+      return {
+        reply: `${nRefs || custom ? lead : '已根据项目资料'}为《${vars.title || '未命名影片'}》写好封面提示词，确认后即可生成。`,
+        prompt: base.prompt,
+        negative: base.negative,
+        suggestions: ['再大气一点', '换一种画面风格', '直接生成封面'],
+      };
+    }
     case 'storyIdea': {
       // 项目信息 AI 补全：一句话构想 → 创作设定各字段；零 Key 时用主题模板确定性生成
       const name = String(vars.title || '').trim() || shortTitle(idea) || '未命名项目';
@@ -510,10 +549,14 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     let fellBack = false;
     if (mode === 'openai') {
       try {
+        // __images：多模态图片输入（dataURL），不进文本 payload，走 OpenAI image_url 消息
+        const userVars = { ...vars };
+        const images = userVars.__images;
+        delete userVars.__images;
         const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。` +
           (vars.fragments ? '输入中的 fragments 是原著检索片段（FRAGMENT 标签），镜头/场景描述必须与其人物、道具、环境、光线保持一致，不要引入矛盾设定。' : '');
-        const user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(vars, null, 2)}`;
-        const out = await callLLM(system, user, signal, { intent });
+        const user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(userVars, null, 2)}`;
+        const out = await callLLM(system, user, signal, { intent, images });
         return mergeDefaults(intent, out, vars);
       } catch (err) {
         // 失败回退 Mock 也计入调用次数（tokens 为 0），保证「调用了真实端点」这件事可审计
