@@ -285,6 +285,70 @@ export async function handleApi(req, res, url) {
     return json(res, { ok: true, config, summary: comfySummary(config) }), true;
   }
 
+  if (pathname === '/api/comfyui/test-batch' && method === 'POST') {
+    const body = await readBody(req);
+    const kind = body.kind === 'video' ? 'video' : 'image';
+    const config = loadComfyConfig();
+    const libKey = `${kind}WorkflowLib`;
+    const lib = config[libKey] || [];
+    const ids = (Array.isArray(body.ids) ? body.ids : []).filter((id) => lib.some((e) => e.id === id));
+    if (!ids.length) return json(res, { error: '没有匹配的库项' }, 400), true;
+    try {
+      await testConnection(config.baseUrl);
+    } catch (err) {
+      // 连不上整批返回，不让每一项空等到 15 分钟超时
+      return json(res, { ok: false, connectionError: err.message, results: [] }), true;
+    }
+    const log = (level, message) => emit('log', { source: 'wf-test', level, message });
+    const ac = new AbortController();
+    let clientGone = false;
+    res.on('close', () => { if (!res.writableEnded) { clientGone = true; ac.abort(); } });
+
+    // 每项完成即写回 lastTest：重新读盘再改，避免覆盖试跑期间用户的其它修改
+    const writeLastTest = (id, lastTest) => {
+      try {
+        const fresh = loadComfyConfig();
+        const cur = fresh[libKey] || [];
+        const target = cur.find((e) => e.id === id);
+        if (!target) return;
+        target.lastTest = lastTest;
+        saveComfyConfig({ [libKey]: cur });
+      } catch (err) { console.warn('[comfy] lastTest 写回失败：', err.message); }
+    };
+
+    const results = [];
+    for (let i = 0; i < ids.length; i += 1) {
+      if (clientGone) break;   // 客户端断开 → 当前项被 signal 取消后停止后续项
+      const entry = lib.find((e) => e.id === ids[i]);
+      if (!entry) continue;
+      log('info', `▶ 试跑 ${i + 1}/${ids.length} ·「${entry.name}」`);
+      const t0 = Date.now();
+      let lastTest;
+      try {
+        const r = await runWorkflow(config, entry.workflow, {
+          prompt: 'cinematic test shot, consistent character, soft light',
+          filenamePrefix: 'lingximanju_test', cfg: config,
+        }, {
+          bindings: config.bindings?.[kind] || [],
+          signal: ac.signal,
+          log: (lv, msg) => log(lv, `「${entry.name}」${msg}`),
+        });
+        lastTest = { ok: true, durationMs: r.durationMs, at: Date.now(), error: null };
+        results.push({ id: entry.id, ok: true, durationMs: r.durationMs, error: null });
+        log('info', `✓「${entry.name}」 ${(r.durationMs / 1000).toFixed(1)}s`);
+      } catch (err) {
+        const error = clientGone ? '已取消' : (/执行超时/.test(err.message) ? '超时' : err.message);
+        lastTest = { ok: false, durationMs: Date.now() - t0, at: Date.now(), error };
+        results.push({ id: entry.id, ok: false, durationMs: lastTest.durationMs, error });
+        log('error', `✕「${entry.name}」 ${error}`);
+      }
+      writeLastTest(entry.id, lastTest);
+    }
+    if (clientGone) return true;   // 对端已断开，无需再写响应
+    const final = loadComfyConfig();
+    return json(res, { ok: true, results, config: final, summary: comfySummary(final) }), true;
+  }
+
   if (pathname === '/api/bootstrap' && method === 'GET') {
     let projects = listProjects();
     if (!projects.length) {

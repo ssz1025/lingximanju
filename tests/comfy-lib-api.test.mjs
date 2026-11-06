@@ -5,6 +5,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -19,6 +20,7 @@ const WF_A = { '1': { class_type: 'SaveImage', inputs: { filename_prefix: 'a' } 
 const WF_B = { '2': { class_type: 'KSampler', inputs: { seed: 7, steps: 20 } } };
 const reset = () => fs.rmSync(FILE, { force: true });
 const readCfg = () => JSON.parse(fs.readFileSync(FILE, 'utf8'));
+const writeCfgSafe = (obj) => fs.writeFileSync(FILE, JSON.stringify(obj), 'utf8');
 
 after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
@@ -131,4 +133,109 @@ test('DELETE /api/comfyui/library/:kind/:id：删选中项清镜像、删非选�
   const disk = readCfg();
   assert.equal(disk.imageWorkflow, null);
   assert.equal(disk.imageWorkflowLib.length, 0, '已落盘');
+});
+
+/** 假 ComfyUI：/system_stats、/prompt（工作流含 MockFail 节点即 400）、/history、/view */
+function startMockComfy() {
+  const state = { prompts: 0, inFlight: 0, violations: 0, order: [] };
+  const server = http.createServer((req, res) => {
+    const send = (obj, code = 200) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(obj));
+    };
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname === '/system_stats') {
+      return send({ system: { comfyui_version: 'mock' }, devices: [{ name: 'mock-gpu', vram_total: 1 }] });
+    }
+    if (url.pathname === '/prompt') {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        const body = JSON.parse(raw || '{}');
+        const types = Object.values(body.prompt || {}).map((n) => n.class_type);
+        state.order.push(types.join(','));
+        if (state.inFlight > 0) state.violations += 1;   // 上一条没完成又提交 → 违反串行
+        state.inFlight += 1;
+        state.prompts += 1;
+        if (types.includes('MockFail')) { state.inFlight -= 1; return send({ error: '模拟失败' }, 400); }
+        send({ prompt_id: `p${state.prompts}` });
+      });
+      return;
+    }
+    const m = url.pathname.match(/^\/history\/(\w+)$/);
+    if (m) {
+      state.inFlight -= 1;
+      return send({
+        [m[1]]: {
+          outputs: { out: { images: [{ filename: 't.png', subfolder: '', type: 'output' }] } },
+          status: { status_str: 'success' },
+        },
+      });
+    }
+    if (url.pathname === '/view') {
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      return res.end(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(64)]));
+    }
+    send({ error: 'not found' }, 404);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({ server, state, baseUrl: `http://127.0.0.1:${server.address().port}` });
+    });
+  });
+}
+
+test('POST /api/comfyui/test-batch：先探测连接、串行试跑、逐项 lastTest 落盘', async () => {
+  reset();
+  const { server, state, baseUrl } = await startMockComfy();
+  try {
+    writeCfgSafe({
+      baseUrl,
+      imageWorkflowLib: [
+        { id: 'ok1', name: '成功流', workflow: WF_A, createdAt: 1, lastTest: null },
+        { id: 'bad1', name: '失败流', workflow: { '9': { class_type: 'MockFail', inputs: {} } }, createdAt: 1, lastTest: null },
+      ],
+    });
+    const r = await api('POST', '/api/comfyui/test-batch', { kind: 'image', ids: ['ok1', 'bad1'] });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.ok, true);
+    assert.equal(r.data.results.length, 2);
+    assert.equal(r.data.results[0].ok, true);
+    assert.equal(r.data.results[0].error, null);
+    assert.ok(r.data.results[0].durationMs >= 0);
+    assert.equal(r.data.results[1].ok, false);
+    assert.match(r.data.results[1].error, /模拟失败/);
+    assert.equal(state.violations, 0, '必须串行，不并发抢 ComfyUI 队列');
+    assert.match(state.order[0], /SaveImage/, '按 ids 顺序先跑第一项');
+    assert.match(state.order[1], /MockFail/);
+    const saved = readCfg();
+    assert.equal(saved.imageWorkflowLib[0].lastTest.ok, true, '成功项徽标落盘');
+    assert.ok(saved.imageWorkflowLib[0].lastTest.durationMs >= 0);
+    assert.equal(saved.imageWorkflowLib[1].lastTest.ok, false);
+    assert.match(saved.imageWorkflowLib[1].lastTest.error, /模拟失败/);
+    assert.equal(r.data.summary.imageWorkflowLib[0].lastTest.ok, true, '响应概览同步');
+  } finally {
+    await new Promise((res) => server.close(res));
+  }
+});
+
+test('POST /api/comfyui/test-batch：无匹配 id → 400；ComfyUI 连不上 → 整批 connectionError', async () => {
+  reset();
+  const none = await api('POST', '/api/comfyui/test-batch', { kind: 'image', ids: ['ghost'] });
+  assert.equal(none.status, 400);
+
+  // 先占一个端口再关掉，得到一个必然拒绝连接的地址
+  const closed = http.createServer();
+  await new Promise((res) => closed.listen(0, '127.0.0.1', res));
+  const deadPort = closed.address().port;
+  await new Promise((res) => closed.close(res));
+  writeCfgSafe({
+    baseUrl: `http://127.0.0.1:${deadPort}`,
+    imageWorkflowLib: [{ id: 'x', name: 'X', workflow: WF_A, createdAt: 1, lastTest: null }],
+  });
+  const r = await api('POST', '/api/comfyui/test-batch', { kind: 'image', ids: ['x'] });
+  assert.equal(r.data.ok, false);
+  assert.match(r.data.connectionError, /无法连接/, '连不上整批返回，不逐项空等超时');
+  assert.deepEqual(r.data.results, []);
+  assert.equal(readCfg().imageWorkflowLib[0].lastTest, null, '没试跑不写 lastTest');
 });
