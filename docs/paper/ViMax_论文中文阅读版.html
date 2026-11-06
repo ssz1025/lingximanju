@@ -1,0 +1,1288 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ViMax 论文中文阅读版 · 全文翻译 + 核心要点</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --text:#1b1f26; --muted:#6b7280; --border:#e5e7eb;
+  --soft:#f1f3f7; --accent:#ea580c; --accent-soft:#fff3ea; --link:#b4480b;
+  --code-bg:#f3f4f6; --shadow:0 1px 3px rgba(16,24,40,.06),0 8px 28px rgba(16,24,40,.05);
+}
+html[data-theme="dark"]{
+  --bg:#0e1116; --panel:#161a21; --text:#e8ebf1; --muted:#98a1b0; --border:#2a313c;
+  --soft:#1c222c; --accent:#ff8a4c; --accent-soft:#2a1d15; --link:#ff9d68;
+  --code-bg:#1e242e; --shadow:0 1px 3px rgba(0,0,0,.3),0 10px 32px rgba(0,0,0,.22);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;
+  font-size:16px;line-height:1.85;-webkit-font-smoothing:antialiased}
+a{color:var(--link);text-decoration:none}
+a:hover{text-decoration:underline}
+#progress{position:fixed;top:0;left:0;height:3px;width:0;background:var(--accent);z-index:99;transition:width .1s}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:296px;flex:0 0 296px;background:var(--panel);border-right:1px solid var(--border);
+  height:100vh;position:sticky;top:0;display:flex;flex-direction:column;z-index:20}
+.side-head{padding:22px 22px 14px;border-bottom:1px solid var(--border)}
+.brand{font-size:19px;font-weight:750;letter-spacing:-.3px;display:flex;align-items:center;gap:9px}
+.brand .dot{width:10px;height:10px;border-radius:3px;background:var(--accent);display:inline-block}
+.brand-sub{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.6}
+.tabs{display:flex;gap:6px;padding:14px 16px 8px}
+.tab{flex:1;border:1px solid var(--border);background:transparent;color:var(--muted);
+  padding:9px 6px;border-radius:9px;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:.18s}
+.tab:hover{border-color:var(--accent);color:var(--accent)}
+.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.toc-search{margin:4px 16px 10px}
+.toc-search input{width:100%;padding:8px 11px;border-radius:8px;border:1px solid var(--border);
+  background:var(--soft);color:var(--text);font-size:13px;font-family:inherit;outline:none}
+.toc-search input:focus{border-color:var(--accent)}
+.toc{flex:1;overflow-y:auto;padding:2px 12px 18px;scrollbar-width:thin}
+.toc a{display:block;padding:5px 10px;border-radius:7px;color:var(--muted);font-size:13px;line-height:1.5;
+  border-left:2px solid transparent;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toc a:hover{background:var(--soft);color:var(--text);text-decoration:none}
+.toc a.l3{padding-left:24px;font-size:12.5px;opacity:.9}
+.toc a.cur{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft);font-weight:650}
+.side-foot{padding:12px 20px 16px;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted);line-height:1.7}
+.side-foot a{color:var(--muted);text-decoration:underline}
+.main{flex:1;min-width:0}
+.topbar{position:sticky;top:0;z-index:15;background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 34px}
+.topbar .crumb{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tools{display:flex;gap:8px;align-items:center;flex-shrink:0}
+.btn{border:1px solid var(--border);background:var(--panel);color:var(--text);border-radius:8px;
+  padding:6px 12px;font-size:12.5px;cursor:pointer;font-family:inherit;white-space:nowrap}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.content{max-width:920px;margin:0 auto;padding:34px 40px 100px}
+.hero{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:26px 30px;
+  box-shadow:var(--shadow);margin-bottom:30px}
+.hero h1{font-size:29px;line-height:1.35;margin:0 0 10px;letter-spacing:-.5px}
+.hero p{color:var(--muted);margin:0 0 16px;font-size:14px}
+.pills{display:flex;flex-wrap:wrap;gap:8px}
+.pill{font-size:12px;padding:5px 11px;border-radius:99px;background:var(--soft);border:1px solid var(--border);color:var(--muted)}
+.pill a{color:var(--link)}
+.doc{display:none}
+.doc.active{display:block}
+.article{background:var(--panel);border:1px solid var(--border);border-radius:16px;
+  padding:36px 44px 60px;box-shadow:var(--shadow)}
+.article h1{font-size:27px;line-height:1.4;margin:0 0 22px;padding-bottom:16px;border-bottom:2px solid var(--accent)}
+.article h2{font-size:21px;margin:44px 0 16px;padding-top:10px;border-top:1px solid var(--border);letter-spacing:-.2px}
+.article h2:first-of-type{border-top:none}
+.article h3{font-size:17.5px;margin:30px 0 12px;color:var(--text)}
+.article h4{font-size:15.5px;margin:24px 0 10px;color:var(--accent)}
+.article p{margin:0 0 14px}
+.article ul,.article ol{padding-left:24px;margin:0 0 16px}
+.article li{margin:6px 0}
+.article strong{font-weight:700}
+.article hr{border:none;border-top:1px solid var(--border);margin:36px 0}
+.article blockquote{margin:18px 0;padding:12px 18px;background:var(--accent-soft);
+  border-left:3px solid var(--accent);border-radius:0 9px 9px 0;color:var(--text);font-size:14.5px}
+.article blockquote p{margin:4px 0}
+.article code{background:var(--code-bg);padding:2px 6px;border-radius:5px;font-size:13px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.article pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;
+  padding:16px;overflow-x:auto;font-size:13px;line-height:1.7}
+.article pre code{background:none;padding:0}
+.table-wrap{overflow-x:auto;margin:18px 0 8px;border:1px solid var(--border);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:560px}
+th,td{border-bottom:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top}
+th{background:var(--soft);font-weight:700;white-space:nowrap;position:sticky;top:0}
+tbody tr:nth-child(even){background:color-mix(in srgb,var(--soft) 45%,transparent)}
+tbody tr:hover{background:var(--accent-soft)}
+.math-block{overflow-x:auto;text-align:center;padding:14px 10px;margin:16px 0;
+  background:var(--soft);border:1px solid var(--border);border-radius:10px;font-size:15px;color:var(--text)}
+.math-inline{white-space:nowrap}
+mje-container,mjx-container{color:var(--text)}
+.paper-fig{margin:24px 0;padding:16px;background:var(--soft);border:1px solid var(--border);border-radius:12px}
+.fig-imgs{display:flex;flex-direction:column;gap:10px;align-items:center}
+.paper-fig img{max-width:100%;height:auto;border-radius:8px;background:#fff}
+.paper-fig figcaption{font-size:13px;color:var(--muted);margin-top:12px;line-height:1.7}
+.paper-fig figcaption strong{color:var(--accent)}
+.fig-src{display:block;font-size:11.5px;opacity:.75;margin-top:3px}
+mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden;padding:6px 0}
+.backtop{position:fixed;right:26px;bottom:26px;width:40px;height:40px;border-radius:50%;
+  background:var(--accent);color:#fff;border:none;font-size:18px;cursor:pointer;box-shadow:var(--shadow);
+  opacity:0;pointer-events:none;transition:.2s;z-index:30}
+.backtop.show{opacity:1;pointer-events:auto}
+@media(max-width:1000px){
+  .layout{flex-direction:column}
+  .sidebar{width:100%;height:auto;position:static;flex:none;border-right:none;border-bottom:1px solid var(--border)}
+  .toc{max-height:210px}
+  .side-foot{display:none}
+  .content{padding:22px 16px 80px}
+  .article{padding:24px 20px 40px}
+  .topbar{padding:9px 16px}
+}
+@media print{
+  .sidebar,.topbar,.backtop,#progress,.tools{display:none!important}
+  .layout{display:block}
+  .content{max-width:none;padding:0}
+  .article{box-shadow:none;border:none;padding:0}
+  .doc{display:block!important;page-break-before:always}
+  .hero{display:none}
+  body{background:#fff;color:#000;font-size:11pt}
+}
+</style>
+<script>
+window.MathJax={
+  tex:{inlineMath:[['$','$'],['\\(','\\)']],displayMath:[['$$','$$'],['\\[','\\]']],processEscapes:true},
+  options:{skipHtmlTags:['script','noscript','style','textarea','pre','code']}
+};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+<div id="progress"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="brand"><span class="dot"></span>ViMax 论文中文阅读版</div>
+      <div class="brand-sub">arXiv:2606.07649v2 · 20 页<br>全文翻译 + 核心要点导读</div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="guide">核心要点导读</button>
+      <button class="tab" data-tab="paper">中文全文</button>
+    </div>
+    <div class="toc-search"><input id="tocSearch" placeholder="筛选章节目录…" autocomplete="off"></div>
+    <nav class="toc" id="toc"></nav>
+    <div class="side-foot">
+      原文 <a href="https://arxiv.org/abs/2606.07649" target="_blank">arXiv:2606.07649</a><br>
+      代码 <a href="https://github.com/HKUDS/ViMax" target="_blank">HKUDS/ViMax</a>（本地副本 ViMax/）<br>
+      插图取自英文原文，公式由 MathJax 渲染；离线时公式显示为 LaTeX 源码。
+    </div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div class="crumb" id="crumb">核心要点导读</div>
+      <div class="tools">
+        <a class="btn" href="https://arxiv.org/pdf/2606.07649" target="_blank">英文原文 PDF ↗</a>
+        <button class="btn" id="printBtn">打印 / 存为 PDF</button>
+        <button class="btn" id="themeBtn">☾ 深色</button>
+      </div>
+    </div>
+    <div class="content">
+      <div class="hero">
+        <h1>ViMax：智能体驱动的长视频生成</h1>
+        <p>把英文论文完整译为中文，并附一份带批判视角的阅读地图。左侧可切换「导读 / 全文」，目录支持筛选与跳转。</p>
+        <div class="pills">
+          <span class="pill">arXiv:2606.07649v2 · 2026-07-21</span>
+          <span class="pill">HKUDS · 6 位作者</span>
+          <span class="pill">cs.CV / cs.AI</span>
+          <span class="pill"><a href="https://github.com/HKUDS/ViMax" target="_blank">开源代码 ↗</a></span>
+          <span class="pill">中文译文约 2.7 万字符</span>
+        </div>
+      </div>
+      <section class="doc active" id="doc-guide"><article class="article"><h1>ViMax 论文核心要点导读</h1>
+<blockquote>
+<p>配套材料：<code>ViMax_论文中文版.md</code>（全文翻译）｜原文：<a href="https://arxiv.org/abs/2606.07649">arXiv:2606.07649v2</a>｜代码：<code>ViMax/</code>（<a href="https://github.com/HKUDS/ViMax">HKUDS/ViMax</a>）
+本导读的目的不是复述摘要，而是帮你在读全文前先建立地图：知道<strong>它解决什么、怎么搭起来、数字意味着什么、哪里该打问号</strong>。</p>
+</blockquote>
+<hr />
+<h2 id="g-1">0. 一分钟速览</h2>
+<p><strong>一句话</strong>：ViMax 不训练新的视频生成模型，而是用一套多智能体「制片流水线」，把闭源的 LLM／图像／视频模型编排起来，让它们协作产出<strong>多镜头、跨场景仍连贯</strong>的叙事视频。</p>
+<p><strong>它的两个敌人</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>敌人</th>
+<th>表现</th>
+<th>ViMax 的解法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>长程叙事规划</td>
+<td>几十上百个镜头一起规划，超出 LLM 推理容量；局部决策脱离全局故事</td>
+<td>层次化分解（事件 → 场景 → 镜头）+ RAG 检索原著补全全局上下文</td>
+</tr>
+<tr>
+<td>跨镜头视觉一致性</td>
+<td>每个镜头独立生成，角色长相、道具、房间布局逐镜漂移</td>
+<td>机位依赖图 + 视觉锚点传播（对象一致）；转场视频作空间锚点（几何一致）；VLM best-of-k 择优（质量兜底）</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>三个最该记住的数字</strong>：</p>
+<ul>
+<li><strong>GC 0.5272 → 0.5571</strong>：ViMax 相对最强非智能体基线 HoloCine 的全局一致性提升（绝对值 +0.0299，约 +5.7%）。</li>
+<li><strong>405 秒 / 17.5 美元</strong>：一个 8–16 镜头故事的端到端时延与 API 成本（best-of-2 默认配置）。</li>
+<li><strong>NF 3.52 / 5</strong>：小说转分镜的「忠于原著」得分，虽为全场最高，但离满分仍远——忠实度依然是开放问题。</li>
+</ul>
+<p><strong>定位判断</strong>：这是一篇<strong>系统与框架论文</strong>（orchestration framework），核心贡献是把已有能力（RAG、依赖图、VLM 评审、并行调度）组合成一条可跑的长视频流水线，并配了基准 ViMax-Bench；不是提出新的生成模型或新的训练算法。读它时，重点看「编排逻辑」和「消融证据」，不必期待模型结构创新。</p>
+<hr />
+<h2 id="g-2">1. 论文要填的空白</h2>
+<p>作者把现有工作归为三类，逐一切中点：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>路线</th>
+<th>代表</th>
+<th>能做到</th>
+<th>缺什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>文生视频大模型</td>
+<td>Sora、Veo 3、Seedance、Wan、HunyuanVideo</td>
+<td>单镜头画质高</td>
+<td>只有数秒；拉长后角色身份、世界几何、物理规律漂移</td>
+</tr>
+<tr>
+<td>流式 / 一致性机制</td>
+<td>StreamingT2V、FreeLong；StoryDiffusion、ConsiStory、STAGE</td>
+<td>延长单片段，或保住主体身份</td>
+<td>前者不能做多场景叙事，后者没有叙事规划</td>
+</tr>
+<tr>
+<td>多智能体制片</td>
+<td>FilmAgent、Kubrick、VideoGen-of-Thought、MovieAgent、AniMaker</td>
+<td>拆分导演/编剧等角色</td>
+<td>无法同时协调叙事、视觉、时序三类约束，跨几十镜头时全局连贯崩掉</td>
+</tr>
+</tbody>
+</table></div>
+<p>于是作者把问题收敛为两个挑战：<strong>多镜头视觉一致性</strong>（对象级 + 空间级）与<strong>长程叙事规划</strong>。全文方法章节就是这两个挑战的逐条应答。</p>
+<hr />
+<h2 id="g-3">2. 方法全景：一条流水线 + 三根支柱</h2>
+<p><strong>主线（第 2.1 节，式 1–4）</strong>：</p>
+<pre><code>创意 I（几句话 / 小说 / 剧本）
+  → ① 编剧 ScreenWriting：按输入类别路由提示词，生成统一格式剧本 S
+  → ② 镜头规划 ShotPlanning：分镜智能体输出每镜头的机位、运镜、光照、走位、时长
+  → ③ 关键帧 ImageGen：角色定妆照 / 场景图 / 镜头首帧（文生图 + 参考图生图）
+  → ④ 视频生成 VideoGen：以「镜头规格 + 关键帧」为条件逐镜头出片
+  → ⑤ VLM 质量控制：每个任务并行采样 k 个候选，VLM 打分择优（best-of-k）
+</code></pre>
+<p><strong>支柱一：层次化叙事规划（2.2，式 5–6）</strong>。故事按「主要事件 → 场景 → 镜头」递归分解，让 LLM 每层只处理合适粒度的任务；但分解会丢掉原著里的角色动机、伏笔等细节，因此再对完整原著建索引，用每个节点的描述去检索相关上下文并「增强」描述（RAG）。<strong>分解管复杂度，RAG 管信息不丢失</strong>——这是理解第 2.2 节的关键分工。</p>
+<p><strong>支柱二：基于图的视觉依赖（2.3.1，式 7）</strong>。规划阶段把镜头分配给「机位」，构建<strong>机位依赖图</strong>；生成阶段按拓扑序执行：无依赖的机位分支并行生成，有依赖的机位则继承前驱节点传播下来的视觉锚点。这个设计一箭双雕——既保证角色/道具一致，又天然给出可并行的调度图（第 3.5 节的效率收益来自这里）。</p>
+<p><strong>支柱三：转场视频作空间锚点（2.3.2，式 8）</strong>。同一场景换个机位拍，最容易穿帮的是三维布局。ViMax 不独立生成每个视角，而是先生成一段从机位 A 平滑移动到机位 B 的转场视频，再从视频里抽取两端视角——借用视频模型自身的时空一致性来「锁定」房间布局，隐式满足 180 度轴线规则。</p>
+<blockquote>
+<p>一句话记法：<strong>RAG 借原文的记忆力，依赖图借已生成镜头的视觉记忆，转场视频借视频模型的空间记忆</strong>。</p>
+</blockquote>
+<hr />
+<h2 id="g-4">3. 三项贡献的「含金量」</h2>
+<ol>
+<li><strong>多智能体长视频框架</strong>：工程整合度最高的一项。价值在于把编剧、分镜、造型、生成、质检拆成可替换模块，且依赖图暴露并行性。</li>
+<li><strong>层次化 + RAG 的叙事规划</strong>：思路经典，但用在「小说 → 上百镜头分镜」上有针对性；消融也确实显示 RAG 主要提升 NF（3.14 → 3.52）。</li>
+<li><strong>双层视觉一致性</strong>：机位依赖图 + 转场视频是最有辨识度的设计；消融中「去掉全部跨镜头依赖」使总体 GC 掉 8.7%，是全文最有力的因果证据。</li>
+</ol>
+<p>另外别漏了第四项实质贡献：<strong>ViMax-Bench</strong>（附录 A.1–A.2），35 个故事、438 个镜头、按一致性类型（角色持久性 / 背景持久性 / 多人交互）× 长度（中篇 2 场 8–10 镜 / 长篇 3–4 场 12–16 镜）组织，是本文可复用的评测资产。</p>
+<hr />
+<h2 id="g-5">4. 实验速查</h2>
+<p><strong>先弄清指标，否则数字会被误读</strong>：CC / IC / GC <strong>不是人工评分，也不是「一致率」</strong>，而是用 ViCLIP 把每个镜头编码成视频级特征后，对同一故事内镜头对求余弦相似度——IC 只算同场景内镜头对，CC 只算跨场景镜头对，GC 算全部。它衡量的是<strong>特征稳定性</strong>，是视觉一致性的代理指标（见附录 A.2）。叙事规划指标（CBC/NC/PPR/VSU/STQ/NF）才是 GPT-5.4 按 1–5 量表打的分。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>研究问题</th>
+<th>结论</th>
+<th>关键数字</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RQ1 整体性能</td>
+<td>九项设置全部第一；长篇增益更大</td>
+<td>总体 GC <strong>0.5571</strong> vs HoloCine 0.5272、AniMaker 0.5167、MovieAgent 0.4716；叙事 Avg. <strong>4.107</strong> vs AniMaker 3.827</td>
+</tr>
+<tr>
+<td>RQ2 人类偏好</td>
+<td>35 故事 × 5 基线 = 175 对，15 位评审、525 次判断；三项标准胜率全部过半</td>
+<td>总体 Avg. 胜率 <strong>60.48%–77.62%</strong>；最强对手 StoryDiffusion 77.62%</td>
+</tr>
+<tr>
+<td>RQ3 消融</td>
+<td>三个模块作用互补，缺一不可</td>
+<td>去 StoryboardArtist：VSU 4.94→3.10；去事件链：NF 3.52→2.34；去 RAG：NF 3.52→3.14；去全部跨镜头依赖：GC <strong>−8.7%</strong>；去 VLM 择优：GC <strong>−3.8%</strong></td>
+</tr>
+<tr>
+<td>RQ4 效率</td>
+<td>依赖图并行是「质量—时延」最优解</td>
+<td>全并行 310s / GC 0.5085；全串行 835s / 0.5511；<strong>完整 ViMax 405s / 0.5571</strong></td>
+</tr>
+<tr>
+<td>RQ5 LLM 骨干</td>
+<td>推理能力强的模型更会维护长程状态</td>
+<td>GPT-5.4：GC 0.5623、Avg. 4.11（最佳折中）；Claude-Sonnet-4.6 叙事 4.06 但 GC 仅 0.5284</td>
+</tr>
+<tr>
+<td>RQ6 best-of-<span class="math-inline">$k$</span></td>
+<td>候选越多反而越差，选 <span class="math-inline">$k=2$</span></td>
+<td>k=2：GC 0.5571 / 17.500 美元 / 405s；k=3：0.5041；k=4：0.5194</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>读消融时最值得注意的反常点</strong>：去掉 RAG 后 Avg. 反而微升（4.107 → 4.110），去掉事件链后 VSU 也微升（4.94 → 4.98）。这说明这两个模块<strong>不是全面提升画面/分镜质量，而是专门守住「忠于原著」和「事件因果」</strong>；作者据此把它们定位为互补模块，而不是通用增益插件。</p>
+<hr />
+<h2 id="g-6">5. 阅读路线建议</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>优先级</th>
+<th>章节</th>
+<th>为什么读</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>必读</td>
+<td>摘要、1 引言（两大挑战 + 三贡献）</td>
+<td>10 分钟建立问题框架</td>
+</tr>
+<tr>
+<td>必读</td>
+<td>2.1.1 工作流（式 1–3）、2.2.1 分解（式 5）、2.3.1 依赖图（式 7）</td>
+<td>全篇骨架；公式只是流程的形式化，不必推导</td>
+</tr>
+<tr>
+<td>必读</td>
+<td>3.2 表 1、3.4 消融、3.5 效率</td>
+<td>判断「有效」与「为什么有效」的证据</td>
+</tr>
+<tr>
+<td>选读</td>
+<td>2.2.2 RAG（式 6）、2.3.2 转场视频（式 8）、2.1.2 质量控制（式 4）</td>
+<td>实现细节，做二次开发时再细看</td>
+</tr>
+<tr>
+<td>选读</td>
+<td>附录 A.2 评测协议、A.4 实现细节</td>
+<td>想复现必读；含具体模型与嵌入/重排配置</td>
+</tr>
+<tr>
+<td>可略</td>
+<td>4 相关工作、附录 A.6 案例、图 11–15 提示词模板</td>
+<td>背景与素材；做 prompt 工程时再回头翻</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>如果只有 20 分钟</strong>：读摘要 → 1 引言的「two fundamental challenges」→ 2.3.1 → 表 1 → 3.4 消融 → 局限性。</p>
+<hr />
+<h2 id="g-7">6. 论文 ↔ 本地 <code>ViMax/</code> 代码对照</h2>
+<p>这是把论文读「活」的最快方式——本地仓库就是这份框架的实现，版本与论文 v2 同期（README 显示 v1.2.0，2026-07-20 发布 Web UI）。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>论文中的模块</th>
+<th>本地文件（相对 <code>ViMax/</code>）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>编剧 ScreenWriting（式 1）</td>
+<td><code>agents/screenwriter.py</code>、<code>agents/script_enhancer.py</code>、<code>agents/script_planner.py</code></td>
+</tr>
+<tr>
+<td>层次化分解：事件 / 场景</td>
+<td><code>agents/event_extractor.py</code>、<code>agents/scene_extractor.py</code>、<code>agents/global_information_planner.py</code></td>
+</tr>
+<tr>
+<td>小说压缩与全局上下文</td>
+<td><code>agents/novel_compressor.py</code>、<code>agents/global_information_planner.py</code>、<code>tools/reranker_bge_silicon_api.py</code>（重排）</td>
+</tr>
+<tr>
+<td>镜头规划 / 分镜（式 2）</td>
+<td><code>agents/storyboard_artist.py</code></td>
+</tr>
+<tr>
+<td>角色定妆与参考图选择</td>
+<td><code>agents/character_extractor.py</code>、<code>agents/character_portraits_generator.py</code>、<code>agents/reference_image_selector.py</code></td>
+</tr>
+<tr>
+<td>机位依赖图 + 视觉锚点（式 7）</td>
+<td><code>agents/camera_image_generator.py</code>（<code>CameraTreeResponse</code>、<code>CameraParentItem</code> 定义父子机位）</td>
+</tr>
+<tr>
+<td>转场视频作空间锚点（式 8）</td>
+<td><code>agents/camera_image_generator.py</code> 的 <code>generate_transition_video()</code>，产物名如 <code>transition_video_from_shot_0.mp4</code></td>
+</tr>
+<tr>
+<td>VLM best-of-<span class="math-inline">$k$</span> 择优（式 4）</td>
+<td><code>agents/best_image_selector.py</code>；<code>utils/image_selection.py</code> 中 <code>DEFAULT_IMAGE_CANDIDATES = 2</code>，正对应论文 <span class="math-inline">$k=2$</span> 的默认值</td>
+</tr>
+<tr>
+<td>三条入口流水线</td>
+<td><code>pipelines/idea2video_pipeline.py</code>（创意）、<code>script2video_pipeline.py</code>（剧本）、<code>novel2movie_pipeline.py</code>（小说），对应仓库的 Idea2Video / Script2Video / Novel2Video</td>
+</tr>
+<tr>
+<td>图像/视频供应商适配</td>
+<td><code>tools/image_generator_*.py</code>、<code>tools/video_generator_*.py</code></td>
+</tr>
+<tr>
+<td>成片组装</td>
+<td><code>tools/render_backend.py</code>、<code>utils/video.py</code></td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p>一个有意思的印证：论文超参实验得出「<span class="math-inline">$k=2$</span> 最好」，而仓库里默认候选数就写死为 2；论文强调的转场视频，在代码中也确实存在独立生成与切分逻辑。读论文时若对某段机制有疑问，直接去对应文件里看提示词与调用顺序，往往比反复读公式更快。</p>
+</blockquote>
+<hr />
+<h2 id="g-8">7. 批判性阅读清单（带问号的地方）</h2>
+<ol>
+<li><strong>「长视频」的实际尺度有限</strong>。基准只有 35 个故事、每个 2–4 场景 / 8–16 镜头、共 438 个镜头，本质是「多镜头短片」；结论能否外推到分钟级、小时级、数百镜头，论文没有证明（作者在局限性第 2 点也承认规模有限）。</li>
+<li><strong>GC 只是代理指标</strong>。ViCLIP 余弦相似度偏爱整体风格稳定，不必然等于「角色是同一个人」；0.5571 与 0.5272 的差距约 0.03，绝对值都不高。人类评估（表 2）与定性案例（附录 A.6）才是对它的必要补充。</li>
+<li><strong>忠实原著仍是短板</strong>。NF 最高仅 3.52/5；「小说 → 分镜」在 50 部小说上评测，但只取前 20 / 前 100 张分镜分组打分，长程衰减曲线并未报告。</li>
+<li><strong>best-of-3 反而变差</strong>被解释为「候选增多带来选择噪声」，也可能说明 VLM 评审器判别力已饱和；论文未做评审器与人类偏好的一致性校验。</li>
+<li><strong>成本与闭源依赖</strong>。每个故事约 17.5 美元 API 费用、405 秒；全链路依赖 Gemini / GPT / Claude / Veo / Wan 等模型，作者明确承认性能对模型版本更新敏感，复现结果可能随时间漂移。</li>
+<li><strong>基线适配的公平性</strong>。MovieAgent、AniMaker 被换成与 ViMax 相同的图像/视频骨干，但保留各自原生规划；这控制了生成骨干变量，却也可能放大规划模块差异，读表 1 时需留意方法名里的骨干标注。</li>
+<li><strong>误差会级联</strong>。作者自述：关键帧生成器在人群密集、接触频繁场景表现差；视频生成器有时不遵循关键帧语义（角色从跑步机上跑开）；一旦关键帧出错，会被后续镜头当作参考继续传播——这也解释了为什么 VLM 择优能带来 3.8% 的 GC 收益。</li>
+<li><strong>作者自己指出的方向性风险</strong>：商业视频模型在短时程多镜头一致性上进步很快，未来编排框架的价值可能转向「跨场景的长时程视觉记忆管理」，而非重复造底座已有的能力（局限性第 4 点）。此外音频、对白同步、镜头节奏、交互式修订都尚未覆盖。</li>
+</ol>
+<hr />
+<h2 id="g-9">8. 术语对照</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>缩写 / 术语</th>
+<th>中文</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CC / IC / GC</td>
+<td>跨场景 / 场景内 / 全局一致性</td>
+<td>基于 ViCLIP 特征的镜头对余弦相似度均值</td>
+</tr>
+<tr>
+<td>CSC / SF / AQ</td>
+<td>跨场景一致性 / 语义遵循 / 美学质量</td>
+<td>人类评估的三项标准</td>
+</tr>
+<tr>
+<td>CBC / NC / PPR / VSU / STQ / NF</td>
+<td>角色行为一致 / 叙事连贯 / 情节节奏 / 视觉具体性 / 转场连续 / 叙事忠实度</td>
+<td>叙事规划的六项 1–5 分指标，Avg. 为均值</td>
+</tr>
+<tr>
+<td>Camera Dependency Graph</td>
+<td>机位依赖图</td>
+<td>节点为机位、边为视觉依赖，按拓扑序生成并可并行</td>
+</tr>
+<tr>
+<td>Visual Anchor</td>
+<td>视觉锚点</td>
+<td>从前驱机位传播给后继机位的参考图/状态</td>
+</tr>
+<tr>
+<td>Transition Video</td>
+<td>转场视频</td>
+<td>连接两机位的平滑运镜片段，用作空间锚点</td>
+</tr>
+<tr>
+<td>Best-of-<span class="math-inline">$k$</span></td>
+<td>k 选优</td>
+<td>同一任务生成 k 个候选，VLM 打分取最高</td>
+</tr>
+<tr>
+<td>RAG</td>
+<td>检索增强生成</td>
+<td>索引原著并按节点描述检索，补全局部规划的全局上下文</td>
+</tr>
+<tr>
+<td>ViMax-Bench</td>
+<td>ViMax 基准</td>
+<td>35 个多镜头故事，按一致性类型 × 长度组织</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="g-10">9. 带走这一句</h2>
+<blockquote>
+<p>ViMax 的核心不是「生成得更好」，而是<strong>把长片制作中原本靠人维护的三份记忆——故事上下文、已生成镜头的视觉状态、场景的三维几何——显式地建模成可检索、可传播、可并行调度的数据结构</strong>，再用 VLM 在关键帧阶段做质量闸门。</p>
+</blockquote>
+<p>如果你准备基于本地仓库做二次开发，建议从 <code>pipelines/script2video_pipeline.py</code> + <code>agents/camera_image_generator.py</code> 入手，配合中文译文第 2.3.1 节读，能最快看懂「依赖图如何决定生成顺序」这条主脉络。</p></article></section>
+      <section class="doc" id="doc-paper"><article class="article"><h1>ViMax：智能体驱动的长视频生成</h1>
+<blockquote>
+<p><strong>论文中文翻译版</strong></p>
+<ul>
+<li>原文标题：<em>ViMax: Agentic Video Generation</em></li>
+<li>作者：Lingxuan Huang、Sizhe He、Hengji Zhou、Liqiang Nie、Lianghao Xia、Chao Huang</li>
+<li>来源：arXiv:2606.07649（v1 提交于 2026-06-02；本译文依据 v2，2026-07-21 修订）</li>
+<li>学科分类：cs.CV、cs.AI；共 20 页、13 幅图</li>
+<li>代码仓库：<a href="https://github.com/HKUDS/ViMax">https://github.com/HKUDS/ViMax</a>（本地副本：<code>ViMax/</code>）</li>
+<li>原文链接：<a href="https://arxiv.org/abs/2606.07649">https://arxiv.org/abs/2606.07649</a></li>
+</ul>
+<p><strong>翻译说明</strong>：本译文力求忠实于原文的技术内容与论证逻辑，按中文学术表达调整语序；公式编号、表号、图号与原文一致，专业术语首次出现时给出英文原词。公式、方法名、指标缩写、参考文献条目保留原文形式，图题与表题译为中文。原论文的插图为示意图，本译文以中文图注标明其内容，可对照原文 PDF 查阅。</p>
+</blockquote>
+<hr />
+<h2 id="p-1">摘要</h2>
+<p>长视频生成需要系统性的叙事规划与视觉一致性，而现有的短片段生成方法无法提供这些能力。现有方法生成的是彼此孤立、缺乏叙事结构的镜头序列，也没有机制在跨场景时维持角色外观与环境的一致性。我们提出 <strong>ViMax</strong>——一个智能体化（agentic）的视频生成框架，通过多个专职组件协同协作、共同协商叙事决策、视觉连续性与成片质量来完成视频创作。该框架采用<strong>带检索增强生成（RAG）的层次化叙事引擎</strong>以保证全局故事连贯，并引入<strong>依赖感知的视觉一致性机制</strong>，跨时间边界追踪角色与环境状态；同时，由视觉语言模型（VLM）引导的智能体持续监控并优化叙事连贯性与视觉保真度。借助这种协同协作，框架能够生成长篇叙事内容，在多场景时间线上同时保持故事的完整性与视觉的连贯性。ViMax 的代码开源于：<a href="https://github.com/HKUDS/ViMax">https://github.com/HKUDS/ViMax</a>。</p>
+<hr />
+<h2 id="p-2">1 引言</h2>
+<p>当前的视频生成方法存在关键局限：只能产出没有叙事结构的短片段，且角色外观与环境元素在跨场景时会发生不可预测的变化。生成式 AI 近期的突破为应对这些根本性挑战带来了变革性潜力：通过智能体化框架自动化复杂的视频制作流水线，创作者得以以前所未有的便利，把概念性的创意转化为连贯的长篇视觉叙事。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/ours_figure.png" alt="图 1" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/ours_figure.png'"></div><figcaption><strong>图 1</strong>：ViMax 在 ViMax-Bench 上生成的多镜头视频示例。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<p>视频生成的近期研究已从多个方向尝试应对这些挑战。以 Sora（OpenAI, 2024）、Veo 3（Google DeepMind, 2024）、Seedance（Team Seedance et al., 2026）为代表的文生视频模型，以及 HunyuanVideo（Kong et al., 2024）、Wan（Team Wan, 2025）等开源工作，已在<strong>单镜头保真度</strong>上取得令人印象深刻的效果。然而，这些模型仍局限于仅持续数秒的短内容。一旦扩展到更长的时程，它们会出现<strong>灾难性的语义遗忘</strong>：角色身份、世界几何结构与物理规律在镜头之间不可预测地漂移（Kupyn et al., 2025；Rakheja et al., 2025），从而破坏叙事沉浸感。</p>
+<p>已有两条技术路线试图解决时序一致性问题，但都存在明显局限。<strong>流式生成方法</strong>（StreamingT2V，Henschel et al., 2025；FreeLong，Lu et al., 2024）延长了单个片段的时长，却无法处理多场景叙事。<strong>一致性机制</strong>（StoryDiffusion，Zhou et al., 2024；ConsiStory，Tewel et al., 2024；STAGE，Zhang et al., 2025b）通过共享注意力或关键帧锚定来保持主体身份，却缺乏叙事规划能力。<strong>多智能体框架</strong>（FilmAgent，Xu et al., 2025；Kubrick，He et al., 2024；VideoGen-of-Thought，Zheng et al., 2024）虽然把制作流程拆分为专职角色，却无法协同协调叙事、视觉与时序这三类复杂约束。既有系统都难以在长篇叙事所必需的数十个镜头之间维持全局连贯。</p>
+<p>要突破这些局限，必须克服两项根本挑战：</p>
+<ul>
+<li>
+<p><strong>多镜头视觉一致性</strong>。现有视频生成器在彼此隔离的镜头上工作，不感知此前已生成的内容，导致角色外观、环境设计与空间布局发生漂移。长片制作既需要<strong>对象级一致性</strong>以保持角色与环境属性，也需要<strong>空间连贯性</strong>以在不同机位下维持一致的三维几何关系。</p>
+</li>
+<li>
+<p><strong>长程叙事规划</strong>。编排横跨数十个镜头的叙事，若作为单一任务整体处理，会超出当前语言模型的推理容量。系统需要在协调角色弧光、情节推进与主题连贯的同时，让每一项局部决策都扎根于更宏观的故事上下文。</p>
+</li>
+</ul>
+<p>为应对上述挑战，我们提出 <strong>ViMax</strong>：一个从概念创意到完整渲染成片、统筹长视频制作的智能体框架。ViMax 把这条流水线拆解为负责<strong>编剧、镜头规划、角色造型、视频生成</strong>以及<strong>基于 VLM 的质量控制（best-of-<span class="math-inline">$k$</span> 择优）</strong>的专职智能体，由它们协同维持全流程的连贯性。</p>
+<p>针对叙事复杂性，ViMax 采用<strong>层次化故事分解 + 检索增强生成</strong>，使局部规划始终以全局上下文为依据；针对视觉一致性，ViMax 引入<strong>基于图的依赖系统</strong>，在规划阶段追踪跨镜头关系，并通过<strong>转场视频生成</strong>维持同一场景内不同机位之间的空间连贯。</p>
+<p>本文的主要贡献包括：</p>
+<ul>
+<li>
+<p><strong>智能体化的长视频生成框架</strong>。提出一种多智能体架构，协同编剧、镜头规划、角色造型、视频生成与基于 VLM 的质量控制，实现从概念创意出发的叙事视频自动创作。</p>
+</li>
+<li>
+<p><strong>具备全局上下文的层次化叙事规划</strong>。提出层次化故事分解并与检索增强生成相结合，使语言模型能够在长篇叙事中保持主题连贯与长程依赖。</p>
+</li>
+<li>
+<p><strong>基于图的视觉一致性</strong>。通过双层机制解决视觉一致性：基于图的依赖追踪保证对象一致性，转场视频生成保证空间连贯。</p>
+</li>
+</ul>
+<hr />
+<h2 id="p-3">2 方法</h2>
+<p>本节阐述 ViMax 的技术细节，整体架构见<em>图 2</em>。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/framework.png" alt="图 2" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/framework.png'"></div><figcaption><strong>图 2</strong>：ViMax 智能体化视频生成架构。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<h3 id="p-4">2.1 长视频生成工作流</h3>
+<p>为生成长视频，ViMax 采用一套复杂的多智能体工作流，以应对长篇叙事内容创作固有的复杂性。与短视频生成不同，长片制作需要在叙事结构、角色一致性、电影摄影设计与质量控制等多个维度上协同。我们的工作流覆盖导演意图、编剧、镜头规划、角色造型、视频生成与质量评估等关键制作角色，由各专职智能体协作维持整个生产流水线的连贯性。</p>
+<h4>2.1.1 从创意到视频</h4>
+<p><strong>编剧（Screenwriting）</strong>。用户首先用自然语言陈述创作想法。这一输入 <span class="math-inline">$\mathcal{I}$</span> 可以是多种叙事形态：既可能是几句话描述的高层创作意图（例如「一位侦探在小镇上破解一桩疑案」），也可能是完整的小说，或已有的剧本草稿。</p>
+<p>为确定视频的故事线，ViMax 首先把用户输入 <span class="math-inline">$\mathcal{I}$</span> 投影为统一格式的剧本：</p>
+<div class="math-block">$$
+\mathcal{S}=\text{ScreenWriting}(\mathcal{I};P_{C(\mathcal{I})}) \tag{1}
+$$</div>
+<p>其中 <span class="math-inline">$\text{ScreenWriting}(\cdot)$</span> 是基于大语言模型（LLM）的编剧方法，依据用户输入 <span class="math-inline">$\mathcal{I}$</span> 撰写高质量剧本。该过程由面向不同输入类别定制的提示词 <span class="math-inline">$P_{C(\mathcal{I})}$</span> 驱动，并通过分类机制 <span class="math-inline">$C(\cdot)$</span> 把用户输入路由到合适的视频创作类别。生成的剧本 <span class="math-inline">$\mathcal{S}$</span> 提供场景描述、角色对白与叙事推进等结构化基础，指导后续所有制作阶段。</p>
+<p><strong>镜头规划（Shot Planning）</strong>。为确定传达故事所需的恰当电影语言与视觉表达，ViMax 随后由分镜智能体（storyboard agent）执行镜头规划。该智能体由精心设计的提示词驱动，其中封装了专业电影摄影知识与镜头设计原则，按结构化序列给出每个镜头的视觉内容、音效与对白的详细描述。形式化地：</p>
+<div class="math-block">$$
+S_{1},S_{2},\cdots,S_{n}=\text{ShotPlanning}(\mathcal{S}) \tag{2}
+$$</div>
+<p>其中 <span class="math-inline">$S_{1},S_{2},\cdots,S_{n}$</span> 表示为完成视频叙事而规划的镜头序列，<span class="math-inline">$\text{ShotPlanning}(\cdot)$</span> 是把剧本 <span class="math-inline">$\mathcal{S}$</span> 转换为细粒度镜头规格的 LLM 函数。每个镜头 <span class="math-inline">$S_i$</span> 都包含机位角度、运镜、光照条件、人物走位、时长等完整制作细节，为后续视频生成提供技术蓝图。</p>
+<p><strong>文—图—视频生成（Text-Image-Video Generation）</strong>。为更好地控制生成过程，ViMax 采用<strong>两步式</strong>的「文生图 → 图生视频」流程：先生成关键图像，如角色定妆照、场景背景图与镜头关键帧；这一步既包含文生图，也包含「文本 + 参考图」生图，因为镜头关键帧等图像需要以角色图等为参考。随后利用「文本 + 图像」生视频工具逐镜头生成视频。形式化地：</p>
+<div class="math-block">$$
+\{\mathcal{K}_{1},\mathcal{K}_{2},\cdots,\mathcal{K}_{m}\}=\text{ImageGen}(\{S\})
+$$</div>
+<div class="math-block">$$
+\{V_{1},V_{2},\cdots,V_{n}\}=\text{VideoGen}(\{S\},\{\mathcal{K}\}) \tag{3}
+$$</div>
+<p>其中 <span class="math-inline">$\{\mathcal{K}_{1},\cdots,\mathcal{K}_{m}\}$</span> 是生成的关键图像集合（含角色设计与场景参考图），<span class="math-inline">$\{V_{1},\cdots,V_{n}\}$</span> 是对应各规划镜头的最终视频片段。通过显式规定关键图像内容、并在中间视觉阶段实施质量控制，ViMax 加强了对最终成片的把控。</p>
+<h4>2.1.2 基于 VLM 的质量控制</h4>
+<p>为保证生成质量，ViMax 采用基于 VLM 的评估机制执行 <strong>best-of-<span class="math-inline">$k$</span> 候选择优</strong>：对每个任务并行采样 <span class="math-inline">$k$</span> 个候选，由 VLM 评审器依据镜头规划要求，在视觉保真度、叙事一致性、镜头规格遵循度等维度上打分，得分最高者进入流水线：</p>
+<div class="math-block">$$
+\{C_{1},C_{2},\cdots,C_{k}\}=\text{MultiGen}(S_{i},\text{prompt})
+$$</div>
+<div class="math-block">$$
+\text{score}_{j}=\text{VLM-Judge}(C_{j},S_{i})
+$$</div>
+<div class="math-block">$$
+C^{*}=\arg\max_{C_{j}}\text{score}_{j} \tag{4}
+$$</div>
+<p>其中 <span class="math-inline">$\{C_1,\cdots,C_k\}$</span> 为采样的 <span class="math-inline">$k$</span> 个候选，<span class="math-inline">$\text{VLM-Judge}(\cdot)$</span> 依据镜头要求 <span class="math-inline">$S_i$</span> 为每个候选打分，<span class="math-inline">$C^{*}$</span> 为选出的最优候选。该选择机制缓解了单次生成的方差，确保只有最贴合规格的输出才会进入长片流水线，避免不合格的关键帧在后续镜头中被当作参考而放大误差。</p>
+<h3 id="p-5">2.2 长程叙事规划</h3>
+<p>长程叙事规划是一项根本性挑战：在延展的时间线上协调多个故事要素，其复杂度呈指数级增长。与短内容不同，长视频需要联合编排横跨数百个场景的角色弧光、情节推进与叙事连贯。若把这一切当作单一规划任务，信息规模会大幅超出当前语言模型的推理容量；而要在局部场景之间维持全局一致性，又会在「精细控制」与「整体连贯」之间形成张力。</p>
+<h4>2.2.1 层次化故事分解</h4>
+<p>为应对长视频规划内在的结构复杂性，ViMax 采用层次化故事分解。长视频包含数百乃至数千个镜头，且天然具有清晰的层次结构：多个镜头可以共同构成一个动作段落或一次对话交锋；同一空间内发生的镜头，在光照、人物走位、环境一致性上存在强视觉依赖。这种嵌套结构使「直接在镜头粒度上规划」在计算上不可行，也容易产生前后矛盾。</p>
+<p>我们的层次化分解通过<strong>递归拆分</strong>，把完整故事线系统地切分为可管理的规划单元：从完整剧本出发，先识别代表重要叙事里程碑的<strong>主要故事事件</strong>；再把每个事件拆分为若干<strong>场景</strong>，每个场景对应具体戏剧时刻或地点转换；最后把场景细化为<strong>镜头规格</strong>，定义机位角度、角色动作与视觉元素。该递归过程形式化为：</p>
+<div class="math-block">$$
+{N_{d,1},N_{d,2},\cdots,N_{d,k_{d}}}=\text{Decomp}(N_{d-1,i}) \tag{5}
+$$</div>
+<p>其中 <span class="math-inline">$N_{d-1,i}$</span> 是深度 <span class="math-inline">$d-1$</span> 上的父节点，<span class="math-inline">$\{N_{d,1},\cdots,N_{d,k_d}\}$</span> 是它在深度 <span class="math-inline">$d$</span> 上的子节点，每个节点 <span class="math-inline">$N_{d,j}$</span> 都关联一段文本化叙事描述 <span class="math-inline">$T_{d,j}$</span>。这一方法保证语言模型在每一层只处理范围适当的规划任务，既避免同时做多尺度叙事设计带来的「认知过载」，又保留了故事要素之间天然的层次依赖。</p>
+<h4>2.2.2 基于 RAG 的全局上下文感知</h4>
+<p>层次化分解虽能有效管理复杂度，却带来一个关键缺陷：各节点生成的描述主要着眼于界定该叙事单元的<strong>范围与边界</strong>，而非提供丰富细致的内容描述。于是，原始素材中的宝贵上下文信息——角色动机、微妙的情节关联、主题元素——往往在分解过程中被丢弃。为此，ViMax 采用<strong>检索增强生成（RAG）</strong>，在整个规划流程中保持对全局上下文的感知。</p>
+<p>系统在规划流水线开始前，先对完整剧本或小说内容建立综合索引，再依据分解阶段生成的文本描述动态检索相关上下文；对每个叙事节点，查询索引中的原始素材，用相关全局信息充实局部规划：</p>
+<div class="math-block">$$
+\mathcal{R}=\text{Index}(\mathcal{S}),\quad C_{d,j}=\text{Retrieve}(\mathcal{R},T_{d,j})
+$$</div>
+<div class="math-block">$$
+T^{\prime}_{d,j}=\text{Enrich}(T_{d,j},C_{d,j}) \tag{6}
+$$</div>
+<p>其中 <span class="math-inline">$\mathcal{R}$</span> 为原始素材的索引表示，<span class="math-inline">$C_{d,j}$</span> 是与节点描述 <span class="math-inline">$T_{d,j}$</span> 相关的检索上下文，<span class="math-inline">$T'_{d,j}$</span> 是同时融合局部规划细节与全局叙事语境的增强描述。索引与检索组件构成一套完整的 RAG 系统：通过把局部规划决策锚定在更广阔的故事上下文中，避免前后矛盾，并在整个长视频制作中维持主题连贯。</p>
+<h3 id="p-6">2.3 跨镜头的视觉一致性</h3>
+<p>多镜头视频生成的一个根本挑战，来自各镜头生成过程彼此独立：每次生成都不感知此前已生成的内容，导致角色外观、环境设定、道具与空间关系出现不一致。在长视频中，长镜头序列上的视觉连贯对叙事沉浸感与观感连续性至关重要，这种隔离性因而尤为致命。为此，ViMax 提出两套互补方案，在保持生成效率的同时确保视觉连贯。</p>
+<h4>2.3.1 基于图的视觉依赖</h4>
+<p>为保证跨镜头视觉一致性，ViMax 建立了一套<strong>依赖驱动的生成框架</strong>，通过「机位级依赖图」维护镜头间的视觉依赖。例如，出现同一批常驻角色的镜头、或从不同机位拍摄同一环境的镜头，都存在必须随时间保持的视觉依赖；同一场景内多次出现的车辆、建筑等物体，也需要协同生成以维持外观一致。</p>
+<p>该方法分两阶段运作：<strong>依赖检测</strong>与<strong>依赖感知生成</strong>。规划阶段，系统分析一个场景内所有镜头的文本描述，把镜头分配给不同机位，并构建刻画其视觉关系的<strong>机位依赖图</strong>；生成阶段，系统按该图的<strong>拓扑序</strong>执行：依赖已满足的机位可并行生成，而存在依赖的机位会吸收从前驱节点传播而来的视觉锚点（visual anchor）：</p>
+<div class="math-block">$$
+\mathcal{G}=\operatorname{BuildCameraGraph}\left(\{S_{i}\}_{i=1}^{n}\right)
+$$</div>
+<div class="math-block">$$
+\mathcal{K}_{i}=\operatorname{GenConditioned}\left(S_{i},A_{i}\right) \tag{7}
+$$</div>
+<p>其中 <span class="math-inline">$n$</span> 为当前场景的镜头数，<span class="math-inline">$i$</span> 为镜头索引；<span class="math-inline">$\mathcal{G}$</span> 是由 <span class="math-inline">$\operatorname{BuildCameraGraph}(\cdot)$</span> 依据镜头规格构建的机位依赖图，其节点与边分别表示机位及机位间的视觉依赖；<span class="math-inline">$S_i$</span>、<span class="math-inline">$\mathcal{K}_i$</span> 分别为镜头 <span class="math-inline">$i$</span> 的规格与生成的关键帧，<span class="math-inline">$A_i$</span> 是该镜头所属机位的视觉锚点，按 <span class="math-inline">$\mathcal{G}$</span> 传播；<span class="math-inline">$\operatorname{GenConditioned}(\cdot)$</span> 表示以镜头规格与对应视觉锚点为条件的参考图生图。该做法既维持了跨镜头视觉一致性，又通过推理时并行处理相互独立的机位分支，把生成效率最大化。</p>
+<h4>2.3.2 通过转场视频实现空间连贯</h4>
+<p>为处理场景内部的<strong>空间一致性</strong>，ViMax 利用<strong>转场视频生成</strong>保证同一物理空间内多机位之间的几何连贯。当多个镜头从不同视角拍摄同一场景时，维持空间关系对避免相互矛盾的三维布局至关重要。例如两人对坐的对话场景：分别聚焦两位角色的独立镜头，必须保持一致的相对站位、家具摆放与环境几何，才能维系「同一物理空间」的观感。</p>
+<p>我们的方案利用视频生成模型内在的空间一致性能力：不独立生成每个视角，而是先识别需要空间连贯的场景，再生成把不同机位视角连接起来的平滑运镜转场。这些转场视频充当<strong>空间锚点</strong>，确保同一场景内所有视角共享一致的三维几何。例如为对话中的两位角色分别生成镜头时，系统先生成一段把机位从角色 A 的角度平滑移动到角色 B 的角度的转场视频，为两个独立镜头建立统一的空间基础：</p>
+<div class="math-block">$$
+V_{trans}=\text{GenTransition}(C_{i},C_{j},S)
+$$</div>
+<div class="math-block">$$
+V_{i},V_{j}=\text{ExtractViews}(V_{trans},C_{i},C_{j}) \tag{8}
+$$</div>
+<p>其中 <span class="math-inline">$V_{trans}$</span> 是场景 <span class="math-inline">$S$</span> 内机位 <span class="math-inline">$C_i$</span> 与 <span class="math-inline">$C_j$</span> 之间的转场视频，<span class="math-inline">$V_i$</span>、<span class="math-inline">$V_j$</span> 是从该转场视频中在对应机位角度抽取的、空间一致的视角。通过借用视频生成模型内部的时空一致性机制，该做法在实践中消除了多视角间相互矛盾的三维布局，同时在镜头之间保持自然的运镜过渡。</p>
+<hr />
+<h2 id="p-7">3 实验评估</h2>
+<p>我们围绕六个研究问题评估 ViMax：<strong>RQ1</strong> 相对基线的整体性能；<strong>RQ2</strong> 人类偏好研究；<strong>RQ3</strong> 关键组件消融；<strong>RQ4</strong> 效率研究；<strong>RQ5</strong> LLM 骨干模型的影响；<strong>RQ6</strong> 超参数敏感性。</p>
+<h3 id="p-8">3.1 实验设置</h3>
+<p><strong>数据集与评测协议</strong>。我们在两个互补设定上评估：其一是在新提出的 <strong>ViMax-Bench</strong> 上做多镜头视频生成；其二是在 <strong>NarrativeQA</strong>（Kociský et al., 2018）上，结合「小说转视频」适配流水线评估叙事规划能力。数据集、指标定义与评审协议的细节见附录 A.2。</p>
+<p><strong>基线方法</strong>。在 ViMax-Bench 上，我们与四类视频生成方法比较：(i) 镜头级视频生成器 Wan2.2-T2V-A14B 与 Veo 3.1；(ii) 基于关键帧的双阶段流水线 StoryDiffusion 与 IC-LoRA（Huang et al., 2024b）；(iii) 统一式多镜头生成 HoloCine（Meng et al., 2025b）；(iv) 智能体化视频生成系统 MovieAgent（Wu et al., 2025）与 AniMaker（Shi et al., 2025）。在「小说转视频」的规划设定上，对比 MovieAgent、AniMaker 与 RAG-Anything（Guo et al., 2025）。细节与适配协议见附录 A.3。</p>
+<p><strong>实现细节</strong>。实验实现细节见附录 A.4。</p>
+<h3 id="p-9">3.2 整体性能比较（RQ1）</h3>
+<p><strong>表 1：不同故事长度分组下的一致性指标定量比较。</strong>报告跨场景一致性（CC）、场景内一致性（IC）与全局一致性（GC）。数值为 ViCLIP 特征余弦相似度，越高越好。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方法</th>
+<th>中篇 CC</th>
+<th>中篇 IC</th>
+<th>中篇 GC</th>
+<th>长篇 CC</th>
+<th>长篇 IC</th>
+<th>长篇 GC</th>
+<th>总体 CC</th>
+<th>总体 IC</th>
+<th>总体 GC</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Veo 3.1</td>
+<td>0.5536</td>
+<td>0.5640</td>
+<td>0.5582</td>
+<td>0.4687</td>
+<td>0.4778</td>
+<td>0.4704</td>
+<td>0.4978</td>
+<td>0.5074</td>
+<td>0.5005</td>
+</tr>
+<tr>
+<td>Wan2.2</td>
+<td>0.4391</td>
+<td>0.4462</td>
+<td>0.4423</td>
+<td>0.4187</td>
+<td>0.4206</td>
+<td>0.4188</td>
+<td>0.4257</td>
+<td>0.4294</td>
+<td>0.4269</td>
+</tr>
+<tr>
+<td>IC-LoRA-Wan2.2</td>
+<td>0.5398</td>
+<td>0.5713</td>
+<td>0.5537</td>
+<td>0.5015</td>
+<td>0.5328</td>
+<td>0.5087</td>
+<td>0.5147</td>
+<td>0.5460</td>
+<td>0.5241</td>
+</tr>
+<tr>
+<td>StoryDiffusion-Wan2.2</td>
+<td>0.5606</td>
+<td>0.5796</td>
+<td>0.5691</td>
+<td>0.5007</td>
+<td>0.5195</td>
+<td>0.5048</td>
+<td>0.5212</td>
+<td>0.5401</td>
+<td>0.5269</td>
+</tr>
+<tr>
+<td>HoloCine</td>
+<td>0.5366</td>
+<td>0.5892</td>
+<td>0.5597</td>
+<td>0.4940</td>
+<td>0.5565</td>
+<td>0.5080</td>
+<td>0.5098</td>
+<td>0.5686</td>
+<td>0.5272</td>
+</tr>
+<tr>
+<td>MovieAgent-Gemini-3-Pro-Veo 3.1</td>
+<td>0.4761</td>
+<td>0.5340</td>
+<td>0.5016</td>
+<td>0.4410</td>
+<td>0.5086</td>
+<td>0.4560</td>
+<td>0.4530</td>
+<td>0.5174</td>
+<td>0.4716</td>
+</tr>
+<tr>
+<td>AniMaker-Gemini-3-Pro-Veo 3.1</td>
+<td>0.5523</td>
+<td>0.6014</td>
+<td>0.5737</td>
+<td>0.4771</td>
+<td>0.5224</td>
+<td>0.4875</td>
+<td>0.5030</td>
+<td>0.5486</td>
+<td>0.5167</td>
+</tr>
+<tr>
+<td>ViMax-Gemini-3-Pro-Wan2.2</td>
+<td>0.5641</td>
+<td>0.5895</td>
+<td>0.5754</td>
+<td>0.4984</td>
+<td>0.5467</td>
+<td>0.5093</td>
+<td>0.5209</td>
+<td>0.5614</td>
+<td>0.5320</td>
+</tr>
+<tr>
+<td>ViMax-Gemini-3.1-Flash-Veo 3.1</td>
+<td>0.5681</td>
+<td>0.5914</td>
+<td>0.5785</td>
+<td>0.5088</td>
+<td>0.5402</td>
+<td>0.5157</td>
+<td>0.5291</td>
+<td>0.5577</td>
+<td>0.5372</td>
+</tr>
+<tr>
+<td><strong>ViMax-Gemini-3-Pro-Veo 3.1</strong></td>
+<td><strong>0.5886</strong></td>
+<td><strong>0.6046</strong></td>
+<td><strong>0.5957</strong></td>
+<td><strong>0.5298</strong></td>
+<td><strong>0.5629</strong></td>
+<td><strong>0.5369</strong></td>
+<td><strong>0.5500</strong></td>
+<td><strong>0.5772</strong></td>
+<td><strong>0.5571</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>多镜头视觉一致性</strong>。ViMax-Gemini-3-Pro-Veo 3.1 在全部九项设置上领先：把总体 GC 从 HoloCine 的 0.5272 提升到 0.5571，并超过智能体基线 MovieAgent（0.4716）与 AniMaker（0.5167）。它在<strong>长篇故事</strong>上增益更大，支持了「结构化依赖追踪能够跨越更多场景边界」的判断；在所有故事长度上的一致增益，也说明其鲁棒性不止于短程连续。</p>
+<p><strong>长程叙事规划</strong>。在表 3 中，ViMax 把 Avg. 从 AniMaker 的 3.827 提升到 4.107、NF 从 3.08 提升到 3.52，在所有未消融基线的各项指标上均保持领先。组件级影响见 3.4 节。</p>
+<h3 id="p-10">3.3 人类评估（RQ2）</h3>
+<p>为补充自动指标，我们在 35 个 ViMax-Bench 案例上开展成对的人类偏好研究，按中篇、长篇与总体分组，把 ViMax 与五个基线两两比较（表 2）。评审者依据三项标准选出更偏好的视频：<strong>跨场景一致性（CSC）</strong>、<strong>语义遵循（SF）</strong>、<strong>美学质量（AQ）</strong>。胜率表示在每项标准上判定 ViMax 优于对应基线的比例，Avg. 为三项的均值。标注协议细节见附录 A.2。</p>
+<p><strong>表 2：ViMax 相对各基线的人类评估胜率。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>基线</th>
+<th>中篇 CSC</th>
+<th>中篇 SF</th>
+<th>中篇 AQ</th>
+<th>中篇 Avg.</th>
+<th>长篇 CSC</th>
+<th>长篇 SF</th>
+<th>长篇 AQ</th>
+<th>长篇 Avg.</th>
+<th>总体 CSC</th>
+<th>总体 SF</th>
+<th>总体 AQ</th>
+<th>总体 Avg.</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HoloCine</td>
+<td>70.83%</td>
+<td>79.17%</td>
+<td>66.67%</td>
+<td>72.22%</td>
+<td>58.70%</td>
+<td>56.52%</td>
+<td>47.83%</td>
+<td>54.35%</td>
+<td>62.86%</td>
+<td>64.29%</td>
+<td>54.29%</td>
+<td>60.48%</td>
+</tr>
+<tr>
+<td>IC-LoRA</td>
+<td>83.33%</td>
+<td>91.67%</td>
+<td>79.17%</td>
+<td>84.72%</td>
+<td>73.91%</td>
+<td>65.22%</td>
+<td>63.04%</td>
+<td>67.39%</td>
+<td>77.14%</td>
+<td>74.29%</td>
+<td>68.57%</td>
+<td>73.33%</td>
+</tr>
+<tr>
+<td>StoryDiffusion</td>
+<td>70.83%</td>
+<td>79.17%</td>
+<td>66.67%</td>
+<td>72.22%</td>
+<td>84.78%</td>
+<td>82.61%</td>
+<td>73.91%</td>
+<td>80.43%</td>
+<td>80.00%</td>
+<td>81.43%</td>
+<td>71.43%</td>
+<td>77.62%</td>
+</tr>
+<tr>
+<td>Veo 3.1</td>
+<td>75.00%</td>
+<td>83.33%</td>
+<td>66.67%</td>
+<td>75.00%</td>
+<td>76.09%</td>
+<td>78.26%</td>
+<td>69.57%</td>
+<td>74.64%</td>
+<td>75.71%</td>
+<td>80.00%</td>
+<td>68.57%</td>
+<td>74.76%</td>
+</tr>
+<tr>
+<td>Wan2.2</td>
+<td>66.67%</td>
+<td>75.00%</td>
+<td>54.17%</td>
+<td>65.28%</td>
+<td>76.09%</td>
+<td>78.26%</td>
+<td>67.39%</td>
+<td>73.91%</td>
+<td>72.86%</td>
+<td>77.14%</td>
+<td>62.86%</td>
+<td>70.95%</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>表 3：小说转视频的叙事规划结果。</strong>指标定义见附录 A.2；最优与次优值分别以加粗和下划线标出（本译文统一以加粗标示各列最优值所在行）。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方法</th>
+<th>CBC</th>
+<th>NC</th>
+<th>PPR</th>
+<th>VSU</th>
+<th>STQ</th>
+<th>NF</th>
+<th>Avg.</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MovieAgent</td>
+<td>3.92</td>
+<td>3.84</td>
+<td>3.48</td>
+<td>4.02</td>
+<td>3.42</td>
+<td>2.52</td>
+<td>3.533</td>
+</tr>
+<tr>
+<td>AniMaker</td>
+<td>4.14</td>
+<td>3.94</td>
+<td>3.66</td>
+<td>4.74</td>
+<td>3.40</td>
+<td>3.08</td>
+<td>3.827</td>
+</tr>
+<tr>
+<td>RAG-Anything</td>
+<td>3.40</td>
+<td>2.66</td>
+<td>2.70</td>
+<td>4.50</td>
+<td>2.34</td>
+<td>2.77</td>
+<td>3.062</td>
+</tr>
+<tr>
+<td><strong>ViMax</strong></td>
+<td><strong>4.26</strong></td>
+<td><strong>4.10</strong></td>
+<td><strong>3.96</strong></td>
+<td><strong>4.94</strong></td>
+<td><strong>3.86</strong></td>
+<td><strong>3.52</strong></td>
+<td><strong>4.107</strong></td>
+</tr>
+<tr>
+<td>ViMax w/o PC（去掉事件感知流程链）</td>
+<td>4.24</td>
+<td>4.02</td>
+<td>3.84</td>
+<td>4.98</td>
+<td>3.76</td>
+<td>2.34</td>
+<td>3.863</td>
+</tr>
+<tr>
+<td>ViMax w/o RAG</td>
+<td>4.36</td>
+<td>4.28</td>
+<td>3.98</td>
+<td>4.96</td>
+<td>3.94</td>
+<td>3.14</td>
+<td>4.110</td>
+</tr>
+<tr>
+<td>ViMax w/o StoryboardArtist</td>
+<td>4.04</td>
+<td>4.00</td>
+<td>3.72</td>
+<td>3.10</td>
+<td>3.60</td>
+<td>3.49</td>
+<td>3.658</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="p-11">3.4 消融研究（RQ3）</h3>
+<p>我们在表 3、图 4 及附录图 7 的定性对比中，分别隔离叙事规划与视觉生成组件。</p>
+<p><strong>叙事规划组件</strong>。用确定性的剧本切分替代 StoryboardArtist 后，故事顺序与镜头数量得以保留，但基于智能体的视觉表达被移除：VSU 从 4.94 跌至 3.10，Avg. 从 4.107 跌至 3.658。去掉<strong>事件感知流程链（Event-Aware Process Chain）</strong>后，VSU 略微上升（4.94 → 4.98），但 NF 从 3.52 降至 2.34，清楚显示事件顺序与因果结构的重要性。去掉 RAG 后，Avg. 微升（4.107 → 4.110），NF 却从 3.52 降至 3.14，从而单独分离出检索机制「保留原著特有细节」的作用。三个模块因此各司其职、互为补充：视觉表达、全局事件结构、原著锚定。</p>
+<p><strong>基于图的视觉依赖</strong>。<strong>串行变体</strong>移除机位感知规划与基于图的参考传播——不使用机位依赖图、转场视频或父子机位锚点，镜头 <span class="math-inline">$t$</span> 只以角色定妆照和镜头 <span class="math-inline">$t{-}1$</span> 的首帧为条件，仅保留最小时序链；它甚至略微改善了中篇 IC，却使其余八项指标退化。<strong>并行变体</strong>移除全部跨镜头依赖，退化最严重（总体 GC 下降 8.7%），说明仅靠角色定妆照无法维持身份、布局与场景状态。</p>
+<p><strong>VLM 质量控制</strong>。去掉基于 VLM 的候选择优后，总体 GC 下降 3.8%，印证了「在失配关键帧成为后续镜头参考之前先将其过滤掉」的价值。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/shot_completion_time.svg" alt="图 3" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/shot_completion_time.svg'"><img loading="lazy" src="vimax_paper_figures/shot_consistency.svg" alt="图 3" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/shot_consistency.svg'"></div><figcaption><strong>图 3</strong>：ViMax 消融研究——镜头完成时间与平均跨镜头一致性。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<h3 id="p-12">3.5 镜头效率研究（RQ4）</h3>
+<p>图 3 与图 6 在 35 个 ViMax-Bench 故事上比较调度效率：<strong>全并行</strong>执行最快（310 秒），但总体 GC 最低（0.5085）；<strong>全串行</strong>可达 0.5511，却耗时 835 秒。完整 ViMax 在依赖允许时并发执行相互独立的图分支，以 405 秒取得最佳 GC（0.5571）。成本仅计 API 调用费用，时延为端到端测量。ViMax 提供最佳的一致性—时延平衡；若场景对时延敏感，则可采用全并行执行。</p>
+<h3 id="p-13">3.6 LLM 骨干模型的影响（RQ5）</h3>
+<p>表 4 固定 ViMax 其余工作流，考察 LLM 骨干的影响。<strong>GPT-5.4</strong> 取得最佳视觉一致性分数与最高叙事规划总分，说明更强的文本推理有助于长程记忆构建、场景状态追踪与镜头级规划；<strong>Claude-Sonnet-4.6</strong> 在若干叙事质量维度上领先，但一致性分数偏低，表明局部分镜质量本身并不足以保证稳定的跨镜头视觉状态；<strong>Gemini-3-Flash</strong> 总体排名第二。结果显示，GPT-5.4 在视觉一致性、叙事连贯与忠于原著之间提供了最佳折中。</p>
+<p><strong>表 4：LLM 骨干模型对一致性评估与叙事规划评估的影响。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方法</th>
+<th>CC</th>
+<th>IC</th>
+<th>GC</th>
+<th>CBC</th>
+<th>NC</th>
+<th>PPR</th>
+<th>VSU</th>
+<th>STQ</th>
+<th>NF</th>
+<th>Avg.</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ours-Gemini-3.1-Pro</td>
+<td>0.5339</td>
+<td>0.5602</td>
+<td>0.5415</td>
+<td>3.98</td>
+<td>3.78</td>
+<td>3.76</td>
+<td>4.84</td>
+<td>3.32</td>
+<td>2.78</td>
+<td>3.74</td>
+</tr>
+<tr>
+<td>Ours-Gemini-3-Flash</td>
+<td>0.5500</td>
+<td>0.5772</td>
+<td>0.5571</td>
+<td>4.06</td>
+<td>3.88</td>
+<td>3.82</td>
+<td>4.86</td>
+<td>3.32</td>
+<td>2.64</td>
+<td>3.76</td>
+</tr>
+<tr>
+<td>Ours-Claude-Sonnet-4.6</td>
+<td>0.5195</td>
+<td>0.5473</td>
+<td>0.5284</td>
+<td>4.34</td>
+<td>4.18</td>
+<td>3.92</td>
+<td>4.98</td>
+<td>3.80</td>
+<td>3.12</td>
+<td>4.06</td>
+</tr>
+<tr>
+<td><strong>Ours-GPT-5.4</strong></td>
+<td><strong>0.5546</strong></td>
+<td><strong>0.5824</strong></td>
+<td><strong>0.5623</strong></td>
+<td>4.26</td>
+<td>4.10</td>
+<td>3.96</td>
+<td>4.94</td>
+<td>3.86</td>
+<td>3.52</td>
+<td><strong>4.11</strong></td>
+</tr>
+</tbody>
+</table></div>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/ablation_overall_bar.svg" alt="图 4" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/ablation_overall_bar.svg'"></div><figcaption><strong>图 4</strong>：ViMax 消融研究。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<h3 id="p-14">3.7 超参数研究（RQ6）</h3>
+<p>我们考察基于 VLM 的质量控制中的 <strong>Best-of-<span class="math-inline">$k$</span></strong> 超参数：为每个镜头生成 <span class="math-inline">$k$</span> 张关键帧，由 VLM 评审器选出与镜头规格最匹配的一张。需要强调，该选择发生在<strong>关键帧阶段</strong>，并非并行生成多段视频。如图 5 与附录图 6 所示：Best-of-2 取得总体 GC = 0.5571，平均成本 17.500 美元、每任务 405 秒；Best-of-3 与 Best-of-4 把成本与时延抬高（分别为 17.770 美元 / 415 秒、18.040 美元 / 425 秒），GC 反而降至 0.5041 与 0.5194。这支持把 <span class="math-inline">$k=2$</span> 作为默认工作点，也说明额外增加「看似合理」的候选会加大身份与场景状态上的选择噪声。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/hyperparameter_overall.svg" alt="图 5" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/hyperparameter_overall.svg'"></div><figcaption><strong>图 5</strong>：质量控制的超参数研究。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<hr />
+<h2 id="p-15">4 相关工作</h2>
+<p><strong>层次化叙事规划与电影逻辑</strong>。长故事连贯性此前主要通过层次化分解解决：Plan-And-Write（Yao et al., 2018）把故事线规划与表层实现分离；DOME（Wang et al., 2024）引入动态提纲与记忆以避免剧情漏洞。在视频规划方向，VideoDirectorGPT（Lin et al., 2023）通过符号规划把角色动作锚定到跨镜头；FilMaster（Huang et al., 2025）检索镜头语言以实现行业级节奏；Chu et al.（2025）用动态实体关系图缓解持续的叙事碎片化。</p>
+<p><strong>面向内容创作的多智能体框架</strong>。视频制作天然适合清晰、高度结构化的智能体分工。Generative Agents（Park et al., 2023）展示了可信的长期行为；MAViS（Wang et al., 2025）用「探索—检视—增强」循环协调角色；GenMAC（Huang et al., 2024a）通过「设计—生成—再设计」循环迭代纠正组合性错误；StoryAgent（Hu et al., 2024）以中间表示桥接抽象意图与像素级生成；MovieAgent（Wu et al., 2025）模拟导演与编剧角色以组织结构、场景与摄影。</p>
+<p><strong>长视频生成与视觉一致性</strong>。长时程生成必须克服持续的身份与风格漂移。VideoAuteur（Xiao et al., 2025）采用滚动上下文策略，MovieDreamer（Zhao et al., 2024）通过自回归全局规划预测视觉 token。在时序视觉连贯方向，StableAnimator（Tu et al., 2025）把人脸嵌入与时序层对齐以抑制身份退化，Identity-GRPO（Meng et al., 2025a）用 RLHF 对抗多人视频中的身份漂移；SEINE（Chen et al., 2023）以掩码扩散桥接独立镜头，EvalCrafter（Liu et al., 2024）为一致性、运动与美学质量提供了系统的评测指标。</p>
+<hr />
+<h2 id="p-16">5 结论</h2>
+<p>我们提出了 ViMax——一个通过多智能体协同工作流实现长视频生成的框架。它以<strong>层次化故事分解 + 检索增强生成</strong>应对叙事规划，以<strong>基于图的依赖追踪 + 转场视频生成</strong>保证视觉一致性；依赖图同时暴露出镜头级并行性，使大规模生成更高效。我们还引入了 <strong>ViMax-Bench</strong>，一个面向受控跨镜头一致性挑战的综合基准。通过把制作过程拆解为专职智能体，ViMax 使连贯长篇叙事的可扩展创作成为可能，为娱乐、教育与媒体生产领域的自动化内容创作开辟了新的可能。展望未来，我们把 ViMax 视为迈向「完全智能体化电影制作」的一步：在能力日益强大的基础模型之上，可以叠加更丰富的多模态生成、长时程记忆与交互式共创，让自动化影像创作更接近实用部署。</p>
+<hr />
+<h2 id="p-17">局限性</h2>
+<p>尽管 ViMax 改善了长程规划与视觉一致性，仍存在若干局限：</p>
+<ol>
+<li>
+<p><strong>依赖闭源基础模型</strong>。系统在推理、关键帧与视频生成、以及基于 VLM 的质量控制上都依赖专有基础模型，性能因而对模型版本更新敏感。</p>
+</li>
+<li>
+<p><strong>自动评测的粒度不足</strong>。自动评估依赖基于表征相似度的指标，虽可扩展，却难以刻画细粒度叙事意图与语义复杂案例（多人交互、解剖学瑕疵、导演级电影逻辑）；ViMax-Bench 同样只面向规模有限的受控挑战。</p>
+</li>
+<li>
+<p><strong>生成组件仍脆弱</strong>。关键帧生成器在人物密集、接触频繁的场景中表现不佳；视频生成器也不总遵循关键帧语义（例如角色本应站在跑步机上，却被动画化为跑离跑步机），且误差会沿流水线级联放大。</p>
+</li>
+<li>
+<p><strong>基础模型能力上移带来的定位变化</strong>。近期商业视频模型已在短时程多镜头一致性上展现可观能力，这提示未来的编排框架应更多转向<strong>跨场景的长时程视觉记忆管理</strong>，而非重复实现更强的底座模型可能原生具备的能力。</p>
+</li>
+<li>
+<p><strong>尚不覆盖音频与交互</strong>。当前工作流尚未处理音频、对白同步、镜头级节奏控制，也不支持交互式修订。</p>
+</li>
+</ol>
+<hr />
+<h2 id="p-18">伦理考量</h2>
+<p>ViMax 支持长视频生产，但更强的跨镜头一致性也会放大滥用风险，如冒充他人、伪造事件、模仿受版权保护的角色。部署时应要求取得同意、提供来源溯源或水印，并对敏感案例保留人工审核。ViMax-Bench 设置了安全约束，可缓解基准层面的风险，但无法覆盖更广泛的滥用；此外，基于 LLM 与 VLM 的评审器可能继承其底座模型或影视素材中的偏见，因而给出的是「可扩展但不完美」的评价信号。</p>
+<hr />
+<h2 id="p-19">参考文献</h2>
+<blockquote>
+<p>按学术惯例保留英文原始条目，仅去处「被引于……」等导航信息；方括号内为便于检索的 arXiv 编号。</p>
+</blockquote>
+<ol>
+<li>Chen et al. (2023). <em>SEINE: Short-to-Long Video Diffusion Model for Generative Transition and Prediction</em>. [arXiv:2310.20700]</li>
+<li>Chu, Li, Chua (2025). <em>Understanding Long Videos via LLM-Powered Entity Relation Graphs</em>. [arXiv:2501.15953]</li>
+<li>Google DeepMind (2024). <em>Veo: A Generative Video Model</em>. Technical report.</li>
+<li>Guo et al. (2025). <em>RAG-Anything: All-in-One RAG Framework</em>. [arXiv:2510.12323]</li>
+<li>He et al. (2024). <em>Kubrick: Multimodal Agent Collaborations for Synthetic Video Generation</em>. [arXiv:2408.10453]（CVPR 2025 AI4CC Workshop）</li>
+<li>Henschel et al. (2025). <em>StreamingT2V: Consistent, Dynamic, and Extendable Long Video Generation from Text</em>. CVPR, 2568–2577.</li>
+<li>Hu et al. (2024). <em>StoryAgent: Customized Storytelling Video Generation via Multi-Agent Collaboration</em>. [arXiv:2411.04925]</li>
+<li>Huang et al. (2024a). <em>GenMAC: Compositional Text-to-Video Generation with Multi-Agent Collaboration</em>. [arXiv:2412.04440]</li>
+<li>Huang et al. (2025). <em>FilMaster: Bridging Cinematic Principles and Generative AI for Automated Film Generation</em>. [arXiv:2506.18899]</li>
+<li>Huang et al. (2024b). <em>In-Context LoRA for Diffusion Transformers</em>. [arXiv:2410.23775]</li>
+<li>Kociský et al. (2018). <em>The NarrativeQA Reading Comprehension Challenge</em>. TACL 6, 317–328.</li>
+<li>Kong et al. (2024). <em>HunyuanVideo: A Systematic Framework for Large Video Generative Models</em>. [arXiv:2412.03603]</li>
+<li>Kupyn et al. (2025). <em>Epipolar Geometry Improves Video Generation Models</em>. [arXiv:2510.21615]</li>
+<li>Lin, Zala, Cho, Bansal (2023). <em>VideoDirectorGPT: Consistent Multi-Scene Video Generation via LLM-Guided Planning</em>. [arXiv:2309.15091]</li>
+<li>Liu et al. (2024). <em>EvalCrafter: Benchmarking and Evaluating Large Video Generation Models</em>. CVPR, 22139–22149.</li>
+<li>Lu et al. (2024). <em>FreeLong: Training-Free Long Video Generation with SpectralBlend Temporal Attention</em>. [arXiv:2407.19918]</li>
+<li>Meng et al. (2025a). <em>Identity-GRPO: Optimizing Multi-Human Identity-Preserving Video Generation via Reinforcement Learning</em>. [arXiv:2510.14256]</li>
+<li>Meng et al. (2025b). <em>HoloCine: Holistic Generation of Cinematic Multi-Shot Long Video Narratives</em>. [arXiv:2510.20822]</li>
+<li>OpenAI (2024). <em>Video Generation Models as World Simulators</em>. Technical report.</li>
+<li>Park et al. (2023). <em>Generative Agents: Interactive Simulacra of Human Behavior</em>. UIST.</li>
+<li>Rakheja et al. (2025). <em>World Consistency Score: A Unified Metric for Video Generation Quality</em>. [arXiv:2508.00144]</li>
+<li>Shi et al. (2025). <em>AniMaker: Multi-Agent Animated Storytelling with MCTS-Driven Clip Generation</em>. SIGGRAPH Asia 2025.</li>
+<li>Team Seedance et al. (2026). <em>Seedance 2.0: Advancing Video Generation for World Complexity</em>. [arXiv:2604.14148]</li>
+<li>Team Wan (2025). <em>Wan: Open and Advanced Large-Scale Video Generative Models</em>. [arXiv:2503.20314]</li>
+<li>Tewel et al. (2024). <em>Training-Free Consistent Text-to-Image Generation</em>. ACM TOG 43(1).</li>
+<li>Tu et al. (2025). <em>StableAnimator: High-Quality Identity-Preserving Human Image Animation</em>. CVPR, 21096–21106.</li>
+<li>Wang et al. (2025). <em>MAViS: A Multi-Agent Framework for Long-Sequence Video Storytelling</em>. [arXiv:2508.08487]</li>
+<li>Wang et al. (2024). <em>Generating Long-Form Story Using Dynamic Hierarchical Outlining with Memory-Enhancement</em>. [arXiv:2412.13575]</li>
+<li>Wang et al. (2023). <em>InternVid: A Large-Scale Video-Text Dataset for Multimodal Understanding and Generation</em>. [arXiv:2307.06942]</li>
+<li>Wu, Zhu, Shou (2025). <em>Automated Movie Generation via Multi-Agent CoT Planning</em>. [arXiv:2503.07314]</li>
+<li>Xiao et al. (2025). <em>VideoAuteur: Towards Long Narrative Video Generation</em>. [arXiv:2501.06173]</li>
+<li>Xu et al. (2025). <em>FilmAgent: A Multi-Agent Framework for End-to-End Film Automation in Virtual 3D Spaces</em>. [arXiv:2501.12909]</li>
+<li>Yao et al. (2018). <em>Plan-and-Write: Towards Better Automatic Storytelling</em>. [arXiv:1811.05701]</li>
+<li>Zhang et al. (2025a). <em>StoryMem: Multi-Shot Long Video Storytelling with Memory</em>. [arXiv:2512.19539]</li>
+<li>Zhang et al. (2025b). <em>STAGE: Storyboard-Anchored Generation for Cinematic Multi-Shot Narrative</em>. [arXiv:2512.12372]</li>
+<li>Zhao et al. (2024). <em>MovieDreamer: Hierarchical Generation for Coherent Long Visual Sequences</em>. [arXiv:2407.16655]</li>
+<li>Zheng et al. (2024). <em>VideoGen-of-Thought: Step-by-Step Generating Multi-Shot Video with Minimal Manual Intervention</em>. [arXiv:2412.02259]</li>
+<li>Zhou et al. (2026). <em>VideoMemory: Toward Consistent Video Generation via Memory Integration</em>. [arXiv:2601.03655]</li>
+<li>Zhou et al. (2024). <em>StoryDiffusion: Consistent Self-Attention for Long-Range Image and Video Generation</em>. [arXiv:2405.01434]</li>
+</ol>
+<hr />
+<h2 id="p-20">附录 A</h2>
+<h3 id="p-21">A.1 ViMax-Bench 的分布</h3>
+<p>表 5 汇总了 ViMax-Bench 在一致性类型与叙事长度两个维度上的构成。中篇（Medium）分组含 12 个故事，均为 2 个场景、8–10 个镜头；长篇（Long）分组含 23 个故事，为 3–4 个场景、12–16 个镜头。</p>
+<p><strong>表 5：ViMax-Bench 故事在一致性类型与叙事长度上的分布。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>一致性类型</th>
+<th>中篇</th>
+<th>长篇</th>
+<th>合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A 类 / 角色持久性（Character Persistence）</td>
+<td>4</td>
+<td>8</td>
+<td>12</td>
+</tr>
+<tr>
+<td>B 类 / 背景持久性（Background Persistence）</td>
+<td>4</td>
+<td>8</td>
+<td>12</td>
+</tr>
+<tr>
+<td>C 类 / 多人交互（Multi-Person Interaction）</td>
+<td>4</td>
+<td>7</td>
+<td>11</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td><strong>12</strong></td>
+<td><strong>23</strong></td>
+<td><strong>35</strong></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="p-22">A.2 数据与评测协议</h3>
+<p>我们构建 <strong>ViMax-Bench</strong>，用于在受控的一致性挑战下评估长篇「叙事转视频」生成。该基准包含 35 个多镜头故事规格，由图 11 所示提示词经 GPT-5.2 生成，每个故事跨 2–4 个场景、8–16 个镜头。每个镜头都被写成独立分镜面板，包含<strong>首帧描述</strong>与<strong>运动提示词</strong>，以鼓励「硬切多镜头生成」，而非连续长镜头合成。基准设计参考了 StoryMem（Zhang et al., 2025a）与 VideoMemory（Zhou et al., 2026）研究的多镜头叙事设定与一致性挑战。</p>
+<p>ViMax-Bench 面向以电影镜头设计为基础的硬切多镜头叙事生成：规格中纳入过肩镜头、反打镜头、插入镜头及多样构图等摄影技法，同时要求在场景切换后仍有常驻角色复现，并在大幅视角变化下保持空间一致。这一设计，为研究 ViMax 所针对的跨镜头叙事与视觉一致性挑战提供了受控环境。</p>
+<p>基准沿两个互补维度组织。其一是<strong>受压力的一致性类型</strong>：(i) <strong>角色持久性（A 类）</strong>，考察在不同环境、光照与构图下的身份保持；(ii) <strong>背景持久性（B 类）</strong>，考察复杂室内场景中的几何与空间稳定性；(iii) <strong>多人交互（C 类）</strong>，考察多个视觉上可区分的角色在共同动作中是否仍彼此可分。其二是<strong>叙事长度</strong>：中篇故事含 2 个场景、8–10 个镜头，长篇故事含 3–4 个场景、12–16 个镜头。该划分同时增加时间跨度与场景级复杂度，便于分析不同叙事尺度下的一致性。</p>
+<h4>自动一致性指标</h4>
+<p>我们沿用 HoloCine（Meng et al., 2025b）与 StoryMem 的跨镜头一致性协议，用 <strong>ViCLIP</strong>（Wang et al., 2023）度量镜头级相似度：把每个生成的镜头编码为一个视频级特征，对同一故事内的每一对镜头计算余弦相似度。<strong>IC</strong> 对同一场景内的镜头对取平均，<strong>CC</strong> 对跨场景的镜头对取平均，<strong>GC</strong> 对全部镜头对取平均。「角色持久性 / 背景持久性 / 多人交互」这些情景标签只用于界定每个故事所覆盖的挑战类型，并非人工打分，也不要求专家标注。三个指标均为自动指标，数值越高表示特征越稳定。</p>
+<h4>人类评估协议</h4>
+<p>评估覆盖全部 35 个 ViMax-Bench 故事、438 个生成镜头。每个故事把 ViMax 与五个基线比较，得到 <span class="math-inline">$35\times 5=175$</span> 个唯一比较对。每一对中，ViMax 视频与基线视频匿名并排呈现，左右位置随机化以降低位置偏差。共有 15 位具备 AI 相关背景的评审者参与：我们构造 15 个均衡标注桶，每桶含全部 35 个故事、且对每个基线有 7 次比较，每桶分配给一位评审者。每个唯一比较对出现在 3 个桶中，因而由 3 位评审者独立判定，共计 <span class="math-inline">$175\times 3=525$</span> 次成对判断。</p>
+<p>评审者按三项标准选出更偏好的完整视频：(i) <strong>跨场景一致性（CSC）</strong>，覆盖跨镜头与跨场景的常驻角色、物体、服装、身份特征、视觉风格以及动作／行为特征；(ii) <strong>语义遵循（SF）</strong>，覆盖所描绘的主体、动作、交互、环境与叙事推进；(iii) <strong>美学质量（AQ）</strong>，覆盖画面质量、构图、视觉吸引力与电影化呈现。人类研究在视觉连续性之外直接评估语义执行与整体呈现，补充了 CC/IC/GC 的不足。</p>
+<h4>叙事规划指标</h4>
+<p>表 3 报告六项叙事规划指标及其均值。在 Novel2Video 规划任务中，每次运行以一部完整长篇小说为输入，小说随机取自 NarrativeQA 的 Project Gutenberg 部分共 50 部。由 LLM 评审器（GPT-5.4）按图 12 的提示词模板，以 1–5 分量表就五个分镜质量维度打分：(i) <strong>角色行为一致性（CBC）</strong>，角色在动机、情绪、动作、身份与交互逻辑上是否跨镜头一致；(ii) <strong>叙事连贯（NC）</strong>，分镜是否构成开端、发展、推进清晰的逻辑序列；(iii) <strong>情节节奏与韵律（PPR）</strong>，事件推进与镜头分配是否形成有效的戏剧节奏，平衡铺垫、动作与收束；(iv) <strong>视觉具体性与镜头可用性（VSU）</strong>，镜头在主体、动作、环境、机位细节上是否具体到可直接用于视频生成；(v) <strong>场景转场与连续质量（STQ）</strong>，相邻镜头与场景之间的空间、时间、动作转场是否平滑且逻辑连续。此外评估<strong>叙事忠实度（NF）</strong>，衡量分镜是否忠于原著；NF 的系统提示词见图 14，其评估提示词包含小说元数据、完整原文与当前 20 张分镜批次。报告中的 <strong>Avg.</strong> 为全部六个维度（上述五项 + NF）的均值。</p>
+<p>为保证比较单元对齐，我们采用「20 张分镜」评分协议：由于基线并非为一次性端到端产出长程分镜而设计，只评估其前 20 张子分镜；对端到端生成长程分镜的 ViMax，则取前 100 张子分镜，按每 20 张连续分为五组，在相同协议下独立打分并取平均。该设计既保持每批次评估单元一致，又能体现长程规划能力。</p>
+<h3 id="p-23">A.3 基线细节</h3>
+<p>评估遵循 StoryMem 与 HoloCine 的联合协议，ViMax-Bench 提示词由 GPT-5.2 适配到各基线的原生输入格式。共使用七个视频生成基线，覆盖 (i) 独立调用并拼接的镜头级文生视频模型；(ii) 把运动生成交给 Wan2.2-I2V-A14B 的关键帧锚定流水线；(iii) 统一式多镜头生成；(iv) 智能体化视频生成框架。所有方法接收相同的 35 个底层故事与镜头要求；各基线按其标准生成流程运行，不使用 ViMax 专有的参考传播、转场生成或后处理。另有三个叙事规划基线，按附录 A.2 的对齐协议单独评估。</p>
+<p><strong>镜头级文生视频生成器</strong></p>
+<ul>
+<li><strong>Wan2.2-T2V-A14B</strong>（Team Wan, 2025）：领先的开源扩散 Transformer 视频基础模型，在数十亿图像与视频上训练，镜头级文生视频能力强。</li>
+<li><strong>Veo 3.1</strong>（Google DeepMind, 2024）：代表性商业系统，支持文生视频、图生视频与音频感知生成，物理真实感强。</li>
+</ul>
+<p><strong>关键帧锚定的多镜头流水线</strong></p>
+<ul>
+<li><strong>StoryDiffusion</strong>（Zhou et al., 2024）：以零样本「一致自注意力」实现跨图像主体一致，并配以语义运动预测器把关键帧动画化为平滑的长程视频。</li>
+<li><strong>IC-LoRA</strong>（Huang et al., 2024b）：上下文 LoRA 流水线，把多张图像拼接并联合描述，以轻量任务微调激活文生图 DiT 潜在的多图生成能力。</li>
+</ul>
+<p><strong>端到端多镜头视频生成器</strong></p>
+<ul>
+<li><strong>HoloCine</strong>（Meng et al., 2025b）：整体式多镜头生成器，用窗口交叉注意力把提示词绑定到单个镜头，并以稀疏镜头间自注意力高效合成分钟级、叙事连贯的场景。</li>
+</ul>
+<p><strong>智能体化视频生成框架</strong></p>
+<ul>
+<li><strong>MovieAgent</strong>（Wu et al., 2025）：多智能体电影生成框架，在剧本与角色库上执行层次化思维链规划，由 LLM 智能体扮演导演、编剧、分镜师与场景经理，组织场景、机位与摄影。</li>
+<li><strong>AniMaker</strong>（Shi et al., 2025）：多智能体叙事动画框架，仅凭文本生成全局一致的多镜头视频，结合 MCTS 启发的多候选片段生成与上下文感知的多镜头评估器做故事连贯择优。</li>
+</ul>
+<p>在表 1 的 ViMax-Bench 比较中，我们保留 MovieAgent 与 AniMaker 原生的规划与协同机制，仅把它们的图像、视频骨干统一换成 Gemini-3-Pro-Image 与 Veo 3.1；方法名中标注骨干模型，正是为明确这一适配。</p>
+<p><strong>小说转视频规划基线</strong>。MovieAgent 与 AniMaker 也在 50 部小说任务上作为规划系统评估：关闭视频合成，使其结构化分镜能在与 ViMax 相同的评审协议下打分。另对比以下检索系统：</p>
+<ul>
+<li><strong>RAG-Anything</strong>（Guo et al., 2025）：统一的多模态 RAG 框架，通过双图构建把文本、图像、表格与公式表示为互联的知识实体，并在长篇异构文档上做跨模态混合检索。</li>
+</ul>
+<h3 id="p-24">A.4 实现细节</h3>
+<p>我们用一套统一的多智能体工作流实例化 ViMax，贯穿所有实验。<strong>Gemini-3-Flash</strong> 作为（视觉）语言骨干，承担编剧、层次化故事分解、镜头规划、视觉依赖分析与基于 VLM 的质量控制；在质量控制阶段，VLM 评审器通过联合评估视觉保真度、叙事一致性与对规划镜头规格的遵循度，从多个生成候选中择优。视觉合成方面，关键帧由 <strong>Gemini-3-Pro-Image</strong> 或 <strong>Gemini-3.1-Flash-Image</strong> 生成，镜头级视频生成与用于空间连贯的转场视频生成均由 <strong>Wan2.2</strong> 与 <strong>Veo 3.1</strong> 完成。</p>
+<p>在叙事规划评估中，我们进一步为小说转视频流水线加入 RAG 增强的上下文锚定：用 <strong>GPT-5.4</strong> 做长程叙事规划、<strong>text-embedding-3-small</strong> 做文本嵌入、<strong>Qwen3-Rerank</strong> 做重排序。对关键帧锚定的多镜头流水线，先把 ViMax-Bench 的首帧提示词送入关键帧生成器，再把视频提示词交给动画器合成片段；对 ViMax 及其余基线，则把两个提示词拼接为单一输入一并提交。叙事规划评估中，所有对比方法的 LLM 骨干统一固定为 GPT-5.4。</p>
+<h3 id="p-25">A.5 补充的组件与成本分析</h3>
+<p>图 6 给出 ViMax 内部可配置工作点的帕累托（Pareto）分析。默认配置以 Gemini-3-Flash 做语言推理、Gemini-3-Pro-Image 生成关键帧、Veo 3.1 生成视频。图 7 用同一组四镜头示例补充聚合指标，使身份、构图、物体状态与场景布局在各组件变体间的差异可直接检视。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/cost_quality_tradeoff.svg" alt="图 6" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/cost_quality_tradeoff.svg'"></div><figcaption><strong>图 6</strong>：35 个 ViMax-Bench 故事上成本、质量与时延的帕累托前沿。性能为 GC，虚线连接帕累托有效配置；成本仅计 API 调用，时延为端到端测量。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/component_ablation_qualitative.png" alt="图 7" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/component_ablation_qualitative.png'"></div><figcaption><strong>图 7</strong>：同一四镜头规格下的定性组件消融。各行对比：去掉 VLM 质量控制、用串行／并行替代基于图的调度、以及完整 ViMax。示例暴露出常驻角色身份、视角与构图、空间布局上的互补性失效模式。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<h3 id="p-26">A.6 案例研究</h3>
+<p>本节以可视化证据展示 ViMax 合成长篇连贯叙事的能力，给出若干由多智能体框架自动生成的视频关键帧案例，其中体现长时程角色与场景一致性的代表片段见图 8、图 9、图 10。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/ours_figure_vs_baselines.png" alt="图 8" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/ours_figure_vs_baselines.png'"></div><figcaption><strong>图 8</strong>：与代表性基线在 ViMax-Bench 多镜头故事上的定性比较。每行展示一种方法在相同故事与镜头规格下生成的关键帧。ViMax 在多个视角下保持了两位主角、审讯室设定、道具布局与镜头级电影意图，体现出更强的长时程视觉与空间一致性。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/casestudy.png" alt="图 9" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/casestudy.png'"></div><figcaption><strong>图 9</strong>：案例研究——ViMax 生成的关键帧。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/casestudy2.png" alt="图 10" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/casestudy2.png'"></div><figcaption><strong>图 10</strong>：案例研究——ViMax 生成的关键帧。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<h4>视觉一致性与身份保持</h4>
+<p>长视频生成的一种关键失效模式是<strong>时空不一致</strong>：角色身份与环境细节在长时间跨度上漂移。ViMax 通过参考条件生成与基于图的视觉依赖追踪显式应对，以下为实证。</p>
+<p><strong>角色身份</strong>。图 9 显示 ViMax 在不连续镜头与剧烈机位变化之间保持主角身份：在「沙漠—飞船」片段（上两行），同一对男女主角在建立全景、驾驶舱双人镜头、沙暴光线下侧脸、紧凑的情绪特写之间均可辨认，即使光照从暖色夕阳转为冷绿色舱内照明，面部结构、发型与服装仍保持一致。「成长」片段（下两行）构成更严苛的检验：身份不仅需跨场景保持，还要跨童年、少年、青年、成年四个年龄阶段（故事内时间跨度约二十年）延续，同时金毛犬也从幼犬同步「变老」至老年犬。</p>
+<p><strong>空间连贯</strong>。图 8 突出 ViMax 在激进视角变化下维持全局一致场景几何的能力。在五镜头的警局讯问段落中——双人全景、对嫌疑人的过肩镜头、对警探的反打过肩、俯拍录音笔与记事本的插入镜头、反应特写——房间布局、两人相对座位、桌面道具与墙面陈设均保持几何一致，在反打镜头间隐式满足了 180 度轴线规则。图 9 把这一点扩展到更复杂的空间情境：河流野生动物片段中水上／水下的连续过渡、赛车片段中驾驶舱—赛道旁—航拍的视角切换、水下空间站片段中狭窄的内部走廊，都以一致的环境布局呈现。这种连贯源自<strong>转场视频生成模块</strong>：它作为非相邻镜头之间的空间锚点，避免机位重定位时出现相互矛盾的布局。</p>
+<h4>叙事逻辑与节奏</h4>
+<p>除视觉一致性外，生成内容的逻辑推进同样关键。ViMax 借助层次化叙事规划把高层创意分解为具备镜头级电影意图的连贯剧本。图 9、图 10 中的序列体现出专业的镜头语法：建立全景过渡到中景、再到反应特写；插入镜头被安放在有叙事意义的节拍上（如图 8 的录音笔、图 9 的驾驶舱仪表盘）；情绪高潮留给紧凑构图。这说明 ViMax 产出的不只是视觉一致的画面，而是节奏与镜头设计都体现有意为之的电影化叙事的序列。</p>
+<h4>VLM 引导的质量控制</h4>
+<p>为验证质量控制智能体，我们在图 15 给出 VLM 评审提示词。对每张关键帧分镜，图像生成智能体合成 <span class="math-inline">$k=2$</span> 个候选；VLM 评审器采用权衡角色一致性、空间逻辑与语义对齐的提示策略对候选做批判性评估。相比单次生成，这种判别式过滤显著降低了语义幻觉的发生率。</p>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/benchgen.svg" alt="图 11" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/benchgen.svg'"></div><figcaption><strong>图 11</strong>：生成 ViMax-Bench 故事规格所用的提示词。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/narrative_planning_judge_p1.svg" alt="图 12" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/narrative_planning_judge_p1.svg'"></div><figcaption><strong>图 12</strong>：叙事规划分镜评估所用的 LLM 评审提示词模板（第 1 部分）。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/narrative_planning_judge_p2.svg" alt="图 13" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/narrative_planning_judge_p2.svg'"></div><figcaption><strong>图 13</strong>：叙事规划分镜评估所用的 LLM 评审提示词模板（第 2 部分）。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/nf_judge.svg" alt="图 14" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/nf_judge.svg'"></div><figcaption><strong>图 14</strong>：叙事忠实度评估所用的 LLM 评审提示词模板。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<figure class="paper-fig"><div class="fig-imgs"><img loading="lazy" src="vimax_paper_figures/vlm_judge.svg" alt="图 15" onerror="this.onerror=null;this.src='https://arxiv.org/html/2606.07649v2/vlm_judge.svg'"></div><figcaption><strong>图 15</strong>：质量控制图像择优所用的 VLM 评审提示词。<span class="fig-src">（插图取自英文原文，图注已译为中文）</span></figcaption></figure>
+<hr />
+<blockquote>
+<p><strong>全文完</strong>。本译文依据 arXiv:2606.07649v2（2026-07-21）翻译；如需引用，请以英文原文为准。</p>
+</blockquote></article></section>
+    </div>
+  </main>
+</div>
+<button class="backtop" id="backtop" title="回到顶部">↑</button>
+<script>
+const TOC = {"guide": [{"id": "g-1", "level": 2, "title": "0. 一分钟速览"}, {"id": "g-2", "level": 2, "title": "1. 论文要填的空白"}, {"id": "g-3", "level": 2, "title": "2. 方法全景：一条流水线 + 三根支柱"}, {"id": "g-4", "level": 2, "title": "3. 三项贡献的「含金量」"}, {"id": "g-5", "level": 2, "title": "4. 实验速查"}, {"id": "g-6", "level": 2, "title": "5. 阅读路线建议"}, {"id": "g-7", "level": 2, "title": "6. 论文 ↔ 本地 ViMax/ 代码对照"}, {"id": "g-8", "level": 2, "title": "7. 批判性阅读清单（带问号的地方）"}, {"id": "g-9", "level": 2, "title": "8. 术语对照"}, {"id": "g-10", "level": 2, "title": "9. 带走这一句"}], "paper": [{"id": "p-1", "level": 2, "title": "摘要"}, {"id": "p-2", "level": 2, "title": "1 引言"}, {"id": "p-3", "level": 2, "title": "2 方法"}, {"id": "p-4", "level": 3, "title": "2.1 长视频生成工作流"}, {"id": "p-5", "level": 3, "title": "2.2 长程叙事规划"}, {"id": "p-6", "level": 3, "title": "2.3 跨镜头的视觉一致性"}, {"id": "p-7", "level": 2, "title": "3 实验评估"}, {"id": "p-8", "level": 3, "title": "3.1 实验设置"}, {"id": "p-9", "level": 3, "title": "3.2 整体性能比较（RQ1）"}, {"id": "p-10", "level": 3, "title": "3.3 人类评估（RQ2）"}, {"id": "p-11", "level": 3, "title": "3.4 消融研究（RQ3）"}, {"id": "p-12", "level": 3, "title": "3.5 镜头效率研究（RQ4）"}, {"id": "p-13", "level": 3, "title": "3.6 LLM 骨干模型的影响（RQ5）"}, {"id": "p-14", "level": 3, "title": "3.7 超参数研究（RQ6）"}, {"id": "p-15", "level": 2, "title": "4 相关工作"}, {"id": "p-16", "level": 2, "title": "5 结论"}, {"id": "p-17", "level": 2, "title": "局限性"}, {"id": "p-18", "level": 2, "title": "伦理考量"}, {"id": "p-19", "level": 2, "title": "参考文献"}, {"id": "p-20", "level": 2, "title": "附录 A"}, {"id": "p-21", "level": 3, "title": "A.1 ViMax-Bench 的分布"}, {"id": "p-22", "level": 3, "title": "A.2 数据与评测协议"}, {"id": "p-23", "level": 3, "title": "A.3 基线细节"}, {"id": "p-24", "level": 3, "title": "A.4 实现细节"}, {"id": "p-25", "level": 3, "title": "A.5 补充的组件与成本分析"}, {"id": "p-26", "level": 3, "title": "A.6 案例研究"}]};
+let cur = 'guide';
+const panels = {guide:document.getElementById('doc-guide'), paper:document.getElementById('doc-paper')};
+const tocBox = document.getElementById('toc');
+
+function buildToc(){
+  const q = (document.getElementById('tocSearch').value||'').trim().toLowerCase();
+  tocBox.innerHTML = TOC[cur].filter(it=>!q||it.title.toLowerCase().includes(q))
+    .map(it=>`<a class="l${it.level}" href="#${it.id}" data-id="${it.id}">${it.title.replace(/</g,'&lt;')}</a>`).join('')
+    || '<div style="padding:10px;color:var(--muted);font-size:12px">没有匹配的章节</div>';
+}
+function switchTab(name){
+  cur = name;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
+  Object.keys(panels).forEach(k=>panels[k].classList.toggle('active', k===name));
+  document.getElementById('crumb').textContent = name==='guide' ? '核心要点导读' : '论文中文全文';
+  buildToc();
+  window.scrollTo({top:0,behavior:'instant'});
+  if(window.MathJax && MathJax.typesetPromise){MathJax.typesetPromise([panels[name]]).catch(()=>{});}
+  setTimeout(highlight,60);
+}
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>switchTab(t.dataset.tab)));
+document.getElementById('tocSearch').addEventListener('input',buildToc);
+tocBox.addEventListener('click',e=>{
+  const a=e.target.closest('a'); if(!a) return;
+  e.preventDefault();
+  document.getElementById(a.dataset.id).scrollIntoView({behavior:'smooth',block:'start'});
+});
+
+let visible = [];
+function highlight(){
+  const heads=[...panels[cur].querySelectorAll('h2[id],h3[id]')];
+  let active='';
+  for(const h of heads){ if(h.getBoundingClientRect().top<=140) active=h.id; else break; }
+  tocBox.querySelectorAll('a').forEach(a=>a.classList.toggle('cur',a.dataset.id===active));
+}
+function onScroll(){
+  const h=document.documentElement;
+  const p=h.scrollTop/(h.scrollHeight-h.clientHeight||1)*100;
+  document.getElementById('progress').style.width=Math.min(100,Math.max(0,p))+'%';
+  document.getElementById('backtop').classList.toggle('show',h.scrollTop>400);
+  highlight();
+}
+window.addEventListener('scroll',onScroll,{passive:true});
+document.getElementById('backtop').addEventListener('click',()=>window.scrollTo({top:0,behavior:'smooth'}));
+
+const themeBtn=document.getElementById('themeBtn');
+function setTheme(t){document.documentElement.dataset.theme=t;themeBtn.textContent=t==='dark'?'☀ 浅色':'☾ 深色';localStorage.setItem('vimax-theme',t);}
+const saved=localStorage.getItem('vimax-theme');
+setTheme(saved||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'));
+themeBtn.addEventListener('click',()=>setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
+document.getElementById('printBtn').addEventListener('click',()=>window.print());
+buildToc(); onScroll();
+</script>
+</body>
+</html>
