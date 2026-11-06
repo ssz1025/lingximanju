@@ -66,7 +66,7 @@ cd lingximanju
 ### 自动化测试
 
 ```bash
-npm test        # node --test tests/*.test.mjs —— 92 项断言全部通过
+npm test        # node --test tests/*.test.mjs —— 94 项断言全部通过
 npm run check   # 关键文件语法检查
 ```
 
@@ -82,6 +82,7 @@ npm run check   # 关键文件语法检查
 | `tests/graph.test.mjs` | 图算法纯函数：拓扑分层、上下游子图、自动布局、DAG 环检测 | 6 |
 | `tests/store.test.mjs` | 持久层：uid / 资产路径清洗、项目存取与列表缓存失效、快照封顶 20 份 | 4 |
 | `tests/orchestrator.test.mjs` | 编排器集成：波次调度、`scope` 白名单、失败与跳过传播、取消与并发保护（全程 mock） | 4 |
+| `tests/providers.test.mjs` | LLM 端点健壮性：挂起端点超时后回退 Mock 不卡死、调用方已取消时立即失败 | 2 |
 
 端到端闭环（真实 HTTP：创建 → 分步 → 全量执行 → 管理动作 → 快照恢复 → 复制 → 导演包下载 → 封面上传 / 生成 / 重置 → 清理）另有 jsdom 运行时验证，覆盖向导、步骤面板、管理面板、侧栏筛选与封面弹窗。
 

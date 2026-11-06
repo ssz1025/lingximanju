@@ -7,3 +7,4 @@ data/comfyui.json
 data/.port
 data/snapshots/*
 *.log
+.trae-html-share-packages/

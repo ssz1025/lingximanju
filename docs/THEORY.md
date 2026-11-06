@@ -135,7 +135,7 @@
 | 双产物 | 第 ⑥ 步后 `final` 节点 `data.directorPack`（可下载 ZIP）/ `data.film`（接入 ComfyUI 后才有 MP4）、`timeline.json` |
 | 项目管理 | 侧栏搜索 / 筛选 / 收藏 / 归档 / 复制 / 标签，管理面板的快照创建与恢复 |
 
-### 6.1 自动化验证（`npm test` → 92 项全通过）
+### 6.1 自动化验证（`npm test` → 94 项全通过）
 
 机制层面的"真的落地"由测试固化，而非仅靠肉眼检查：
 
@@ -154,6 +154,7 @@
 | 图调度（DAG 分层） | `tests/graph.test.mjs`：`topoLayers()` 分层、`descendants/ancestors` 上下游子图、`autoLayout()` 自动布局、`validate()` 环检测 |
 | 持久层一致性 | `tests/store.test.mjs`：列表缓存同毫秒连改仍读到最新索引、快照封顶 20 份且同毫秒不互相覆盖 |
 | 编排器调度 | `tests/orchestrator.test.mjs`：波次调度、`scope` 白名单、失败与跳过传播、取消与并发保护（全程 mock，无网络请求） |
+| LLM 端点健壮性 | `tests/providers.test.mjs`：挂起端点经 `llmTimeoutMs` 超时后回退 Mock 不永久卡死；调用方已取消时不等完整超时立即失败 |
 
 ---
 

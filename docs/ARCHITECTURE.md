@@ -506,7 +506,7 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | `npm test` → **92 项全部通过**（`novel` 16 / `project-steps` 27 / `novel-project` 11 / `knowledge` 11 / `comfy-lib` 8 / `comfy-lib-api` 5 / `graph` 6 / `store` 4 / `orchestrator` 4），零依赖、毫秒级 |
+| 单元测试 | `npm test` → **94 项全部通过**（`novel` 16 / `project-steps` 27 / `novel-project` 11 / `knowledge` 11 / `comfy-lib` 8 / `comfy-lib-api` 5 / `graph` 6 / `store` 4 / `orchestrator` 4 / `providers` 2），零依赖、毫秒级 |
 | 后端 HTTP 闭环 | 新建创作项目 → 第 ③ 步 → 全部执行：`6/6` 步、42 节点 / 64 连线（2 集）、6 镜头、8 条 anchor、14 条 ref、0 失败，导演包 25 文件 CRC 全通过 |
 | 上传内容生效 | 剧本场景来自原著章节（「第一章 没有署名的信」/「第四章 回到码头」），角色抽取为沈砚 / 林夏等原著人物 |
 | 项目管理 | 重命名 / 收藏 / 标签 / 备注 / 归档 / 交付设置 / 复制 / 快照 / 恢复 / 删除全部通过，原有 4 个示例项目未受影响 |
