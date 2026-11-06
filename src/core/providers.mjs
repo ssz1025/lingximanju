@@ -146,7 +146,11 @@ function mockGenerate(intent, vars = {}) {
           title: `事件 ${i + 1} · ${s.location || s.title || '转折'}`,
           summary: s.summary || '推动故事向前的关键节点',
           processChain: i === 0 ? ['起因', '发现线索', '决定调查'] : i === 1 ? ['追问', '证词矛盾', '信任动摇'] : ['对峙', '真相浮现', '做出选择'],
-          scenes: [{ title: s.title || s.location || '场景', location: s.location || '内景', time: s.time || '夜', summary: s.summary || '' }],
+          scenes: [
+            { title: s.title || s.location || '场景', location: s.location || '内景', time: s.time || '夜', summary: s.summary || '' },
+            // 式(5)：一个事件可含多个场景，decomposer 会递归展开全部场景
+            { title: `${s.title || s.location || '场景'} · 后段`, location: s.location || '内景', time: s.time || '夜', summary: `${s.summary || '承接上文'}（续）` },
+          ],
         })),
       };
     }
@@ -305,7 +309,8 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
   }
 
   // 端点挂起兜底：LLM 调用没有超时会让节点永久卡死；超时按普通失败处理，回退 Mock
-  const LLM_TIMEOUT_MS = Number(settings.llmTimeoutMs) || 120_000;
+  // 默认 300s：推理型模型（如 MiMo）单请求实测可达 140s+，旧默认 120s 会静默超时回退
+  const LLM_TIMEOUT_MS = Number(settings.llmTimeoutMs) || 300_000;
 
   // Token 用量采集：每次真实 LLM 调用产出一条记录，经 onUsage 回调交给上层归集
   function reportUsage(record) {
@@ -328,8 +333,14 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
         body: JSON.stringify({
           model: settings.model || 'gpt-4o-mini',
-          temperature: 0.7,
-          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          temperature: Number.isFinite(Number(settings.temperature)) ? Number(settings.temperature) : 0.7,
+          // meta.images 存在时用 OpenAI 兼容多模态消息格式（VLM 看图评审）
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: meta.images?.length
+              ? [{ type: 'text', text: user }, ...meta.images.map((url) => ({ type: 'image_url', image_url: { url } }))]
+              : user },
+          ],
         }),
         signal: ctrl.signal,
       });
@@ -357,6 +368,7 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
   async function generate(intent, vars = {}, signal) {
     // 式(6) 检索是确定性算法，不经过 LLM：既避免长篇原著撑爆上下文，也保证 Mock/真实模型行为一致
     if (intent === 'context') return localContext(vars);
+    let fellBack = false;
     if (mode === 'openai') {
       try {
         const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。` +
@@ -369,10 +381,13 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
         reportUsage({ intent, model: settings.model || 'gpt-4o-mini', ts: Date.now(),
           promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 1, estimated: false, fallback: true });
         log('warn', `模型调用失败，已回退 Mock：${err.message}`);
+        fellBack = true;
       }
     }
     await delay(140 + (hash(intent + JSON.stringify(vars)) % 260), signal);
-    return mockGenerate(intent, vars);
+    const mock = mockGenerate(intent, vars);
+    // 回退显式化：真实模型失败才打 __fallback（Mock 模式本身就是 Mock，不算回退）
+    return fellBack ? { ...mock, __fallback: true } : mock;
   }
 
   async function image(opts = {}, signal) {
@@ -468,8 +483,16 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     };
   }
 
-  async function judge(opts = {}, signal) {
-    const candidates = opts.candidates || [];
+  /** 候选图 → data URL（SVG 复用占位帧转换链路转 PNG）；取不到返回 null */
+  function candidateDataURL(c, i) {
+    const ref = referenceBuffer(c.url, { seed: c.seed || `${i}`, shotNo: i + 1, style: settings.style });
+    if (!ref?.buffer) return null;
+    const mime = /\.jpe?g$/i.test(ref.name) ? 'image/jpeg' : 'image/png';
+    return `data:${mime};base64,${ref.buffer.toString('base64')}`;
+  }
+
+  /** 启发式评审：Mock 模式或 VLM 不可用时的回退；judgeMode 显式标注来源，消灭假 VLM */
+  async function judgeHeuristic(opts, candidates, fellBack, signal) {
     await delay(120, signal);
     const scores = candidates.map((c, i) => {
       const h = hash(`${i}|${c.prompt || ''}|${c.url || ''}`);
@@ -482,8 +505,59 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
       scores: scores.map((s) => Number(s.toFixed(3))),
       criteria: ['视觉保真度', '叙事一致性', '镜头规格遵循'],
       reason: `候选 ${index + 1} 在角色可辨识度、构图与光照方向上与「${opts.shotTitle || '镜头规格'}」最一致；其余候选存在身份或空间状态漂移风险。`,
+      judgeMode: 'heuristic',
+      ...(fellBack ? { fallback: true } : {}),
     };
   }
 
-  return { mode, comfyActive, generate, image, video, judge, detectTheme };
+  /** 式(4) best-of-k：把全部候选图喂给多模态模型真实看图择优 */
+  async function judgeWithVLM(opts, candidates, signal) {
+    const images = candidates.map((c, i) => candidateDataURL(c, i));
+    if (!images.length || images.some((x) => !x)) throw new Error('候选图无法读取为位图');
+    const system = '你是影视质量评审，直接观察给出的候选关键帧图片打分。只输出严格 JSON：'
+      + '{"index":数字,"scores":[数字],"criteria":["..."],"reason":"..."}。'
+      + 'index 为最优候选序号（从 0 开始），scores 与候选一一对应（0~1 之间），内容使用简体中文。';
+    const user = `评审对象：${opts.shotTitle || '镜头规格'}\n`
+      + `评审维度：${(opts.criteria || []).join('、') || '视觉保真度、叙事一致性、镜头规格遵循'}\n`
+      + `候选数量：${candidates.length}\n`
+      + `各候选的镜头/构图要求：${JSON.stringify(candidates.map((c) => c.prompt || ''))}`;
+    const out = await callLLM(system, user, signal, { intent: 'judge', images });
+    const index = Math.max(0, Math.min(candidates.length - 1, Math.round(Number(out.index)) || 0));
+    const scores = candidates.map((_, i) => Math.max(0, Math.min(1, Number(out.scores?.[i]) || 0.6)));
+    return {
+      index,
+      scores: scores.map((s) => Number(s.toFixed(3))),
+      criteria: Array.isArray(out.criteria) && out.criteria.length ? out.criteria.map(String) : (opts.criteria || []),
+      reason: String(out.reason || '').slice(0, 200) || `候选 ${index + 1} 综合评分最高。`,
+      judgeMode: 'vlm',
+    };
+  }
+
+  async function judge(opts = {}, signal) {
+    const candidates = opts.candidates || [];
+    // 式(4)：模型支持图片输入时真实 VLM 看图择优；失败/无图回退启发式并显式标注
+    if (mode === 'openai' && candidates.length) {
+      try {
+        return await judgeWithVLM(opts, candidates, signal);
+      } catch (err) {
+        log('warn', `VLM 评审失败，回退启发式打分：${err.message}`);
+        return judgeHeuristic(opts, candidates, true, signal);
+      }
+    }
+    return judgeHeuristic(opts, candidates, false, signal);
+  }
+
+  /** 连接自检：发一次微型真实调用，返回延迟与预览；不落盘、不产资产 */
+  async function testConnection(signal) {
+    const t0 = Date.now();
+    if (mode !== 'openai') return { ok: true, mode: 'mock', latencyMs: 0, preview: 'Mock 模式无需连接真实端点' };
+    try {
+      const out = await callLLM('只输出严格 JSON：{"pong":"pong"}', 'ping', signal, { intent: 'test' });
+      return { ok: true, mode, latencyMs: Date.now() - t0, preview: JSON.stringify(out).slice(0, 60) };
+    } catch (err) {
+      return { ok: false, mode, latencyMs: Date.now() - t0, error: err.message };
+    }
+  }
+
+  return { mode, comfyActive, generate, image, video, judge, detectTheme, testConnection };
 }

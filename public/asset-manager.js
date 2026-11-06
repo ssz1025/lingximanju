@@ -6,7 +6,7 @@
  * 改名与打标走 PATCH /api/assets/:file，供跨项目共享与角色优先匹配检索。
  * 纯自主实现，无框架依赖；弹窗结构照搬 openCoverDialog 的 backdrop 模式。
  * ==========================================================================*/
-import { toast, openAssetPreview } from './panels.js';
+import { toast } from './panels.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -30,6 +30,13 @@ async function api(path, body, method) {
 const TYPE_LABEL = { image: '图片', video: '视频', other: '其他' };
 const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '其他' };
 const KIND_ORDER = ['all', 'character', 'cover', 'image', 'video', 'pack', 'other'];
+const SORTS = {
+  new:   { label: '最新优先', fn: (a, b) => (b.createdAt || 0) - (a.createdAt || 0) },
+  old:   { label: '最早优先', fn: (a, b) => (a.createdAt || 0) - (b.createdAt || 0) },
+  big:   { label: '大 → 小', fn: (a, b) => (b.bytes || 0) - (a.bytes || 0) },
+  small: { label: '小 → 大', fn: (a, b) => (a.bytes || 0) - (b.bytes || 0) },
+  name:  { label: '名称 A→Z', fn: (a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-CN') },
+};
 
 /** 单元格视觉：图片直接缩略、视频用静帧预览、其余按扩展名块呈现 */
 function cellMedia(a) {
@@ -54,6 +61,9 @@ export function openAssetLibrary(o = {}) {
   let tagFilter = '';            // 标签筛选
   let projectFilter = '';        // 来源项目筛选
   let query = '';                // 名称 / 标签搜索
+  let sortBy = 'new';            // 排序方式（SORTS 键）
+  let selMode = false;           // 多选模式（manage）
+  const selSet = new Set();      // 多选选中的 file 集合
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   const close = () => backdrop.remove();
@@ -78,7 +88,7 @@ export function openAssetLibrary(o = {}) {
         if (!hay.includes(q)) return false;
       }
       return true;
-    });
+    }).sort(SORTS[sortBy]?.fn || SORTS.new.fn);
   }
 
   function render() {
@@ -108,11 +118,23 @@ export function openAssetLibrary(o = {}) {
         <button class="icon-btn" data-act="close" aria-label="关闭">✕</button></div>
       <div class="asset-toolbar">
         <div class="asset-filters">${kindChips}</div>
-        <input class="asset-search" id="asset-search" type="search" placeholder="搜索名称 / 标签 / 来源项目…" value="${esc(query)}">
+        <div class="asset-toolbar-right">
+          <select id="asset-sort" class="asset-sort" title="排序方式">
+            ${Object.entries(SORTS).map(([k, s]) => `<option value="${k}" ${sortBy === k ? 'selected' : ''}>${s.label}</option>`).join('')}
+          </select>
+          <input class="asset-search" id="asset-search" type="search" placeholder="搜索名称 / 标签 / 来源项目…" value="${esc(query)}">
+        </div>
       </div>
       ${(tagChips || projChips) ? `<div class="asset-filters sub">${tagChips}${projChips}${activeTags}</div>` : ''}
+      ${selMode && mode === 'manage' ? `<div class="asset-selbar"><b>${selSet.size}</b> 项已选
+        <button class="btn sm" data-sel-all>全选本页</button>
+        <button class="btn sm primary" data-batch-tag ${selSet.size ? '' : 'disabled'}>批量打标</button>
+        <button class="btn sm danger" data-batch-del ${selSet.size ? '' : 'disabled'}>删除所选</button>
+        <button class="btn sm" data-sel-exit>退出多选</button></div>` : ''}
       <div class="asset-scroll">${grid}</div>
-      <div class="modal-actions">${mode === 'manage' ? '<button class="btn" data-act="reindex">↻ 重扫目录</button>' : ''}
+      <div class="modal-actions">${mode === 'manage' ? `<button class="btn" data-act="orphan" title="删除未被任何项目引用的资源">⌫ 清理孤儿</button>
+        <button class="btn" data-act="reindex">↻ 重扫目录</button>
+        <button class="btn${selMode ? ' primary' : ''}" data-act="sel-toggle">${selMode ? '☑ 完成多选' : '☑ 多选'}</button>` : ''}
         <button class="btn" data-act="close">关闭</button></div>
     </div>`;
 
@@ -126,6 +148,33 @@ export function openAssetLibrary(o = {}) {
       } catch (err) { toast(err.message, 'err'); btn.disabled = false; }
     });
     backdrop.querySelectorAll('[data-kind]').forEach((c) => c.addEventListener('click', () => { filter = c.dataset.kind; render(); }));
+    backdrop.querySelector('#asset-sort')?.addEventListener('change', (e) => { sortBy = e.target.value; render(); });
+    backdrop.querySelector('[data-act="sel-toggle"]')?.addEventListener('click', () => { selMode = !selMode; if (!selMode) selSet.clear(); render(); });
+    backdrop.querySelector('[data-sel-exit]')?.addEventListener('click', () => { selMode = false; selSet.clear(); render(); });
+    backdrop.querySelector('[data-sel-all]')?.addEventListener('click', () => { visible().forEach((a) => selSet.add(a.file)); render(); });
+    backdrop.querySelector('[data-batch-del]')?.addEventListener('click', async () => {
+      const files = [...selSet];
+      if (!files.length) return;
+      if (!confirm(`确定删除选中的 ${files.length} 项资源？被项目引用的资源会自动跳过。`)) return;
+      try {
+        const d = await api('/api/assets/batch-delete', { files }, 'POST');
+        selSet.clear();
+        toast(`已删除 ${d.deleted.length} 项${d.blocked.length ? `，${d.blocked.length} 项被项目引用已跳过` : ''}`, d.blocked.length ? 'warn' : 'ok');
+        await load(); render();
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    backdrop.querySelector('[data-batch-tag]')?.addEventListener('click', () => batchTagDialog());
+    backdrop.querySelector('[data-act="orphan"]')?.addEventListener('click', async () => {
+      try {
+        const d = await api('/api/assets/orphans');
+        if (!d.count) { toast('没有孤儿资源，所有资源都被项目引用着', 'ok'); return; }
+        if (!confirm(`发现 ${d.count} 项未被任何项目引用的孤儿资源（共 ${fmtBytes(d.bytes)}），确认全部删除？`)) return;
+        const r = await api('/api/assets/batch-delete', { files: d.orphans.map((x) => x.file) }, 'POST');
+        selSet.clear();
+        toast(`已清理 ${r.deleted.length} 项孤儿资源（${fmtBytes(r.bytes)}）`, 'ok');
+        await load(); render();
+      } catch (err) { toast(err.message, 'err'); }
+    });
     backdrop.querySelectorAll('[data-tag]').forEach((c) => c.addEventListener('click', () => { tagFilter = tagFilter === c.dataset.tag ? '' : c.dataset.tag; render(); }));
     backdrop.querySelectorAll('[data-proj]').forEach((c) => c.addEventListener('click', () => { projectFilter = projectFilter === c.dataset.proj ? '' : c.dataset.proj; render(); }));
     backdrop.querySelector('[data-clear]')?.addEventListener('click', () => { tagFilter = ''; projectFilter = ''; query = ''; render(); });
@@ -142,7 +191,7 @@ export function openAssetLibrary(o = {}) {
     function shown2() { return visible(); }
     function gridHTML(list) {
       if (!list.length) return `<div class="asset-empty">${assets.length ? '没有匹配的资源<br><small>试试清除筛选或换个关键词</small>' : '资源库为空——生成封面、运行流水线后，产出会自动收录到这里'}</div>`;
-      return `<div class="asset-grid">${list.map((a) => `<div class="asset-cell" data-file="${esc(a.file)}" title="${esc(a.name)}">
+      return `<div class="asset-grid">${list.map((a) => `<div class="asset-cell${selSet.has(a.file) ? ' selected' : ''}" data-file="${esc(a.file)}" title="${esc(a.name)}">
           <div class="asset-media">${cellMedia(a)}</div>
           <div class="asset-meta">
             <span class="asset-name" title="${esc(a.name)}">${esc(a.name)}</span>
@@ -150,7 +199,9 @@ export function openAssetLibrary(o = {}) {
             ${(a.tags || []).length ? `<span class="asset-tags">${a.tags.map((t) => `<i>#${esc(t)}</i>`).join('')}</span>` : ''}
             ${a.sourceProjectName ? `<span class="asset-src" title="来源项目">⌂ ${esc(a.sourceProjectName)}</span>` : ''}
           </div>
-          ${mode === 'manage' ? `<button class="asset-del" data-del="${esc(a.file)}" title="删除资源">✕</button>` : '<span class="asset-pick-badge">选择</span>'}
+          ${mode === 'pick' ? '<span class="asset-pick-badge">选择</span>'
+            : selMode ? `<span class="asset-check${selSet.has(a.file) ? ' on' : ''}">${selSet.has(a.file) ? '✓' : ''}</span>`
+            : `<button class="asset-del" data-del="${esc(a.file)}" title="删除资源">✕</button>`}
         </div>`).join('')}</div>`;
     }
 
@@ -161,8 +212,18 @@ export function openAssetLibrary(o = {}) {
         const a = assets.find((x) => x.file === cell.dataset.file);
         if (!a) return;
         if (mode === 'pick') { close(); o.onPick?.(a); return; }
-        if (a.type === 'image') openAssetPreview(a.url, a.name);
-        else if (a.type === 'video') openAssetPreview(a.url, a.name);
+        // 多选模式下点击 = 勾选/取消；单选模式点击 = 预览
+        if (selMode) {
+          if (selSet.has(a.file)) selSet.delete(a.file); else selSet.add(a.file);
+          cell.classList.toggle('selected', selSet.has(a.file));
+          cell.querySelector('.asset-check')?.classList.toggle('on', selSet.has(a.file));
+          const bar = backdrop.querySelector('.asset-selbar b');
+          if (bar) bar.textContent = String(selSet.size);
+          backdrop.querySelector('[data-batch-del]')?.toggleAttribute('disabled', !selSet.size);
+          backdrop.querySelector('[data-batch-tag]')?.toggleAttribute('disabled', !selSet.size);
+          return;
+        }
+        if (a.type === 'image' || a.type === 'video') openPreview(a);
         else openMetaDialog(a);
       }));
       // manage 模式：双击单元格 = 改名 / 打标签 / 改类型
@@ -222,6 +283,89 @@ export function openAssetLibrary(o = {}) {
       } catch (err) { toast(err.message, 'err'); btn.disabled = false; }
     });
     wrap.querySelector('#am-name').focus();
+  }
+
+  /** 增强预览：大图/视频 + 完整信息 + 下载 / 复制链接 / 编辑信息 */
+  function openPreview(a) {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    const isVideo = a.type === 'video';
+    wrap.innerHTML = `<div class="modal asset-preview-modal" role="dialog" aria-label="资源预览">
+      <div class="pmm-head"><div><h2>👁 ${esc(a.name)}</h2><div class="sub">${esc(a.file)}</div></div>
+        <button class="icon-btn" data-x>✕</button></div>
+      <div class="asset-preview-media">${isVideo
+        ? `<video src="${esc(a.url)}" controls autoplay loop playsinline></video>`
+        : `<img src="${esc(a.url)}" alt="${esc(a.name)}">`}</div>
+      <div class="asset-info">
+        <div><span>类型</span><b class="asset-kind k-${esc(a.kind || 'other')}">${KIND_LABEL[a.kind] || TYPE_LABEL[a.type] || '其他'}</b></div>
+        <div><span>大小</span><b>${fmtBytes(a.size || a.bytes)}</b></div>
+        <div><span>收录时间</span><b>${fmtTime(a.createdAt || a.mtime)}</b></div>
+        <div><span>标签</span><b>${(a.tags || []).length ? a.tags.map((t) => `<i class="pv-tag">#${esc(t)}</i>`).join(' ') : '—'}</b></div>
+        <div><span>来源项目</span><b>${a.sourceProjectName ? esc(a.sourceProjectName) : '—'}</b></div>
+      </div>
+      <div class="modal-actions">
+        <a class="btn" href="${esc(a.url)}" download="${esc(a.file)}" data-dl>⇩ 下载原文件</a>
+        <button class="btn" data-copy>⧉ 复制链接</button>
+        <button class="btn" data-edit>✎ 编辑信息</button>
+        <button class="btn primary" data-x>关闭</button>
+      </div>
+    </div>`;
+    (document.getElementById('modal-root') || document.body).appendChild(wrap);
+    const done = () => wrap.remove();
+    wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
+    wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
+    wrap.querySelector('[data-copy]').addEventListener('click', async () => {
+      const abs = location.origin + a.url;
+      try { await navigator.clipboard.writeText(abs); toast('链接已复制', 'ok'); }
+      catch {
+        const input = document.createElement('input');
+        input.value = abs; wrap.appendChild(input); input.select();
+        document.execCommand('copy'); input.remove(); toast('链接已复制', 'ok');
+      }
+    });
+    wrap.querySelector('[data-edit]').addEventListener('click', () => { done(); openMetaDialog(a); });
+  }
+
+  /** 批量打标：把同一组标签追加到多选的资源上 */
+  function batchTagDialog() {
+    const files = [...selSet];
+    if (!files.length) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    wrap.innerHTML = `<div class="modal asset-meta-modal" role="dialog" aria-label="批量打标">
+      <div class="pmm-head"><div><h2># 批量打标</h2><div class="sub">将为选中的 ${files.length} 项资源追加标签</div></div>
+        <button class="icon-btn" data-x>✕</button></div>
+      <div class="field"><label>标签（逗号分隔 · 追加到现有标签之后）</label>
+        <input id="am-btags" placeholder="例如：第2幕, 夜景"></div>
+      <div class="modal-actions"><button class="btn" data-x>取消</button>
+        <button class="btn primary" data-save>应用</button></div>
+    </div>`;
+    (document.getElementById('modal-root') || document.body).appendChild(wrap);
+    const done = () => wrap.remove();
+    wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
+    wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
+    wrap.querySelector('[data-save]').addEventListener('click', async () => {
+      const raw = wrap.querySelector('#am-btags').value;
+      const tags = raw.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+      if (!tags.length) { toast('请至少输入一个标签', 'err'); return; }
+      const btn = wrap.querySelector('[data-save]');
+      btn.disabled = true;
+      try {
+        let ok = 0;
+        for (const file of files) {
+          const a = assets.find((x) => x.file === file);
+          if (!a) continue;
+          const merged = [...new Set([...(a.tags || []), ...tags])];
+          await api(`/api/assets/${encodeURIComponent(file)}`, { tags: merged.join(', ') }, 'PATCH');
+          ok += 1;
+        }
+        toast(`已为 ${ok} 项资源追加标签 ${tags.map((t) => '#' + t).join(' ')}`, 'ok');
+        selSet.clear();
+        done();
+        await load(); render();
+      } catch (err) { toast(err.message, 'err'); btn.disabled = false; }
+    });
+    wrap.querySelector('#am-btags').focus();
   }
 
   const root = $('modal-root') || document.body;

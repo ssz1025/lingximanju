@@ -4,6 +4,7 @@ import { hash } from '../core/artwork.mjs';
 import { matchCharacters, registerAsset } from '../core/assets.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
   saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
+import { topoLayers } from '../core/graph.mjs';
 
 const textOf = (v) => String(v || '').trim();
 const brief = (s, n = 46) => (String(s || '').length > n ? `${String(s).slice(0, n)}…` : String(s || ''));
@@ -103,7 +104,10 @@ defineAgent({
     if (chunks.length) ctx.log('info', `知识库 ${chunks.length} 块 · 逐事件检索命中 ${perEventFragments.map((f) => f.length).join('/')} 段`);
 
     const created = [];
-    events.forEach((event, i) => {
+    const shotPlan = [];
+    let sceneIndex = 0;
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
       const relevantChunks = perEventFragments[i];
       const fragments = formatFragments(relevantChunks, 4);
       const eventNode = ctx.addNodeAndEdge({
@@ -111,34 +115,37 @@ defineAgent({
         title: event.title || `事件 ${i + 1}`,
         data: { event, context, script, relevantChunks, fragments, depth: 1, summary: brief(event.summary, 40) },
       }, ctx.node.id, 'flow');
-      const sceneSpec = (event.scenes && event.scenes[0]) || { title: event.title, location: '内景', time: '夜', summary: event.summary };
-      const sceneNode = ctx.addNodeAndEdge({
-        type: 'scene', agent: 'storyboard',
-        title: `场景 ${i + 1} · ${sceneSpec.location || sceneSpec.title}`,
-        data: { scene: sceneSpec, script, context, relevantChunks, fragments, index: i, shotsPerScene, depth: 2,
-          summary: brief(sceneSpec.summary, 40) },
-      }, eventNode.id, 'flow');
-      created.push(eventNode.id, sceneNode.id);
-    });
-
-    // 预生成镜头概要，供机位依赖图与一致性报告使用；片段随 shots 提示词下发（式 6）
-    const shotPlan = [];
-    for (let i = 0; i < events.length; i++) {
-      const sceneSpec = (events[i].scenes && events[i].scenes[0]) || {};
-      const shots = await ctx.providers.generate('shots', {
-        scene: sceneSpec, count: shotsPerScene, idea: script.logline,
-        fragments: formatFragments(perEventFragments[i], 4),
-      }, ctx.signal);
-      shotPlan.push({ scene: i + 1, location: sceneSpec.location, shots: shots.shots || [],
-        fragmentsUsed: (perEventFragments[i] || []).length });
+      created.push(eventNode.id);
+      // 式(5)：事件 → 场景 → 镜头递归展开——事件下所有场景都要生成场景节点，不能只取 scenes[0]
+      const sceneSpecs = (event.scenes && event.scenes.length)
+        ? event.scenes
+        : [{ title: event.title, location: '内景', time: '夜', summary: event.summary }];
+      for (const sceneSpec of sceneSpecs) {
+        const sceneNode = ctx.addNodeAndEdge({
+          type: 'scene', agent: 'storyboard',
+          title: `场景 ${sceneIndex + 1} · ${sceneSpec.location || sceneSpec.title}`,
+          data: { scene: sceneSpec, script, context, relevantChunks, fragments, index: sceneIndex, shotsPerScene, depth: 2,
+            summary: brief(sceneSpec.summary, 40) },
+        }, eventNode.id, 'flow');
+        created.push(sceneNode.id);
+        // 预生成镜头概要，供机位依赖图与一致性报告使用；片段随 shots 提示词下发（式 6）
+        const shots = await ctx.providers.generate('shots', {
+          scene: sceneSpec, count: shotsPerScene, idea: script.logline,
+          fragments,
+        }, ctx.signal);
+        shotPlan.push({ event: i + 1, scene: sceneIndex + 1, location: sceneSpec.location, shots: shots.shots || [],
+          fragmentsUsed: (relevantChunks || []).length });
+        sceneIndex += 1;
+      }
     }
     ctx.progress(0.95);
+    const plannedShots = shotPlan.reduce((a, s) => a + s.shots.length, 0);
     ctx.patch({
       events, shotPlan, context, script,
       knowledgeChunks: chunks.length, fragmentsPerEvent: perEventFragments.map((f) => f.length),
       hierarchy: ['事件', '场景', '镜头'], eventCount: events.length,
-      sceneCount: events.length, plannedShots: shotPlan.reduce((a, s) => a + s.shots.length, 0),
-      spawned: created, summary: `${events.length} 事件 → ${events.length} 场景 → ${shotPlan.reduce((a, s) => a + s.shots.length, 0)} 镜头`,
+      sceneCount: sceneIndex, plannedShots,
+      spawned: created, summary: `${events.length} 事件 → ${sceneIndex} 场景 → ${plannedShots} 镜头`,
     });
     ctx.log('info', `画布已展开 ${created.length} 个规划节点；事件专属原文片段（FRAGMENT）已随节点下发`);
   },
@@ -281,15 +288,20 @@ defineAgent({
     const flatShots = shotPlan.flatMap((s) => s.shots || []);
     ctx.progress(0.3);
     const res = await ctx.providers.generate('cameras', { shots: flatShots }, ctx.signal);
+    const cams = res.cameras || [];
+    // 式(7)：并行层是机位依赖图的真实拓扑分层——parent 链决定层次，同层机位无相互依赖可并发
+    const camEdges = cams
+      .filter((c) => c.parent && cams.some((p) => p.id === c.parent))
+      .map((c) => ({ from: c.parent, to: c.id, kind: 'flow' }));
+    const parallelLayers = Math.max(1, topoLayers(cams, camEdges).layers.length);
     const anchors = (ctx.project.edges || []).filter((e) => e.kind === 'anchor').length;
     const videos = (ctx.project.nodes || []).filter((n) => n.type === 'video');
     const doneVideos = videos.filter((n) => n.status === 'done').length;
     ctx.progress(0.9);
     ctx.patch({
-      cameras: res.cameras || [], anchorCount: anchors,
-      parallelLayers: Math.max(1, Math.ceil(flatShots.length / Math.max(1, ctx.settings.concurrency || 3))),
+      cameras: cams, anchorCount: anchors, parallelLayers,
       shotCount: flatShots.length, videoReady: `${doneVideos}/${videos.length}`,
-      summary: `${(res.cameras || []).length} 个机位 · ${anchors} 条视觉锚点 · ${videos.length} 个片段节点`,
+      summary: `${cams.length} 个机位 · ${parallelLayers} 个可并发层 · ${anchors} 条视觉锚点 · ${videos.length} 个片段节点`,
     });
     ctx.log('think', `拓扑分层完成：无依赖机位可并发生成，依赖机位继承前驱视觉锚点`);
   },

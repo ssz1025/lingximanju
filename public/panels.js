@@ -70,6 +70,9 @@ export async function openSettings(project, onSave) {
         <div class="field"><label>模型名称</label><input id="set-model" value="${esc(s.model || '')}" placeholder="gpt-4o-mini"></div>
         <div class="field" style="grid-column:1/-1"><label>Base URL</label><input id="set-base" value="${esc(s.baseUrl || '')}" placeholder="https://api.example.com/v1"></div>
         <div class="field" style="grid-column:1/-1"><label>API Key（仅存本地）</label><input id="set-key" type="password" value="${esc(s.apiKey || '')}" placeholder="sk-..."></div>
+        <div class="field"><label>LLM 超时（秒）</label><input id="set-timeout" type="number" min="30" max="1800" step="10" value="${Math.round((s.llmTimeoutMs || 300000) / 1000)}"></div>
+        <div class="field"><label>温度</label><input id="set-temp" type="number" min="0" max="2" step="0.1" value="${s.temperature ?? 0.7}"></div>
+        <div class="field" style="grid-column:1/-1"><button class="btn" id="llm-test">测试模型连接</button> <span id="llm-test-result" class="muted"></span></div>
         <div class="field"><label>best-of-k 候选数</label><input id="set-k" type="number" min="1" max="4" value="${s.k || 2}"></div>
         <div class="field"><label>最大并发</label><input id="set-conc" type="number" min="1" max="8" value="${s.concurrency || 3}"></div>
         <div class="field"><label>画面风格</label><select id="set-style">
@@ -194,6 +197,8 @@ export async function openSettings(project, onSave) {
             ...project.settings,
             provider: q('set-provider').value, model: q('set-model').value.trim(),
             baseUrl: q('set-base').value.trim(), apiKey: q('set-key').value.trim(),
+            llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
+            temperature: Number.isFinite(Number(q('set-temp').value)) ? Number(q('set-temp').value) : 0.7,
             k: Number(q('set-k').value) || 2, concurrency: Number(q('set-conc').value) || 3,
             style: q('set-style').value, aspect: q('set-aspect').value,
             imageEndpoint: q('set-img').value.trim(),
@@ -216,6 +221,37 @@ export async function openSettings(project, onSave) {
       root.querySelector('#pane-model').hidden = tab.dataset.pane !== 'model';
       root.querySelector('#pane-comfy').hidden = tab.dataset.pane !== 'comfy';
     });
+  });
+
+  /* ---------- 测试模型连接：用面板当前值发一次微型 LLM 调用（不落盘） ---------- */
+  root.querySelector('#llm-test').addEventListener('click', async (e) => {
+    const q = (id) => root.querySelector(`#${id}`);
+    const out = q('llm-test-result');
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    out.textContent = '测试中…（推理模型可能需要 1-3 分钟）';
+    try {
+      const r = await fetch('/api/system/llm-test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: q('set-provider').value,
+          model: q('set-model').value.trim(),
+          baseUrl: q('set-base').value.trim(),
+          apiKey: q('set-key').value.trim(),
+          llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
+          temperature: Number.isFinite(Number(q('set-temp').value)) ? Number(q('set-temp').value) : 0.7,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      out.innerHTML = d.ok
+        ? `<b class="ok">✓ ${esc(d.mode === 'mock' ? 'Mock 模式' : '模型已响应')}</b> ${(d.latencyMs / 1000).toFixed(1)}s${d.preview ? ` · ${esc(String(d.preview).slice(0, 30))}` : ''}`
+        : `<b class="err">✕ 失败</b> ${esc(d.error || '未知错误')}`;
+    } catch (err) {
+      out.innerHTML = `<b class="err">✕</b> ${esc(err.message)}`;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   /* ---------- 工作流库：选中生效 / 展开 / 重命名 / 删除 ---------- */
@@ -500,8 +536,12 @@ export function openHelp() {
 
 /* ---------- 资产预览 ---------- */
 export function openAssetPreview(url, title = '资产预览') {
+  const isVideo = /\.(mp4|webm|mov)(\?|$)/i.test(String(url));
+  const media = isVideo
+    ? `<video src="${esc(url)}" controls autoplay loop style="width:100%;border-radius:10px;border:1px solid var(--border)"></video>`
+    : `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)">`;
   showModal({ title, sub: 'Mock 模式下的画面由本地自绘 SVG 生成；接入真实图像模型后会替换为模型输出。',
-    body: `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)">`,
+    body: media,
     actions: [{ label: '关闭', primary: true }] });
 }
 

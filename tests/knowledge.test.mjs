@@ -122,6 +122,24 @@ test('retrieveRelevantChunks：同一块被多条 processChain 命中时分数�
   assert.ok(s2 > s1, `累加应更高：${s1} → ${s2}`);
 });
 
+test('retrieveRelevantChunks：归一化为比值语义（score/max，非 min-max）', () => {
+  const kb = new KnowledgeBase(chunkNovel('青霜剑青霜剑青霜剑藏宝图\n风花雪月闲笔青霜剑', { chunkSize: 12, overlap: 1 }));
+  const hits = retrieveRelevantChunks(kb, ['青霜剑'], { topK: 10, threshold: 0 });
+  assert.ok(hits.length >= 2, '应召回多块');
+  assert.equal(hits[0].score, 1, '最佳命中比值为 1');
+  assert.ok(hits.every((h) => h.score > 0), '比值语义下非最佳命中不被 min-max 压到 0');
+});
+
+test('retrieveRelevantChunks：近重复块去重（overlap 相邻块只留高分）', () => {
+  const chunks = chunkNovel('青霜剑与藏宝图的秘密。'.repeat(8), { chunkSize: 30, overlap: 24 });
+  const kb = new KnowledgeBase(chunks);
+  const raw = kb.search('青霜剑 藏宝图', { k: 10 });
+  const hits = retrieveRelevantChunks(kb, ['青霜剑 藏宝图'], { topK: 10, threshold: 0 });
+  assert.ok(raw.length > 1, '重叠分块应产出多个近重复召回块');
+  assert.ok(hits.length > 0, '应保留至少一块');
+  assert.ok(hits.length < raw.length, `近重复应被去重：${raw.length} → ${hits.length}`);
+});
+
 /* ---------------------------------------------------------------- 磁盘缓存 */
 test('saveKnowledgeCache / loadKnowledgeCache：落盘往返并重建 tokens', () => {
   const id = `kbtest_${Date.now()}`;

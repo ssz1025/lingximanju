@@ -68,6 +68,7 @@ export async function runProject(projectId, opts = {}) {
     stats.tokens.completion += record.completionTokens || 0;
     stats.tokens.total += record.totalTokens || 0;
     stats.tokens.calls += record.calls || 0;
+    if (record.fallback) stats.fallbacks += 1;
     emit('llm:usage', { projectId, runId, ...record, tokens: { ...stats.tokens } });
   });
 
@@ -84,7 +85,7 @@ export async function runProject(projectId, opts = {}) {
   emit('run:start', { projectId, runId, mode: providers.mode, comfy: providers.comfyActive, concurrency, nodeId: opts.nodeId || null });
   emit('log', { projectId, runId, level: 'info', message: `启动编排 · LLM=${providers.mode} · 生成后端=${providers.comfyActive ? '本地 ComfyUI' : 'Mock 自绘'} · 并发=${concurrency} · best-of-k=${settings.k || 2}` });
 
-  const stats = { waves: 0, executed: 0, failed: 0, cost: 0,
+  const stats = { waves: 0, executed: 0, failed: 0, cost: 0, fallbacks: 0,
     tokens: { prompt: 0, completion: 0, total: 0, calls: 0 } };
   let outcome = 'done';
 
@@ -195,6 +196,7 @@ export async function runProject(projectId, opts = {}) {
     emit('node:status', { projectId, runId, nodeId, status: 'running', progress: 0.05 });
     ctx.log('think', `${agent.label} 正在处理「${node.title}」…`);
     const t0 = Date.now();
+    const fallbacksBefore = stats.fallbacks;
 
     try {
       await agent.run(ctx);
@@ -202,7 +204,8 @@ export async function runProject(projectId, opts = {}) {
       node.status = 'done'; node.progress = 1; node.error = '';
       const durationMs = Date.now() - t0;
       const cost = agent.group === '生成' ? 0.045 : agent.group === '叙事' ? 0.012 : 0.006;
-      node.meta = { ...(node.meta || {}), durationMs, cost, runId, provider: providers.mode };
+      node.meta = { ...(node.meta || {}), durationMs, cost, runId, provider: providers.mode,
+        llmFallback: stats.fallbacks - fallbacksBefore };
       stats.executed += 1; stats.cost += cost;
       emit('node:status', { projectId, runId, nodeId, status: 'done', progress: 1 });
       emit('node:data', { projectId, runId, nodeId, data: node.data });
@@ -224,7 +227,7 @@ export async function runProject(projectId, opts = {}) {
   const finishedAt = Date.now();
   const summary = {
     id: runId, startedAt, finishedAt, status: outcome,
-    nodeCount: stats.executed, waves: stats.waves, failed: stats.failed,
+    nodeCount: stats.executed, waves: stats.waves, failed: stats.failed, fallbacks: stats.fallbacks,
     durationMs: finishedAt - startedAt, cost: Number(stats.cost.toFixed(3)), provider: providers.mode,
     tokens: { ...stats.tokens },
   };

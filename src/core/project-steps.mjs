@@ -114,6 +114,22 @@ function freshSteps(opts = {}) {
   }));
 }
 
+/** 漫剧基础信息（创作设定）：分集展示与 AI 生成环节的统一依据；长文本字段宽容存储，前端负责编辑 */
+export function defaultBible(opts = {}) {
+  return {
+    title: String(opts.title || '').slice(0, 80),        // 剧名（可与项目名不同）
+    genre: '', audience: '',
+    totalEpisodes: Number(opts.totalEpisodes) || 0,      // 总集数：0 = 未设定
+    ending: '', artStyle: '', tone: '',
+    firstEpisodeTheme: '',                               // 首集锚定主题
+    adaptation: '',                                      // 改编原则（含不可删减关键事件）
+    bottomLines: '',                                     // 创作底线，每行一条
+    worldview: '',                                       // 世界观设定
+    characters: '',                                      // 人设（每段一个角色）
+    stylePrompt: '', negativePrompt: '',                 // AI 生成：全局风格串 / 负面串
+  };
+}
+
 export function createManagement(opts = {}) {
   const kind = opts.kind === 'novel' ? 'novel' : 'standard';
   const base = {
@@ -121,6 +137,7 @@ export function createManagement(opts = {}) {
     title: opts.title || '未命名项目',
     status: kind === 'novel' ? 'draft' : 'standard',
     favorite: false, archived: false, tags: [], note: '',
+    bible: defaultBible(opts.bible || {}),
     // 封面：空 url + source:'name' 时前端渲染「项目名称封面」；
     // source:'upload' / 'comfyui' 时 url 指向 /assets/ 下的图片
     cover: { url: '', source: 'name', updatedAt: now(), prompt: '' },
@@ -163,6 +180,8 @@ export function ensureManagement(project) {
   }
   // 老项目惰性补封面字段（升级兼容）
   if (!project.management.cover) project.management.cover = { url: '', source: 'name', updatedAt: Date.now(), prompt: '' };
+  // 老项目惰性补创作设定
+  if (!project.management.bible) project.management.bible = defaultBible();
   return project.management;
 }
 
@@ -308,6 +327,26 @@ export function applyManageAction(project, action, value) {
       };
       logHistory(m, 'split', `分集参数：${m.split.strategy} / ${m.split.targetChars} 字 / 最多 ${m.split.maxEpisodes} 集`);
       return { ok: true, message: '分集参数已保存（重新执行第 ② 步生效）' };
+    }
+    case 'bible': {
+      const b = m.bible || (m.bible = defaultBible());
+      // undefined = 本次未提交该字段，保留原值；空串 = 用户显式清空
+      const s = (k, max) => value?.[k] === undefined ? b[k] : String(value[k]).slice(0, max);
+      b.title = s('title', 80); b.genre = s('genre', 24); b.audience = s('audience', 24);
+      b.ending = s('ending', 24); b.artStyle = s('artStyle', 24); b.tone = s('tone', 24);
+      b.firstEpisodeTheme = s('firstEpisodeTheme', 300);
+      b.adaptation = s('adaptation', 1200); b.bottomLines = s('bottomLines', 1200);
+      b.worldview = s('worldview', 4000); b.characters = s('characters', 6000);
+      b.stylePrompt = s('stylePrompt', 600); b.negativePrompt = s('negativePrompt', 600);
+      if (value?.totalEpisodes !== undefined) {
+        b.totalEpisodes = Math.max(0, Math.min(64, Number(value.totalEpisodes) || 0));
+      }
+      // 总集数是分集目标的上位设定：同步分集参数，重新执行第 ② 步生效
+      if (m.kind === 'novel' && b.totalEpisodes > 0 && m.split) {
+        m.split.maxEpisodes = Math.max(1, Math.min(12, b.totalEpisodes));
+      }
+      logHistory(m, 'bible', `更新创作设定${b.title ? ` ·《${b.title}》` : ''}${b.totalEpisodes ? ` · 总集数 ${b.totalEpisodes}` : ''}`);
+      return { ok: true, message: '创作设定已保存', bible: b };
     }
     case 'reset-steps':
       resetAllSteps(m);

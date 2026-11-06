@@ -137,16 +137,22 @@ export class KnowledgeBase {
   }
 }
 
-/** 归一化分数到 [0,1]（min-max），供阈值过滤语义与 ViMax 的 rerank 分数对齐
- * 单命中（或所有召回块同分）时 span=0：BM25 无法区分但召回本身即代表相关，
- * 统一置 1，避免 0.7 阈值把唯一命中误杀。 */
+/** 归一化分数为「相对最佳命中的比值」（score/max）：
+ * 旧 min-max 会把第一名硬拉到 1.0，第二名哪怕只有第一名的一半也轻松过 0.7 阈值；
+ * 比值语义下阈值才有筛选力——只有接近最佳命中的块才会进入 FRAGMENT。
+ * 单命中时 score/max = 1，不会误杀唯一命中。 */
 function normalizeScores(pairs) {
   if (!pairs.length) return [];
-  const scores = pairs.map((p) => p.score);
-  const max = Math.max(...scores);
-  const min = Math.min(...scores);
-  const span = max - min;
-  return pairs.map((p) => ({ text: p.chunk.text, score: span < 1e-9 ? 1 : (p.score - min) / span }));
+  const max = Math.max(...pairs.map((p) => p.score));
+  return pairs.map((p) => ({ text: p.chunk.text, score: max < 1e-9 ? 0 : p.score / max }));
+}
+
+/** Jaccard 相似度：中文 bigram 词集的重叠度，用于近重复识别 */
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter += 1;
+  return inter / (a.size + b.size - inter);
 }
 
 /**
@@ -172,7 +178,12 @@ export function retrieveRelevantChunks(kb, processChain, { topK = 10, threshold 
   }
   return [...relevant.entries()]
     .map(([text, score]) => ({ text, score: Math.round(score * 100) / 100 }))
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => b.score - a.score)
+    // 近重复去重：overlap 分块让相邻块共享大段文本，Jaccard > 0.85 只留分数更高的一块
+    .filter((item, _, arr) => {
+      const toks = new Set(tokenize(item.text));
+      return !arr.slice(0, arr.indexOf(item)).some((prev) => jaccard(new Set(tokenize(prev.text)), toks) > 0.85);
+    });
 }
 
 /* ---------------- 磁盘缓存：对齐 ViMax 的 knowledge_base / relevant_chunks 落盘 ---------------- */

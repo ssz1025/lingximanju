@@ -9,6 +9,7 @@ import { listAgents } from '../../agents/index.mjs';
 import { loadComfyConfig, comfySummary } from '../../core/comfy-config.mjs';
 import { STEPS } from '../../core/project-steps.mjs';
 import { validateNovelInput, novelPreview } from '../../core/novel.mjs';
+import { createProviders } from '../../core/providers.mjs';
 
 export async function handleSystem(req, res, url) {
   const { pathname } = url;
@@ -57,6 +58,18 @@ export async function handleSystem(req, res, url) {
     const checked = validateNovelInput(body.text, { filename: body.filename, split: body.split });
     if (!checked.ok) return json(res, { ok: false, message: checked.message }), true;
     return json(res, { ok: true, message: checked.message, preview: novelPreview(checked.novel, checked.episodes) }), true;
+  }
+
+  /** 设置面板「测试模型连接」：用请求体临时 settings 发一次微型调用，不落盘 */
+  if (pathname === '/api/system/llm-test' && method === 'POST') {
+    const body = await readBody(req);
+    const providers = createProviders({
+      provider: body.provider, model: body.model,
+      baseUrl: body.baseUrl, apiKey: body.apiKey,
+      llmTimeoutMs: body.llmTimeoutMs, temperature: body.temperature,
+    });
+    const result = await providers.testConnection();
+    return json(res, result), true;
   }
 
   return false;

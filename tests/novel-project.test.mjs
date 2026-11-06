@@ -166,6 +166,8 @@ test('attachSource 延迟上传小说 → 注入节点并完成 ①②', () => {
   assert.ok(project.nodes.some((n) => n.type === 'episode'), '应生成分集节点');
   const script = project.nodes.find((n) => n.type === 'script');
   assert.ok(script.data.novelEpisodes?.length >= 1, '分集梗概应注入剧本节点');
+  assert.ok(script.data.novelEpisodes.every((e) => e.excerpt), '每集梗概应带中部摘录');
+  assert.ok(script.data.novelExcerpt?.length > 0 && script.data.novelExcerpt.length <= 2400, 'novelExcerpt 为各集摘录拼接（≤2400 字）');
   assert.equal(stepProgress(m).done, 2, '进度应为 2/6');
 });
 

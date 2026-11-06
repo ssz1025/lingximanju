@@ -70,6 +70,7 @@ function entryOf(file, existing) {
   return {
     id: base.id || uid('ast'),
     file,
+    url: `/assets/${file}`,   // 前端缩略图 / 预览 / 复用选图都直接用这个字段
     kind: ASSET_KINDS.includes(base.kind) ? base.kind : inferKind(file),
     name: base.name || file.replace(/\.[a-z0-9]+$/i, ''),
     tags: Array.isArray(base.tags) ? base.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim()).slice(0, 12) : [],
@@ -98,6 +99,8 @@ export function listAssets() {
         if (st.size !== e.bytes) { e.bytes = st.size; dirty = true; }
       } catch { /* stat 失败保留旧值 */ }
     }
+    // 旧版索引没有 url 字段 → 自愈补齐并落盘
+    if (!e.url) { e.url = `/assets/${file}`; dirty = true; }
     out.push(e);
   }
   // 清掉已不存在的文件

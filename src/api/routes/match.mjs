@@ -11,6 +11,8 @@ export const MATCH = {
   assets: /^\/api\/assets\/?$/,
   // 字面路径优先于下面的 :file 模式匹配（reindex 本身也匹配 [a-zA-Z0-9_.-]+）
   assetReindex: /^\/api\/assets\/reindex$/,
+  assetOrphans: /^\/api\/assets\/orphans$/,
+  assetBatch: /^\/api\/assets\/batch-delete$/,
   asset: /^\/api\/assets\/([a-zA-Z0-9_.-]+)$/,
   libItem: /^\/api\/comfyui\/library\/(image|video)\/([^/]+)$/,
 };

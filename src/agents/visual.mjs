@@ -56,13 +56,16 @@ defineAgent({
     }, ctx.signal);
     const selected = candidates[Math.min(verdict.index, candidates.length - 1)];
     ctx.progress(0.9);
+    // judgeMode 显式区分真实 VLM 看图择优与启发式回退，不再假装是 VLM 打分
+    const modeNote = verdict.judgeMode === 'vlm' ? ' · VLM 看图择优'
+      : verdict.fallback ? ' · VLM 不可用，回退启发式' : ' · 启发式打分';
     ctx.patch({
       selected: verdict.index, scores: verdict.scores, reason: verdict.reason,
-      criteria: verdict.criteria, keyframeUrl: selected.url, candidates,
+      criteria: verdict.criteria, judgeMode: verdict.judgeMode, keyframeUrl: selected.url, candidates,
       rejected: candidates.filter((_, i) => i !== verdict.index).map((c) => c.url),
-      summary: `选中候选 ${verdict.index + 1}/${candidates.length} · 最高分 ${Math.max(...verdict.scores).toFixed(3)}`,
+      summary: `选中候选 ${verdict.index + 1}/${candidates.length} · 最高分 ${Math.max(...verdict.scores).toFixed(3)}${modeNote}`,
     });
-    ctx.log('info', `VLM 评审：${verdict.reason}`);
+    ctx.log('info', `评审（${verdict.judgeMode === 'vlm' ? 'VLM' : '启发式'}）：${verdict.reason}`);
   },
 });
 
@@ -101,9 +104,34 @@ defineAgent({
       prompt: spatial.cameraPath, seed: ctx.node.id,
     }, ctx.signal);
     const keyframeUrl = review?.data?.keyframeUrl || null;
+    // 式(8)：空间锚点取自「端点视图」——生成终点机位视图，与起点关键帧成对传递给下游
+    const endView = await ctx.providers.image({
+      kind: 'keyframe', style: ctx.settings.style, shotNo: 0,
+      prompt: `终点机位视角：${spatial.spatialNotes}｜${spatial.axisRule} 轴线，空间状态与起点视图一致`,
+      seed: `${ctx.node.id}-end`,
+    }, ctx.signal);
+    const transition = {
+      url: img.url, ...spatial,
+      fromFrame: keyframeUrl, toFrame: endView.url,
+      frames: [keyframeUrl, endView.url].filter(Boolean),
+    };
+    // ComfyUI 可用时生成真实转场视频；Mock 下保持帧序列预览不产假视频
+    if (ctx.providers.comfyActive && transition.frames.length === 2) {
+      try {
+        const clip = await ctx.providers.video({
+          frames: transition.frames, duration: 2,
+          prompt: `${spatial.cameraPath}；${spatial.spatialNotes}`,
+        }, ctx.signal);
+        transition.video = clip;
+        ctx.log('info', `转场视频已生成（${clip.provider}）`);
+      } catch (err) {
+        ctx.log('warn', `转场视频生成失败，保留端点视图锚点：${err.message}`);
+      }
+    }
     ctx.patch({
-      transition: { url: img.url, ...spatial, fromFrame: keyframeUrl },
-      url: img.url, summary: `${from} → ${to} · ${spatial.axisRule} 轴线`,
+      transition,
+      url: img.url,
+      summary: `${from} → ${to} · ${spatial.axisRule} 轴线 · 端点视图 ${transition.frames.length} 帧${transition.video ? ' · 含转场视频' : ''}`,
     });
     ctx.log('think', `空间锚点已建立：${spatial.spatialNotes}`);
   },

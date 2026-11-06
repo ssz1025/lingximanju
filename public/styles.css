@@ -539,6 +539,30 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   background: var(--accent); color: #0d1016; font-size: 9.5px; font-weight: 700; opacity: 0; transition: opacity .15s; }
 .asset-cell:hover .asset-pick-badge { opacity: 1; }
 .asset-empty { padding: 40px 0; text-align: center; font-size: 12px; color: var(--muted); line-height: 2; }
+
+/* ---------- 资源库增强：排序 / 多选 / 预览 ---------- */
+.btn.sm { padding: 4px 10px; font-size: 11px; }
+.asset-toolbar-right { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.asset-sort { height: 28px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+  color: var(--text-2); font-size: 11px; padding: 0 6px; cursor: pointer; }
+.asset-selbar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; padding: 7px 12px;
+  border: 1px solid var(--accent); border-radius: 9px; background: var(--accent-soft); font-size: 11.5px; color: var(--text-2); }
+.asset-selbar b { color: var(--accent); font-size: 13px; }
+.asset-cell.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.asset-check { position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; border-radius: 6px;
+  border: 1.5px solid var(--border); background: rgba(0,0,0,.5); color: #fff; font-size: 11px;
+  display: flex; align-items: center; justify-content: center; }
+.asset-check.on { background: var(--accent); border-color: var(--accent); color: #0d1016; font-weight: 800; }
+.asset-preview-modal { width: min(620px, 92vw); }
+.asset-preview-media { display: flex; justify-content: center; background: color-mix(in srgb, var(--panel) 70%, black);
+  border-radius: 10px; overflow: hidden; max-height: 52vh; }
+.asset-preview-media img, .asset-preview-media video { width: 100%; max-height: 52vh; object-fit: contain; display: block; }
+.asset-info { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 18px; margin: 12px 0 4px; font-size: 12px; }
+.asset-info > div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px dashed var(--border); padding-bottom: 5px; }
+.asset-info span { color: var(--muted); flex-shrink: 0; }
+.asset-info b { color: var(--text-2); font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+.pv-tag { color: var(--accent); font-style: normal; }
+.asset-preview-modal .modal-actions a.btn { text-decoration: none; }
 /* 资源信息弹窗：改名 / 打标签 / 改类型（双击单元格打开） */
 .asset-meta-modal { width: min(440px, 94vw); }
 
@@ -785,6 +809,15 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .pmm-ep-main em { display: block; font-style: normal; font-size: 10px; color: var(--amber); margin-top: 3px; }
 .pmm-ep-src { display: block; font-size: 9px; color: var(--muted); margin-top: 3px; }
 .pmm-ep-chars { font-size: 10px; color: var(--muted); white-space: nowrap; }
+/* 创作设定（漫剧基础信息）：概览摘要行 / 分集表信息条 / 集标签 */
+.pmm-bible-hint a, .pmm-bible-hint a:visited { color: var(--amber); text-decoration: none; }
+.pmm-bible-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+.pmm-chip { font-size: 10px; padding: 2px 9px; border-radius: 999px; background: var(--panel);
+  border: 1px solid var(--border-soft); color: var(--text-2); }
+.pmm-chip.chip-ending { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.pmm-bible-total { margin-left: auto; font-size: 10px; color: var(--muted); }
+.pmm-ep-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; vertical-align: 1px;
+  font-size: 9px; font-weight: 400; color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); }
 .pmm-snaps > div { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--text-2);
   background: var(--panel); border: 1px solid var(--border-soft); border-radius: 7px; padding: 6px 9px; }
 .pmm-snaps > div span:first-child { color: var(--muted); min-width: 84px; }

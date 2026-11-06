@@ -122,3 +122,93 @@ test('LLM 失败回退 Mock → 记录 fallback 调用（tokens 为 0）', async
   assert.equal(records[0].totalTokens, 0);
   assert.equal(records[0].calls, 1);
 });
+
+/* ------------------------------------------------------- 回退显式化：__fallback 打标 */
+test('openai 失败回退 Mock → 结果打 __fallback: true（消灭假成功）', async () => {
+  const providers = createProviders({
+    provider: 'openai',
+    baseUrl: `http://127.0.0.1:${PORT}/v1/chat/completions`,   // 挂起端点 → 超时回退
+    apiKey: 'k', llmTimeoutMs: 120,
+  }, () => {});
+  const out = await providers.generate('shots', { count: 2 });
+  assert.equal(out.__fallback, true, '真实模型失败后的 Mock 结果必须显式标注');
+});
+
+test('openai 成功调用 → 结果无 __fallback 标记', async () => {
+  const providers = openaiProviders(`http://127.0.0.1:${okServer.address().port}/with-usage/v1/chat/completions`, []);
+  const out = await providers.generate('screenplay', { idea: '雨夜来信' });
+  assert.equal(out.__fallback, undefined, '真实模型产出不应打回退标');
+});
+
+test('Mock 模式产出 → 不算回退，无 __fallback 标记', async () => {
+  const providers = createProviders({ provider: 'mock' }, () => {});
+  const out = await providers.generate('shots', { count: 2 });
+  assert.equal(out.__fallback, undefined, 'Mock 模式本身就是 Mock，不算回退');
+});
+
+/* ------------------------------------------------- 式(4) VLM 真实看图择优 */
+const judgeRequests = [];
+const judgeServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    const parsed = JSON.parse(body);
+    judgeRequests.push(parsed);
+    const json = {
+      model: 'vlm-model',
+      choices: [{ message: { content: JSON.stringify({ index: 1, scores: [0.62, 0.91], criteria: ['视觉保真度'], reason: '候选 2 角色一致、光照方向正确' }) } }],
+      usage: { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220 },
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(json));
+  });
+});
+await new Promise((resolve) => judgeServer.listen(0, '127.0.0.1', resolve));
+
+after(() => {
+  judgeServer.closeAllConnections?.();
+  judgeServer.close();
+});
+
+test('judge 式(4)：openai 多模态真实看图择优 → judgeMode: vlm', async () => {
+  // 先用 Mock 生成两张真实资产图作为候选
+  const mock = createProviders({ provider: 'mock' }, () => {});
+  const img = await mock.image({ kind: 'keyframe', prompt: '测试关键帧', shotNo: 1, seed: 'vlm-test' });
+  const providers = createProviders({
+    provider: 'openai', apiKey: 'k',
+    baseUrl: `http://127.0.0.1:${judgeServer.address().port}/v1/chat/completions`,
+  }, () => {});
+  const verdict = await providers.judge({
+    candidates: [{ url: img.url, prompt: '严格遵循机位' }, { url: img.url, prompt: '轻微变体' }],
+    criteria: ['视觉保真度', '叙事一致性'], shotTitle: '中景 1',
+  });
+  assert.equal(verdict.judgeMode, 'vlm', '真实 VLM 评审');
+  assert.equal(verdict.index, 1, '按 VLM 返回的 index 择优');
+  assert.deepEqual(verdict.scores, [0.62, 0.91]);
+  assert.equal(verdict.fallback, undefined);
+  const userMsg = judgeRequests.at(-1)?.messages?.[1]?.content;
+  assert.ok(Array.isArray(userMsg), '请求应为多模态 content 数组');
+  assert.ok(userMsg.filter((p) => p.type === 'image_url').length === 2, '两张候选图都以 image_url 下发');
+  assert.ok(userMsg.find((p) => p.type === 'image_url').image_url.url.startsWith('data:image/'), '图片为 base64 data URL');
+});
+
+test('judge：VLM 调用失败 → 回退启发式并显式标注 fallback', async () => {
+  const providers = createProviders({
+    provider: 'openai', apiKey: 'k',
+    baseUrl: `http://127.0.0.1:${PORT}/v1/chat/completions`, llmTimeoutMs: 150,
+  }, () => {});
+  const verdict = await providers.judge({
+    candidates: [{ url: '/assets/missing-a.png', prompt: 'a' }, { url: '/assets/missing-b.png', prompt: 'b' }],
+    shotTitle: '特写 2',
+  });
+  assert.equal(verdict.judgeMode, 'heuristic', '回退启发式');
+  assert.equal(verdict.fallback, true, '回退必须显式标注');
+  assert.equal(verdict.scores.length, 2);
+});
+
+test('judge：Mock 模式 → 启发式打分（不算回退）', async () => {
+  const providers = createProviders({ provider: 'mock' }, () => {});
+  const verdict = await providers.judge({ candidates: [{ prompt: 'a' }, { prompt: 'b' }] });
+  assert.equal(verdict.judgeMode, 'heuristic');
+  assert.equal(verdict.fallback, undefined, 'Mock 模式本身就是启发式，不算回退');
+});

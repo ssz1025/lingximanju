@@ -89,11 +89,12 @@ export async function executeSteps(project, body = {}) {
           : '';
         const tk = summary.tokens;
         const tokNote = tk?.total ? ` · ${(tk.total >= 1000 ? (tk.total / 1000).toFixed(1) + 'k' : tk.total)} tokens` : '';
+        const fbNote = summary.fallbacks ? ` · LLM 回退 Mock ${summary.fallbacks} 次` : '';
         finishStep(m, stepId, {
           ok,
           note: ok
-            ? `${summary.nodeCount} 节点 · ${summary.waves} 波 · ${(summary.durationMs / 1000).toFixed(1)}s${tokNote}${extra}`
-            : `编排${summary.status === 'cancelled' ? '已取消' : '失败'}，失败节点 ${summary.failed} 个${tokNote}`,
+            ? `${summary.nodeCount} 节点 · ${summary.waves} 波 · ${(summary.durationMs / 1000).toFixed(1)}s${tokNote}${fbNote}${extra}`
+            : `编排${summary.status === 'cancelled' ? '已取消' : '失败'}，失败节点 ${summary.failed} 个${tokNote}${fbNote}`,
           durationMs: Date.now() - t0,
           tokens: tk || null,
         });

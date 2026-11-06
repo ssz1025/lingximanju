@@ -16,6 +16,8 @@ import { parseNovel, splitEpisodes, validateNovelInput, extractCharacters } from
 import { createManagement, ensureManagement, finishStep } from '../core/project-steps.mjs';
 
 const cut = (s, n) => { const t = String(s || '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
+/** 式(1) 输入归一：各集中部摘录拼接（≤2400 字），覆盖全部分集而非只取第一集 */
+const joinExcerpts = (eps) => cut((eps || []).map((e) => `【${e.title}】${e.excerpt || ''}`).join('\n'), 2400);
 
 /** 交付物 → composer 读取的 outputMode（src/agents/visual.mjs） */
 export function outputModeOf(deliverables = {}) {
@@ -138,8 +140,8 @@ export function attachSource(project, opts = {}) {
     ...(script.data || {}),
     text: `《${novel.title}》｜${logline}\n${firstEpisodeExcerpt}`,
     novelTitle: novel.title,
-    novelExcerpt: firstEpisodeExcerpt,
-    novelEpisodes: episodes.map((e) => ({ no: e.no, title: e.title, summary: e.summary, hook: e.hook, sourceTitles: e.sourceTitles })),
+    novelExcerpt: joinExcerpts(episodes),
+    novelEpisodes: episodes.map((e) => ({ no: e.no, title: e.title, summary: e.summary, hook: e.hook, excerpt: e.excerpt, sourceTitles: e.sourceTitles })),
     characters,
     summary: `等待编剧智能体 · ${episodes.length} 集梗概已注入`,
   };
@@ -253,8 +255,8 @@ export function refreshEpisodes(project, opts = {}) {
   if (script) {
     script.data = {
       ...(script.data || {}),
-      novelEpisodes: episodes.map((e) => ({ no: e.no, title: e.title, summary: e.summary, hook: e.hook, sourceTitles: e.sourceTitles })),
-      novelExcerpt: cut(episodes[0]?.text || novel.text, 1000),
+      novelEpisodes: episodes.map((e) => ({ no: e.no, title: e.title, summary: e.summary, hook: e.hook, excerpt: e.excerpt, sourceTitles: e.sourceTitles })),
+      novelExcerpt: joinExcerpts(episodes),
     };
   }
   if (plan) plan.data = { ...(plan.data || {}), sceneLimit: Math.max(1, Math.min(4, episodes.length)) };

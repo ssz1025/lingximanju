@@ -337,7 +337,7 @@ export function openCoverDialog(ctx = {}) {
         onPick: async (a) => {
           busy = true; message = '正在应用资源库封面…'; render();
           try {
-            const d = await api(`/api/projects/${p.id}/cover`, { asset: a.name });
+            const d = await api(`/api/projects/${p.id}/cover`, { asset: a.file });
             applyCover(d.cover);
             message = '✓ 已从资源库选用封面';
             toast('项目封面已更新', 'ok');
@@ -595,6 +595,19 @@ export function renderCanvasStepBar(host, ctx = {}) {
 }
 
 /* ------------------------------------------------------------------ 项目管理面板 */
+
+/** 概览页的创作设定摘要：已填写时展示一行基础标识，点击跳转「创作设定」tab 编辑 */
+function bibleHintHTML(m) {
+  const b = m.bible || {};
+  const bits = [
+    b.title && `剧名《${b.title}》`, b.genre, b.audience && `受众 ${b.audience}`,
+    b.totalEpisodes ? `总集数 ${b.totalEpisodes}` : '', b.artStyle, b.tone && `${b.tone}调性`,
+    b.ending && `结局 ${b.ending}`,
+  ].filter(Boolean);
+  if (!bits.length) return '';
+  return `<div class="cf-note pmm-bible-hint">创作设定：${esc(bits.join(' · '))}（<a href="javascript:void 0" data-goto-bible>编辑创作设定</a>）</div>`;
+}
+
 export function openProjectManager(ctx = {}) {
   const toast = ctx.toast || (() => {});
   const root = $('modal-root');
@@ -635,7 +648,7 @@ export function openProjectManager(ctx = {}) {
     backdrop.innerHTML = `<div class="modal pm-modal" role="dialog" aria-label="项目管理">
       <div class="pmm-head"><div><h2>▦ 项目管理</h2><div class="sub">${esc(p.name)} · ${m.kind === 'novel' ? '小说分集创作项目' : '标准流水线项目'} · 六步 ${esc(prog.label)}</div></div>
         <button class="icon-btn" data-act="close">✕</button></div>
-      <div class="pmm-tabs">${[['overview', '概览'], ['episodes', '分集'], ['deliverables', '产物'], ['versions', '版本 / 记录']].map(([k, label]) => `<button class="pmm-tab ${tab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}</div>
+      <div class="pmm-tabs">${[['overview', '概览'], ['bible', '创作设定'], ['episodes', '分集'], ['deliverables', '产物'], ['versions', '版本 / 记录']].map(([k, label]) => `<button class="pmm-tab ${tab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}</div>
       <div class="pmm-body" id="pmm-body"></div>
       <div class="modal-actions"><button class="btn" data-act="close">关闭</button></div>
     </div>`;
@@ -644,6 +657,7 @@ export function openProjectManager(ctx = {}) {
     backdrop.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { tab = b.dataset.tab; render(); }));
     const body = $('pmm-body');
     if (tab === 'overview') renderOverview(body, m, s, prog);
+    if (tab === 'bible') renderBible(body, m);
     if (tab === 'episodes') renderEpisodes(body, m);
     if (tab === 'deliverables') renderDeliverables(body, m, s);
     if (tab === 'versions') renderVersions(body, p, s);
@@ -681,7 +695,7 @@ export function openProjectManager(ctx = {}) {
           <button class="btn" data-act="favorite">${m.favorite ? '☆ 取消收藏' : '★ 加入收藏'}</button>
           <button class="btn" data-act="archive">${m.archived ? '↩ 取消归档' : '▣ 归档项目'}</button>
           <span class="cf-note" style="margin:0">创建 ${fmtTime(m.createdAt)} · 更新 ${fmtTime(m.updatedAt)} · 版本 ${m.version || 1}</span></div>
-      </div>
+        ${bibleHintHTML(m)}</div>
       ${m.kind === 'novel' ? `<div class="cf-section"><h4>分集参数与理论默认值</h4>
         <div class="modal-grid">
           <div class="field"><label>策略</label><select id="pmm-strategy">${[['chapter', '按章节'], ['fixed', '按字数'], ['scene', '按场景段落']].map(([v, l]) => `<option value="${v}" ${m.split?.strategy === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
@@ -704,6 +718,7 @@ export function openProjectManager(ctx = {}) {
     });
     body.querySelector('[data-act="favorite"]').addEventListener('click', () => manage('favorite'));
     body.querySelector('[data-act="archive"]').addEventListener('click', () => manage('archive'));
+    body.querySelector('[data-goto-bible]')?.addEventListener('click', () => { tab = 'bible'; render(); });
     const saveSplit = body.querySelector('[data-act="save-split"]');
     if (saveSplit) {
       saveSplit.addEventListener('click', () => manage('split', {
@@ -720,14 +735,71 @@ export function openProjectManager(ctx = {}) {
     }
   }
 
+  /* ------------------------------------------------ 创作设定（漫剧基础信息归档）
+   * 一部剧的「创作圣经」：基础标识 / 首集锚定主题 / 改编原则 / 创作底线 /
+   * 世界观 / 人设 / AI 生成需求。总集数保存后自动同步分集参数「最多集数」。 */
+  function renderBible(body, m) {
+    const b = m.bible || {};
+    body.innerHTML = `
+      <div class="cf-section"><h4>基础标识</h4>
+        <div class="modal-grid">
+          <div class="field"><label>剧名</label><input id="pb-title" value="${esc(b.title || '')}" placeholder="《xxxx》"></div>
+          <div class="field"><label>题材</label><input id="pb-genre" value="${esc(b.genre || '')}" placeholder="科幻悬疑"></div>
+          <div class="field"><label>目标受众</label><input id="pb-audience" value="${esc(b.audience || '')}" placeholder="青年观众"></div>
+          <div class="field"><label>总集数</label><input id="pb-total" type="number" min="0" max="64" value="${esc(b.totalEpisodes || '')}" placeholder="8（0 = 未设定）"></div>
+          <div class="field"><label>结局类型</label><input id="pb-ending" value="${esc(b.ending || '')}" placeholder="开放结局（OE）"></div>
+          <div class="field"><label>美术风格</label><input id="pb-art" value="${esc(b.artStyle || '')}" placeholder="写实电影画风"></div>
+          <div class="field"><label>整体调性</label><input id="pb-tone" value="${esc(b.tone || '')}" placeholder="暗黑"></div>
+        </div></div>
+      <div class="cf-section"><h4>首集锚定主题</h4>
+        <textarea id="pb-theme" rows="2" placeholder="如：日常秩序里的一道裂缝——所见非真。首集结尾用一次微小异象推翻官方定论…">${esc(b.firstEpisodeTheme || '')}</textarea></div>
+      <div class="cf-section"><h4>改编原则</h4>
+        <textarea id="pb-adapt" rows="3" placeholder="核心策略（如：抽核式改编）、保留骨架、不可删减的关键事件（每行一条）…">${esc(b.adaptation || '')}</textarea></div>
+      <div class="cf-section"><h4>创作底线（每行一条，不可突破）</h4>
+        <textarea id="pb-bottom" rows="3" placeholder="如：不解释意识体本体，保留未知神秘感">${esc(b.bottomLines || '')}</textarea></div>
+      <div class="cf-section"><h4>世界观设定</h4>
+        <textarea id="pb-world" rows="6" placeholder="时代与舞台、核心现象（只描述现象，永不解释本体）、证据链误读结构、世界观铁律…">${esc(b.worldview || '')}</textarea></div>
+      <div class="cf-section"><h4>人设（每段一个角色）</h4>
+        <textarea id="pb-chars" rows="6" placeholder="每段一个角色：名字｜身份｜外形锚点｜性格与行为逻辑｜人物弧光与结局代价&#10;如：老陈｜55岁·爆破组长｜花白寸头，左眉骨旧疤，手背光晕 L4｜话少，规矩重｜殉道者弧光，用被石埋结清自己的账">${esc(b.characters || '')}</textarea></div>
+      <div class="cf-section"><h4>AI 生成需求</h4>
+        <div class="modal-grid">
+          <div class="field" style="grid-column:1/-1"><label>全局风格串（注入关键帧提示词前缀）</label><textarea id="pb-style" rows="2" placeholder="写实电影画风，暗黑调性，低饱和冷灰主色 + 应急灯暖橙点缀，体积雾，35mm 胶片颗粒…">${esc(b.stylePrompt || '')}</textarea></div>
+          <div class="field" style="grid-column:1/-1"><label>负面串</label><textarea id="pb-neg" rows="2" placeholder="动漫感、过曝、明亮高调、卡通渲染、明确幽灵特效、文字水印…">${esc(b.negativePrompt || '')}</textarea></div>
+        </div></div>
+      <div class="cf-row"><button class="btn primary" data-act="save-bible">保存创作设定</button>
+        <span class="cf-note" style="margin:0">总集数保存后自动同步为分集参数「最多集数」，重新执行第 ② 步生效</span></div>`;
+    body.querySelector('[data-act="save-bible"]').addEventListener('click', async () => {
+      await manage('bible', {
+        title: $('pb-title').value.trim(), genre: $('pb-genre').value.trim(),
+        audience: $('pb-audience').value.trim(), totalEpisodes: Number($('pb-total').value) || 0,
+        ending: $('pb-ending').value.trim(), artStyle: $('pb-art').value.trim(), tone: $('pb-tone').value.trim(),
+        firstEpisodeTheme: $('pb-theme').value, adaptation: $('pb-adapt').value,
+        bottomLines: $('pb-bottom').value, worldview: $('pb-world').value,
+        characters: $('pb-chars').value, stylePrompt: $('pb-style').value, negativePrompt: $('pb-neg').value,
+      });
+    });
+  }
+
   function renderEpisodes(body, m) {
     if (m.kind !== 'novel') { body.innerHTML = '<div class="pmm-empty">标准项目没有分集数据</div>'; return; }
-    body.innerHTML = `<div class="pmm-section-head"><strong>分集表 · ${m.episodes?.length || 0} 集</strong><span>来自 ${esc(m.source?.filename || '粘贴文本')} · 共 ${m.source?.totalChars || 0} 字</span></div>
-      <div class="pmm-eps">${(m.episodes || []).map((e) => `<div class="pmm-ep">
+    // 基础信息条：分集表按创作设定展示题材 / 受众 / 美术风格 / 调性 / 结局类型
+    const b = m.bible || {};
+    const total = b.totalEpisodes || (m.episodes || []).length;
+    const chips = [b.genre, b.audience && `受众 ${b.audience}`, b.artStyle, b.tone && `${b.tone}调性`]
+      .filter(Boolean).map((x) => `<span class="pmm-chip">${esc(x)}</span>`).join('');
+    const strip = (chips || b.ending) ? `<div class="pmm-bible-strip">${chips}${b.ending ? `<span class="pmm-chip chip-ending">结局：${esc(b.ending)}</span>` : ''}<span class="pmm-bible-total">共 ${total} 集</span></div>` : '';
+    const epTag = (e, i, arr) => {
+      if (e.no === 1 && b.firstEpisodeTheme) return `<span class="pmm-ep-tag">锚定主题：${esc(cut(b.firstEpisodeTheme, 40))}</span>`;
+      if (i === arr.length - 1 && b.ending) return `<span class="pmm-ep-tag">结局：${esc(b.ending)}</span>`;
+      return '';
+    };
+    const eps = (m.episodes || []);
+    body.innerHTML = `${strip}<div class="pmm-section-head"><strong>分集表 · ${eps.length} 集</strong><span>来自 ${esc(m.source?.filename || '粘贴文本')} · 共 ${m.source?.totalChars || 0} 字</span></div>
+      <div class="pmm-eps">${eps.map((e, i) => `<div class="pmm-ep">
         <span class="pmm-ep-no">${e.no}</span>
-        <span class="pmm-ep-main"><strong>${esc(e.title)}</strong><small>${esc(e.summary)}</small><em>结尾钩子：${esc(e.hook)}</em><span class="pmm-ep-src">来源：${esc((e.sourceTitles || []).join(' / '))}</span></span>
+        <span class="pmm-ep-main"><strong>${esc(e.title)}${epTag(e, i, eps)}</strong><small>${esc(e.summary)}</small><em>结尾钩子：${esc(e.hook)}</em><span class="pmm-ep-src">来源：${esc((e.sourceTitles || []).join(' / '))}</span></span>
         <span class="pmm-ep-chars">${e.chars} 字</span></div>`).join('')}</div>
-      <div class="cf-note">每集在无限画布上对应一个 <code>episode</code> 节点，并以 <code>ref</code> 边把本集梗概传给剧本节点；原著全文由 RAG 节点索引（式(6)）。</div>`;
+      <div class="cf-note">每集在无限画布上对应一个 <code>episode</code> 节点，并以 <code>ref</code> 边把本集梗概传给剧本节点；原著全文由 RAG 节点索引（式(6)）。分集目标集数来自「创作设定 · 总集数」。</div>`;
   }
 
   function renderDeliverables(body, m, s) {

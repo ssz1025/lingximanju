@@ -102,6 +102,19 @@ test('splitEpisodes 按章节聚合且不超过上限', () => {
   assert.equal(eps[1].no, 2);
 });
 
+test('splitEpisodes 摘要/钩子/摘录加厚：完整句 + 中部摘录', () => {
+  const n = parseNovel(LONG, 'long.txt');
+  const eps = splitEpisodes(n, { strategy: 'chapter', targetChars: 300, maxEpisodes: 2 });
+  for (const e of eps) {
+    assert.ok(e.summary.length > 0 && e.summary.length <= 120, '摘要 ≤120 字（开头完整前两句）');
+    assert.ok(e.hook.length > 0 && e.hook.length <= 60, '钩子 ≤60 字（末段完整句）');
+    assert.ok(e.excerpt.length > 0 && e.excerpt.length <= 300, '摘录 ≤300 字');
+    if (e.chars > 300) {
+      assert.notEqual(e.excerpt, e.text.slice(0, 300), '摘录取中部原文而非开头');
+    }
+  }
+});
+
 test('splitEpisodes 尾集吸收溢出内容不丢原文', () => {
   const n = parseNovel(LONG, 'long.txt');
   const eps = splitEpisodes(n, { strategy: 'chapter', targetChars: 300, maxEpisodes: 2 });

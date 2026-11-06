@@ -114,16 +114,24 @@ export function splitEpisodes(novel, opts = {}) {
 
   return groups.map((g, i) => {
     const text = g.map((u) => clean(u.text)).join('\n\n');
-    const first = clean(g[0].text).slice(0, 78);
-    const last = clean(g[g.length - 1].text);
-    const sentences = last.split(/[。！？!?]/).filter((s) => clean(s).length > 4);
+    const head = clean(g[0].text);
+    const tail = clean(g[g.length - 1].text);
+    // 摘要取开头完整前两句（≤120 字）：给下游 LLM 的场景概括保留因果，不再 78 字硬截
+    const headSent = head.split(/(?<=[。！？!?])/).map(clean).filter((s) => s.length > 1);
+    const summary = cut(headSent.slice(0, 2).join('') || head, 120);
+    // 钩子取末段完整句（≤60 字）：完整悬念句比 42 字截断更可读
+    const tailSent = tail.split(/(?<=[。！？!?])/).map(clean).filter((s) => s.length > 4);
+    const hook = cut(tailSent[tailSent.length - 1] || tail.slice(-60), 60);
+    // 摘录取正文中部 300 字：开头给了摘要、结尾给了钩子，中部原文补足叙事细节
+    const body = clean(text);
+    const start = Math.max(0, Math.floor((body.length - 300) / 2));
+    const excerpt = body.length <= 300 ? body : body.slice(start, start + 300);
     return {
       id: uid('ep'), no: i + 1,
       title: `第 ${i + 1} 集 · ${cut(g[0].title, 16)}`,
       sourceTitles: g.map((u) => u.title),
-      text, chars: clean(text).length,
-      summary: cut(first, 78),
-      hook: cut(sentences[sentences.length - 1] || last.slice(-40), 42),
+      text, chars: body.length,
+      summary, hook, excerpt,
       strategy,
     };
   });
