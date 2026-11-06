@@ -224,9 +224,10 @@ providers.judge({ candidates, criteria })         -> { index, scores, reason }
 | 能力 | 实现方式 |
 |---|---|
 | 无限平移 | 视口 `transform: translate(x,y) scale(z)`；空白拖拽/空格+拖拽/中键拖拽；网格背景随视口偏移 |
-| 以指针为中心缩放 | `x' = px - (px - x) · z'/z`，缩放范围 0.2–2.5，滚轮 + 工具栏 + 快捷键 |
+| 以指针为中心缩放 | `x' = px - (px - x) · z'/z`，缩放范围 0.1–2.5，滚轮 + 工具栏 + 快捷键 |
 | 节点拖拽 | Pointer Events + 坐标反变换，支持多选整体移动、网格吸附（可选） |
-| 连线 | 节点右侧输出端口 → 目标左侧输入端口，贝塞尔曲线；`anchor`/`ref` 用不同线型 |
+| 连线 | 节点右侧输出端口 → 目标节点，贝塞尔曲线；`anchor`/`ref` 用不同线型 |
+| 拖拽后选项浮层 | `onConnectDrop` 上报落点 → `link-picker.js` 弹出分组选择器 → 选完由业务层创建节点 / 建立连线 |
 | 框选 / 多选 | 空白拖拽框选（世界坐标矩形相交判定），Shift 追加选择 |
 | 小地图 | Canvas 2D 绘制节点缩略与视口框，点击/拖拽跳转 |
 | 撤销重做 | 结构化快照栈（30 步），Ctrl/Cmd+Z / Shift+Z |
@@ -236,6 +237,8 @@ providers.judge({ candidates, criteria })         -> { index, scores, reason }
 | 状态可视化 | `running` 呼吸描边 + 进度条；`done` 绿点；`error` 红点；边上流动光点表示数据传递 |
 
 **快捷键**：`Space` 平移、`Ctrl/Cmd+Z` 撤销、`Shift+Z` 重做、`Delete` 删除、`Ctrl/Cmd+D` 复制、`Ctrl/Cmd+A` 全选、`F` 适应视图、`L` 自动布局、`R` 运行、`Esc` 取消选择、`+/-` 缩放、`?` 快捷键帮助。
+
+**拖拽连线选择器（渲染层 / 业务层解耦）**：`CanvasController` 只负责把拖线松手的落点信息 `{from, to, world, clientX/Y, overCanvas, 修饰键}` 通过 `onConnectDrop` 回调交给 `app.js`，自身不决定连什么；未挂回调时降级为旧的直接连线。业务层按落点分派三种浮层：空白处 → `showNextNodePicker`（推荐后继 / 全部节点类型 / 已有节点，选完 `addNodeAt` + `addEdge`）；节点上 → `showRelationPicker`（`flow`/`anchor`/`ref`，`Enter` 默认 `flow`）；节点库拖入 → `showAttachPicker`（选上游，把新节点接在其后，`Esc` 跳过）。浮层支持搜索、键盘导航、点击外部关闭；已有节点按离落点距离排序并默认只显示 8 项，搜索时展开全部。`Alt`/`Shift` + 拖线到节点保留跳过弹窗的快捷直连。
 
 ---
 

@@ -55,8 +55,17 @@ export class CanvasController {
     this.applySelection();
     this.renderEdges();
     this.drawMinimap();
+    this.syncEmptyState();
+  }
+
+  // 空画布提示只在真正没有节点时出现。除 hidden 属性外再显式设置内联 display，
+  // 防止样式表中的 display 规则覆盖浏览器默认的 [hidden] 行为导致提示常驻悬浮。
+  syncEmptyState() {
     const empty = document.getElementById('canvas-empty');
-    if (empty) empty.hidden = this.project.nodes.length > 0;
+    if (!empty) return;
+    const isEmpty = !this.project || this.project.nodes.length === 0;
+    empty.hidden = !isEmpty;
+    empty.style.display = isEmpty ? '' : 'none';
   }
 
   updateNode(id) {
@@ -459,12 +468,19 @@ export class CanvasController {
           this.select(hits, e.shiftKey);
         }
       } else if (d.type === 'connect') {
-        const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('.node');
+        const hit = document.elementFromPoint(e.clientX, e.clientY);
+        const target = hit?.closest('.node');
         const to = target?.dataset.id;
-        if (to && to !== d.from) {
-          const kind = e.altKey ? 'anchor' : e.shiftKey ? 'ref' : 'flow';
-          this.addEdge(d.from, to, kind);
-        }
+        const info = {
+          from: d.from, to: to && to !== d.from ? to : null,
+          clientX: e.clientX, clientY: e.clientY,
+          world: this.screenToWorld(e.clientX, e.clientY),
+          overCanvas: !!hit?.closest('#canvas-wrapper'),
+          altKey: e.altKey, shiftKey: e.shiftKey,
+        };
+        // 交给 UI 层弹「选择下一个节点 / 连接关系」浮层；未挂回调时沿用直接连线的旧行为
+        if (this.cb.onConnectDrop) this.cb.onConnectDrop(info);
+        else if (info.to) this.addEdge(d.from, info.to, e.altKey ? 'anchor' : e.shiftKey ? 'ref' : 'flow');
       }
     });
 

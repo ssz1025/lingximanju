@@ -1,7 +1,7 @@
 # lingximanju · 无限画布 × 智能体制片流水线
 
 > 一个**全量自主编写**、零第三方依赖、可本地独立运行的 AI 影像创作工作台。
-> 参考 ViMax 论文（[arXiv:2606.07649v2](https://arxiv.org/abs/2606.07649)）的方法思想与本地 `ViMax/` 仓库的功能划分，交互范式参考 Toonflow 的无限画布；**未复制任何一方源码**。
+> 参考 ViMax 论文（[arXiv:2606.07649v2](https://arxiv.org/abs/2606.07649)；中文全文、导读与配图已归档在 [`docs/paper/`](docs/paper/README.md)）的方法思想与本地 `ViMax/` 仓库的功能划分，交互范式参考 Toonflow 的无限画布；**未复制任何一方源码**。
 
 ![运行形态](https://img.shields.io/badge/Node.js-%3E%3D18-339933) ![依赖](https://img.shields.io/badge/dependencies-0-orange) ![构建](https://img.shields.io/badge/build-none-blue)
 
@@ -38,7 +38,7 @@ cd lingximanju
 
 | 能力 | 说明 |
 |---|---|
-| **无限画布** | 自研视口引擎：平移、以指针为中心缩放、节点拖拽、端口连线、框选多选、小地图导航、适应视图、自动布局、撤销重做、右键菜单、拖入式节点库 |
+| **无限画布** | 自研视口引擎：平移、以指针为中心缩放、节点拖拽、端口连线、框选多选、小地图导航、适应视图、自动布局、撤销重做、右键菜单、拖入式节点库；拖拽松手弹出可选节点 / 连接关系浮层，选完直接连线 |
 | **节点化创作流** | 文本 / 剧本 / 事件 / 场景 / 镜头 / 角色 / 关键帧 / 择优 / 视频 / 转场 / 机位图 / 成片 15 类节点，三类连线：数据流 `flow`、视觉锚点 `anchor`、资产引用 `ref` |
 | **智能体编排** | 11 个专职智能体 + 1 个画布协作者，DAG 拓扑分层、同层并发、状态机、SSE 实时事件、取消、失败隔离、断点续跑、单节点重跑 |
 | **论文机制复刻** | 层次化叙事分解（事件→场景→镜头）、RAG 全局上下文、机位依赖图与视觉锚点传播、转场视频空间锚点、VLM best-of-k 择优、依赖图并行调度 |
@@ -66,7 +66,19 @@ cd lingximanju
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**常用快捷键**：`空格+拖拽/中键` 平移 · `滚轮` 缩放 · `空白处拖拽` 框选 · `右侧端口拖到目标` 连线（`Alt` 视觉锚点 / `Shift` 资产引用） · `双击` 编辑 · `右键` 单节点重跑 · `Ctrl/Cmd+Z` 撤销 · `Ctrl/Cmd+D` 复制 · `Delete` 删除 · `F` 适应视图 · `L` 自动布局 · `R` 运行 · `?` 帮助。
+**常用快捷键**：`空格+拖拽/中键` 平移 · `滚轮` 缩放 · `空白处拖拽` 框选 · `右侧端口拖出并松手` 弹出连线选择器 · `双击` 编辑 · `右键` 单节点重跑 · `Ctrl/Cmd+Z` 撤销 · `Ctrl/Cmd+D` 复制 · `Delete` 删除 · `F` 适应视图 · `L` 自动布局 · `R` 运行 · `?` 帮助。
+
+### 拖拽后的连线选择器
+
+拖线松手不再「静默连线或什么都不发生」，而是先给出可选选项，选完立即建立连接：
+
+| 触发动作 | 弹出的选项 | 选择后的结果 |
+| --- | --- | --- |
+| 从节点右侧端口拖出，**松手在画布空白处** | ① 推荐后继（按 ViMax 流水线顺序）② 全部节点类型 ③ 画布已有节点 | 选类型 → 在松手处新建节点并连一条 `flow`；选已有节点 → 直接连到该节点 |
+| 从端口拖出，**松手在另一个节点上** | `flow` 流程依赖 / `anchor` 空间锚点 / `ref` 资产引用 | 按所选关系直接连线；`Enter` 默认是 `flow` |
+| 从左侧节点库**拖入画布** | 画布已有节点（按离落点距离排序） | 把新节点接在所选节点之后，`Esc` 可跳过保持独立 |
+
+浮层支持搜索（输入关键词时展开全部分组）、`↑↓` 选择、`Enter` 确认、`Esc` / 点击外部关闭；已有节点默认只显示离鼠标最近的 8 个，避免大图里列表过长。按住 `Alt` / `Shift` 拖线到节点仍可跳过弹窗，直接连 `anchor` / `ref`。实现见 `public/link-picker.js` 与 `app.js` 的 `showNextNodePicker` / `showRelationPicker` / `showAttachPicker`；画布引擎只通过 `onConnectDrop` 上报落点，保持渲染与业务解耦。
 
 **设计取向**：深色优先（可切浅色）、节点按语义着色、运行中的节点呼吸光晕 + 进度条、连线上流动光点表示数据传递、所有状态变化有 160–240ms 过渡、破坏性操作可撤销、首次进入有示例项目与引导便签。
 
@@ -80,7 +92,12 @@ lingximanju/
 ├── start.sh / package.json
 ├── docs/
 │   ├── ARCHITECTURE.md         # 完整架构设计（分层、数据契约、API、画布、体验、扩展点）
-│   └── AGENTS.md               # 智能体编排设计（角色、DAG 算法、事件协议、失败恢复）
+│   ├── AGENTS.md               # 智能体编排设计（角色、DAG 算法、事件协议、失败恢复）
+│   └── paper/                  # ViMax 论文参考依据（随仓库自包含，其他 IDE 可直接读）
+│       ├── README.md           # 索引 + 论文↔代码对照表 + 跨 IDE 开发说明
+│       ├── ViMax_核心要点导读.md / ViMax_论文中文版.md
+│       ├── ViMax_论文中文阅读版.html
+│       └── vimax_paper_figures/  # 16 张配图（HTML 相对路径依赖，勿改名）
 ├── src/
 │   ├── core/
 │   │   ├── events.mjs          # 事件总线 + SSE 订阅
@@ -109,8 +126,9 @@ lingximanju/
 │   ├── styles.css              # 设计系统
 │   ├── canvas.js               # 无限画布引擎（自研）
 │   ├── nodes.js                # 节点类型与渲染
+│   ├── link-picker.js          # 拖拽松手后的「选择下一个节点 / 连接关系」浮层
 │   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片
-│   └── app.js                  # 状态机 / API / SSE / 快捷键 / 产物下载
+│   └── app.js                  # 状态机 / API / SSE / 快捷键 / 连线选择器编排
 └── data/                       # 运行时：projects/*.json、assets/*、comfyui.json
 ```
 
@@ -183,7 +201,23 @@ LLM 仍可独立配置：设置第一个 Tab 选「OpenAI 兼容接口」并填 
 - 未实现 3D 导演台、插件市场、MCP、移动端、多用户协作——这些不属于本次「功能复刻 + 无限画布」的范围。
 - 真实出片质量取决于接入的图像/视频模型；框架负责编排、一致性与效率，不提升底座模型本身的画质。
 
-详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 与 [`docs/AGENTS.md`](docs/AGENTS.md)。
+详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 与 [`docs/AGENTS.md`](docs/AGENTS.md)；论文参考依据与「论文 ↔ 代码」对照表见 [`docs/paper/README.md`](docs/paper/README.md)。
+
+---
+
+## 论文参考资料 · 在其他 IDE 中继续开发
+
+`docs/paper/` 已随仓库归档 ViMax 论文的**中文全文翻译、核心要点导读、带图 HTML 阅读版与 16 张配图**，不依赖本工作区外的任何路径，用 VS Code / Cursor / Windsurf / JetBrains 等打开 `lingximanju/` 即可直接阅读。
+
+| 场景 | 入口 |
+|---|---|
+| 了解项目能做什么、怎么跑 | 本文件 `README.md` |
+| 改分层 / 数据契约 / API | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| 改智能体 / DAG 调度 / 失败恢复 | [`docs/AGENTS.md`](docs/AGENTS.md) |
+| 确认某个机制出自论文哪一节、对应本仓库哪个文件 | [`docs/paper/README.md`](docs/paper/README.md) §4 对照表 |
+| 查公式、指标、消融结论 | [`docs/paper/ViMax_论文中文版.md`](docs/paper/ViMax_论文中文版.md) §2–§3 |
+
+给 AI 助手的上下文建议：先让它读 `README.md` → `docs/ARCHITECTURE.md` → `docs/AGENTS.md`，涉及论文机制时再 `@` 引用 `docs/paper/ViMax_核心要点导读.md` 或全文版。运行只需 `node server.mjs`（Node.js ≥ 18，零依赖、零构建、无需 API Key）。
 
 ---
 
