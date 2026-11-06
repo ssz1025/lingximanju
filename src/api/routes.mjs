@@ -45,15 +45,16 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const parts = [];
     let size = 0;
+    const withStatus = (err, statusCode) => Object.assign(err, { statusCode });   // 让 server.mjs 回 4xx 而非 500
     req.on('data', (c) => {
       size += c.length;
-      if (size > 8 * 1024 * 1024) { reject(new Error('请求体过大')); req.destroy(); }
+      if (size > 8 * 1024 * 1024) { reject(withStatus(new Error('请求体过大'), 413)); req.destroy(); }
       else parts.push(c);
     });
     req.on('end', () => {
       const raw = Buffer.concat(parts).toString('utf8');
       if (!raw) return resolve({});
-      try { resolve(JSON.parse(raw)); } catch { reject(new Error('JSON 解析失败')); }
+      try { resolve(JSON.parse(raw)); } catch { reject(withStatus(new Error('JSON 解析失败'), 400)); }
     });
     req.on('error', reject);
   });
@@ -184,10 +185,24 @@ async function executeSteps(project, body = {}) {
   };
 }
 
+// 跨源白名单：默认空（浏览器/Electron 都是同源访问，不需要任何 CORS 头）。
+// 需要跨源调试时用 ALLOW_ORIGIN=https://dev.example.com,http://other:1234 显式放行。
+const EXTRA_ORIGINS = new Set(String(process.env.ALLOW_ORIGIN || '').split(',').map((s) => s.trim()).filter(Boolean));
+
 export async function handleApi(req, res, url) {
   const { pathname } = url;
   const method = req.method || 'GET';
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // 访问硬化：之前无条件回 `Access-Control-Allow-Origin: *` 且 OPTIONS 一律 204，
+  // 任意恶意网页都能预检通过后读写本地项目。现在同源/白名单之外的 Origin 连预检一起 403。
+  // DNS rebinding 由 server.mjs 的 Host 字面量校验拦截，两道防线互补。
+  const origin = req.headers?.origin;
+  if (origin && origin !== `http://${req.headers?.host}` && !EXTRA_ORIGINS.has(origin)) {
+    return json(res, { error: '跨源请求被拒绝' }, 403);
+  }
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return true; }

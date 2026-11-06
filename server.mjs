@@ -61,6 +61,12 @@ function serveStatic(req, res, pathname) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    // Host 必须是本机字面量（IP/localhost）：挡住 DNS rebinding——
+    // 攻击者域名解析到 127.0.0.1 后浏览器仍带该域名 Host，会被这里直接 403。
+    const host = String(req.headers.host || '');
+    if (host && !/^(?:localhost|127(?:\.\d{1,3}){3}|\[[0-9a-fA-F:.]+\])(?::\d{1,5})?$/.test(host)) {
+      return send(res, 403, JSON.stringify({ error: '拒绝非本机 Host 访问' }), 'application/json; charset=utf-8');
+    }
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) {
       const handled = await handleApi(req, res, url);
@@ -70,7 +76,9 @@ const server = http.createServer(async (req, res) => {
     serveStatic(req, res, url.pathname);
   } catch (err) {
     console.error('[server]', err);
-    if (!res.headersSent) send(res, 500, JSON.stringify({ error: err.message }), 'application/json; charset=utf-8');
+    // readBody 等处用 statusCode 标注的客户端错误按 4xx 返回，其余才是 500
+    const status = Number(err.statusCode) || 500;
+    if (!res.headersSent) send(res, status, JSON.stringify({ error: err.message }), 'application/json; charset=utf-8');
     else res.end();
   }
 });
