@@ -245,7 +245,7 @@ export async function handleApi(req, res, url) {
     const id = projMatch[1];
     if (method === 'GET') {
       const project = loadProject(id);
-      return project ? json(res, project) : (json(res, { error: '项目不存在' }, 404), true);
+      return project ? (json(res, project), true) : (json(res, { error: '项目不存在' }, 404), true);
     }
     if (method === 'PUT') {
       const body = await readBody(req);
