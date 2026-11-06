@@ -1,7 +1,7 @@
 # lingximanju · 无限画布 × 智能体制片流水线
 
 > 一个**全量自主编写**、零第三方依赖、可本地独立运行的 AI 影像创作工作台。
-> 参考 ViMax 论文（[arXiv:2606.07649v2](https://arxiv.org/abs/2606.07649)；中文全文、导读与配图已归档在 [`docs/paper/`](docs/paper/README.md)）的方法思想与本地 `ViMax/` 仓库的功能划分，交互范式参考 Toonflow 的无限画布；**未复制任何一方源码**。
+> 参考 ViMax 论文（[arXiv:2606.07649v2](https://arxiv.org/abs/2606.07649)；英文原文 PDF、中英全文、导读与配图均已归档在 [`docs/paper/`](docs/paper/README.md)）的方法思想与本地 `ViMax/` 仓库的功能划分，交互范式参考 Toonflow 的无限画布；**未复制任何一方源码**。
 
 ![运行形态](https://img.shields.io/badge/Node.js-%3E%3D18-339933) ![依赖](https://img.shields.io/badge/dependencies-0-orange) ![构建](https://img.shields.io/badge/build-none-blue)
 
@@ -96,8 +96,12 @@ lingximanju/
 │   └── paper/                  # ViMax 论文参考依据（随仓库自包含，其他 IDE 可直接读）
 │       ├── README.md           # 索引 + 论文↔代码对照表 + 跨 IDE 开发说明
 │       ├── ViMax_核心要点导读.md / ViMax_论文中文版.md
-│       ├── ViMax_论文中文阅读版.html
-│       └── vimax_paper_figures/  # 16 张配图（HTML 相对路径依赖，勿改名）
+│       ├── ViMax_论文中文阅读版.html     # 中文带图阅读版
+│       ├── ViMax_原文_arXiv2606.07649v2.pdf  # 英文原版 PDF（v2）
+│       ├── ViMax_原文_官方HTML版.html    # 英文原文离线 HTML（图/样式本地化）
+│       ├── ViMax_原文_EN.md              # 英文结构化全文（供 IDE / AI 检索）
+│       ├── vimax_paper_figures/          # 16 张配图（各版共用，勿改名）
+│       └── assets/                       # 英文 HTML 版离线样式表
 ├── src/
 │   ├── core/
 │   │   ├── events.mjs          # 事件总线 + SSE 订阅
@@ -207,7 +211,7 @@ LLM 仍可独立配置：设置第一个 Tab 选「OpenAI 兼容接口」并填 
 
 ## 论文参考资料 · 在其他 IDE 中继续开发
 
-`docs/paper/` 已随仓库归档 ViMax 论文的**中文全文翻译、核心要点导读、带图 HTML 阅读版与 16 张配图**，不依赖本工作区外的任何路径，用 VS Code / Cursor / Windsurf / JetBrains 等打开 `lingximanju/` 即可直接阅读。
+`docs/paper/` 已随仓库归档 ViMax 论文的**英文原版（PDF / 离线 HTML / 可检索 Markdown）、中文全文翻译、核心要点导读、带图阅读版与 16 张配图**，不依赖本工作区外的任何路径，用 VS Code / Cursor / Windsurf / JetBrains 等打开 `lingximanju/` 即可直接阅读；两个 HTML 版均已把图片与样式本地化，断网也能看。
 
 | 场景 | 入口 |
 |---|---|
@@ -216,6 +220,7 @@ LLM 仍可独立配置：设置第一个 Tab 选「OpenAI 兼容接口」并填 
 | 改智能体 / DAG 调度 / 失败恢复 | [`docs/AGENTS.md`](docs/AGENTS.md) |
 | 确认某个机制出自论文哪一节、对应本仓库哪个文件 | [`docs/paper/README.md`](docs/paper/README.md) §4 对照表 |
 | 查公式、指标、消融结论 | [`docs/paper/ViMax_论文中文版.md`](docs/paper/ViMax_论文中文版.md) §2–§3 |
+| 核对英文原文措辞 / 权威引用 | [`docs/paper/ViMax_原文_EN.md`](docs/paper/ViMax_原文_EN.md)（检索）· [`ViMax_原文_arXiv2606.07649v2.pdf`](docs/paper/ViMax_原文_arXiv2606.07649v2.pdf)（定稿） |
 
 给 AI 助手的上下文建议：先让它读 `README.md` → `docs/ARCHITECTURE.md` → `docs/AGENTS.md`，涉及论文机制时再 `@` 引用 `docs/paper/ViMax_核心要点导读.md` 或全文版。运行只需 `node server.mjs`（Node.js ≥ 18，零依赖、零构建、无需 API Key）。
 

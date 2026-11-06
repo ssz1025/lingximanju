@@ -1,6 +1,7 @@
 # lingximanju 智能体编排设计
 
 > 与 `ARCHITECTURE.md` 配套。本文定义「有哪些智能体、它们如何被组织、如何并行、如何失败恢复、画布上如何表达」。
+> 文中「论文式(N)」指 ViMax 论文（arXiv:2606.07649v2）的公式编号；中文全文与「论文 ↔ 本项目代码」对照表见 [`paper/README.md`](paper/README.md)。
 
 ---
 

@@ -13,11 +13,15 @@
 | [`ViMax_核心要点导读.md`](ViMax_核心要点导读.md) | 15 KB | 批判性导读：一分钟速览、方法全景、实验速查、术语对照、论文↔官方代码对照 | **先读这份**。改动架构前快速建立地图，10 分钟 |
 | [`ViMax_论文中文版.md`](ViMax_论文中文版.md) | 50 KB | 全文中文翻译：摘要、方法 1–2 章、实验 3 章、结论、局限、伦理、参考文献、附录 A（20 页 / 13 幅图） | 需要确认某个公式、指标、消融结论时查全文 |
 | [`ViMax_论文中文阅读版.html`](ViMax_论文中文阅读版.html) | 99 KB | 带目录导航、图注、MathJax 公式渲染的单页阅读版 | 想连图带公式完整阅读；用浏览器或 IDE 内置预览打开 |
-| [`vimax_paper_figures/`](vimax_paper_figures/) | 8.5 MB / 16 张 | 论文配图（框架图、案例图、消融与超参图表，SVG + PNG） | HTML 阅读版依赖此目录，**请勿移动或改名** |
+| [`ViMax_原文_arXiv2606.07649v2.pdf`](ViMax_原文_arXiv2606.07649v2.pdf) | 14 MB | **英文原版 PDF（v2，官方排版，21 页）** | 引用页码、核对原始措辞与数值、对外引用的权威依据 |
+| [`ViMax_原文_官方HTML版.html`](ViMax_原文_官方HTML版.html) | 234 KB | arXiv 官方 HTML 全文的离线副本：正文、MathML 公式、16 张图、13 张表，样式与配图均已本地化 | 完全离线、带图读英文原文；直接双击打开即可，无需联网 |
+| [`ViMax_原文_EN.md`](ViMax_原文_EN.md) | 63 KB | 从官方 HTML 提取的**结构化英文全文**：章节标题、8 个 display 公式（LaTeX）、5 张数据表、16 处图引用、图注、参考文献 | **给 IDE / AI 助手用**：全文检索、grep、`@` 引用；PDF 在多数 IDE 里不便直接喂给 AI |
+| [`vimax_paper_figures/`](vimax_paper_figures/) | 8.5 MB / 16 张 | 论文配图（框架图、案例图、消融与超参图表，SVG + PNG） | 中文 HTML 与英文 HTML / Markdown 共用此目录，**请勿移动或改名** |
+| `assets/` | 77 KB | arXiv 官方 HTML 的样式表（3 个 CSS，本地化） | 仅供英文 HTML 版离线渲染 |
 
-**注意**：`ViMax_论文中文阅读版.html` 用相对路径 `vimax_paper_figures/xxx.svg` 引用配图，因此必须与 `vimax_paper_figures/` 保持同级。公式渲染走 jsDelivr 的 MathJax CDN，离线打开时图片与正文正常、公式显示为 LaTeX 源码；纯离线可改读 Markdown 全文版。
+**注意**：两个 HTML 阅读版与 `ViMax_原文_EN.md` 都用相对路径 `vimax_paper_figures/xxx` 引用配图，因此必须与 `vimax_paper_figures/` 保持同级。中文阅读版的公式走 jsDelivr 的 MathJax CDN，离线时公式显示为 LaTeX 源码；**英文 HTML 版公式是 MathML，浏览器原生渲染，完全离线可用**。
 
-**未收录**：英文原版 PDF（本目录只有中文译文），需要原文请访问 [arXiv 摘要页](https://arxiv.org/abs/2606.07649) / [PDF](https://arxiv.org/pdf/2606.07649)。译文中提到的「本地副本 `ViMax/`」位于工作区根目录下（`../../../ViMax/`，相对本目录），**不在本仓库内**，本仓库不依赖它运行。
+**版本与来源**：英文三件套均取自 [arXiv:2606.07649v2](https://arxiv.org/abs/2606.07649v2)（v1 2026-06-02 / v2 2026-07-21），PDF 与 HTML 全文内容未改写，只做了离线路径重写；英文 Markdown 为自动提取，排版细节可能与 PDF 略有出入，**引用具体措辞与数值请回查 PDF**。未收录 LaTeX 源码包（TeX Source），需要可访问 [arXiv /src](https://arxiv.org/src/2606.07649v2)。译文中提到的「本地副本 `ViMax/`」位于工作区根目录下（`../../../ViMax/`，相对本目录），**不在本仓库内**，本仓库不依赖它运行。
 
 ---
 
@@ -28,6 +32,7 @@
 | 只是想改个 UI、修个 bug | 不必读论文，直接看根目录 [`README.md`](../../README.md) 与 [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | 要改智能体 / 流水线 / 调度 | 导读 §0–§3 → 全文 §2.1–§2.3 → [`docs/AGENTS.md`](../AGENTS.md) §2 智能体清单 → 本文 §4 对照表 |
 | 要复现或质疑实验结论（k 值、耗时、成本、指标） | 导读 §4/§7 → 全文 §3.2–§3.7、附录 A.5 → `vimax_paper_figures/` 内对应图表 |
+| 核对英文原始措辞、公式、表头、引用出处 | `ViMax_原文_EN.md`（检索定位）→ `ViMax_原文_官方HTML版.html`（带图阅读）→ `ViMax_原文_arXiv2606.07649v2.pdf`（权威定稿） |
 
 ---
 
@@ -73,7 +78,7 @@
 
 本目录是普通文件，不依赖 WorkBuddy。用 VS Code / Cursor / Windsurf / JetBrains 等打开 `lingximanju/` 后：
 
-1. **让 AI 助手先读三份上下文**：根目录 `README.md`（能做什么 + 接口）、`docs/ARCHITECTURE.md`（分层与数据契约）、`docs/AGENTS.md`（智能体与 DAG 算法）；需要论文依据时再 `@` 引用本目录的 `ViMax_核心要点导读.md` 或 `ViMax_论文中文版.md`。
+1. **让 AI 助手先读三份上下文**：根目录 `README.md`（能做什么 + 接口）、`docs/ARCHITECTURE.md`（分层与数据契约）、`docs/AGENTS.md`（智能体与 DAG 算法）；需要论文依据时 `@` 引用 `ViMax_核心要点导读.md` / `ViMax_论文中文版.md`，**核对英文原文用 `ViMax_原文_EN.md`**（纯文本，最省上下文且可全文检索，优于喂 PDF）。
 2. **改编排/智能体前**，先查本文 §4 对照表定位文件，避免把「论文中的机制」误当成「本仓库已有的实现」。
 3. **入口与运行**：`node server.mjs` 或 `./start.sh` → `http://127.0.0.1:45367`。零 `npm install`、零构建、零 API Key（Mock 模式即可跑通全流程）。
 4. **约定**：Node.js ≥ 18、原生 ESM（`.mjs` + `public/*.js`）、无第三方运行时依赖、数据落 `data/`（已被 `.gitignore` 排除）。
@@ -82,7 +87,7 @@
 
 ## 6. 归档说明
 
-- 归档时间：2026-11-06；来源为工作区根目录的同名文件，内容未做改写，仅整套复制。
-- 论文中文翻译版、核心要点导读、HTML 阅读版与配图均为本工作区的调研产物，供本项目开发参考。
+- 归档时间：2026-11-06。中文三件套与 16 张配图来自工作区根目录调研产物，内容未改写、整套复制；英文三件套取自 arXiv 官方 v2（PDF / HTML 全文），仅重写离线资源路径，正文未改写；`ViMax_原文_EN.md` 为自动提取的结构化副本。
+- 论文中文翻译版、核心要点导读、中文 HTML 阅读版与配图均为本工作区的调研产物，供本项目开发参考；英文原文著作权归原作者所有，归档仅供本项目内部开发参考。
 - 译文中的图号、表号、公式编号与原文一致，可据此对照 arXiv 原版 PDF。
 - 引用规范：对外描述本项目时请注明「参考 ViMax 论文方法思想」及 [arXiv:2606.07649](https://arxiv.org/abs/2606.07649)，不要表述为官方实现或官方移植。

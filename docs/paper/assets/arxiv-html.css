@@ -1,0 +1,4 @@
+/* Local offline copy of arXiv HTML paper stylesheet (2026-11-06) */
+@import "ar5iv.0.9.1.min.css" layer(ar5iv);
+@import "arxiv-html-papers-theme-20260807.css" layer(arxiv-theme);
+@layer ar5iv, arxiv-theme;
