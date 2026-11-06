@@ -121,11 +121,28 @@ export function loadComfyConfig() {
 }
 
 export function saveComfyConfig(patch = {}) {
-  const next = normalize({ ...loadComfyConfig(), ...patch });
+  const merged = { ...loadComfyConfig(), ...patch };
+  // 切换选中：从库回填「当前生效」镜像；id 不在库中 → 清空（回退 Mock）
+  for (const kind of ['image', 'video']) {
+    const activeKey = `${kind}ActiveId`;
+    if (!(activeKey in patch)) continue;   // 普通保存不碰镜像
+    const entry = (merged[`${kind}WorkflowLib`] || []).find((e) => e.id === patch[activeKey]);
+    merged[`${kind}Workflow`] = entry ? entry.workflow : null;
+    merged[`${kind}WorkflowName`] = entry ? entry.name : '';
+  }
+  const next = normalize(merged);
   const tmp = `${FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
   fs.renameSync(tmp, FILE);
   return next;
+}
+
+/** 给前端的库概览：只回 id/名称/节点数/测试结果，不重复塞 workflow 本体 */
+function libOverview(lib) {
+  return Array.isArray(lib) ? lib.map((e) => ({
+    id: e.id, name: e.name, nodes: Object.keys(e.workflow || {}).length,
+    createdAt: e.createdAt, lastTest: e.lastTest,
+  })) : [];
 }
 
 /** 给前端的概览：不把整份 workflow 重复塞进每个项目 */
@@ -136,5 +153,7 @@ export function comfySummary(cfg = loadComfyConfig()) {
     width: cfg.width, height: cfg.height, fps: cfg.fps, frames: cfg.frames,
     imageWorkflow: cfg.imageWorkflow ? { name: cfg.imageWorkflowName, nodes: Object.keys(cfg.imageWorkflow).length } : null,
     videoWorkflow: cfg.videoWorkflow ? { name: cfg.videoWorkflowName, nodes: Object.keys(cfg.videoWorkflow).length } : null,
+    imageWorkflowLib: libOverview(cfg.imageWorkflowLib),
+    videoWorkflowLib: libOverview(cfg.videoWorkflowLib),
   };
 }

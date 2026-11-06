@@ -85,3 +85,68 @@ test('迁移：旧配置单槽位镜像 → 库第一项并选中；镜像保留
   assert.equal(readCfg().imageActiveId, cfg.imageActiveId);
   assert.equal(readCfg().imageWorkflowLib.length, 1, '保存不重复迁移');
 });
+
+test('saveComfyConfig：切换选中回填镜像；id 不在库中 → 清空回退 Mock；普通保存不碰镜像', () => {
+  reset();
+  writeCfg({
+    imageWorkflowLib: [
+      { id: 'a', name: '海报', workflow: WF_A, createdAt: 1, lastTest: null },
+      { id: 'b', name: '分镜', workflow: WF_B, createdAt: 1, lastTest: null },
+    ],
+    imageActiveId: 'a', imageWorkflow: WF_A, imageWorkflowName: '海报',
+  });
+  const switched = saveComfyConfig({ imageActiveId: 'b' });
+  assert.equal(switched.imageActiveId, 'b');
+  assert.deepEqual(switched.imageWorkflow, WF_B, '镜像回填为选中项 workflow');
+  assert.equal(switched.imageWorkflowName, '分镜', '镜像名同步');
+  assert.deepEqual(readCfg().imageWorkflow, WF_B, '磁盘已落盘');
+
+  const plain = saveComfyConfig({ width: 640 });
+  assert.deepEqual(plain.imageWorkflow, WF_B, '不带 activeId 的保存不碰镜像');
+  assert.equal(plain.width, 640);
+
+  const cleared = saveComfyConfig({ imageActiveId: 'ghost' });
+  assert.equal(cleared.imageWorkflow, null, 'id 不在库中 → 视为清空');
+  assert.equal(cleared.imageWorkflowName, '');
+  assert.equal(readCfg().imageWorkflow, null);
+});
+
+test('删除语义：只改库（不带 activeId）不动镜像；库清空 + activeId null → 镜像清空', () => {
+  reset();
+  writeCfg({
+    imageWorkflowLib: [
+      { id: 'a', name: 'A', workflow: WF_A, createdAt: 1, lastTest: null },
+      { id: 'b', name: 'B', workflow: WF_B, createdAt: 1, lastTest: null },
+    ],
+    imageActiveId: 'a', imageWorkflow: WF_A, imageWorkflowName: 'A',
+    videoWorkflowLib: [{ id: 'v', name: 'V', workflow: WF_B, createdAt: 1, lastTest: null }],
+    videoActiveId: 'v', videoWorkflow: WF_B, videoWorkflowName: 'V',
+  });
+  // DELETE 非选中项：只替换库
+  const keep = saveComfyConfig({ imageWorkflowLib: [{ id: 'a', name: 'A', workflow: WF_A, createdAt: 1, lastTest: null }] });
+  assert.deepEqual(keep.imageWorkflow, WF_A, '非选中项删除不碰镜像');
+  assert.equal(keep.imageActiveId, 'a');
+  // DELETE 选中项：库清空 + activeId 置 null
+  const gone = saveComfyConfig({ imageWorkflowLib: [], imageActiveId: null });
+  assert.equal(gone.imageWorkflow, null);
+  assert.equal(gone.imageWorkflowName, '');
+  assert.deepEqual(gone.videoWorkflow, WF_B, '另一类不受影响');
+  assert.equal(gone.videoActiveId, 'v');
+});
+
+test('comfySummary：两库概览含 lastTest，不回传 workflow 本体，原概览字段保留', () => {
+  reset();
+  writeCfg({
+    imageWorkflowLib: [{ id: 'a', name: 'A', workflow: WF_A, createdAt: 5, lastTest: { ok: true, durationMs: 1234, at: 9, error: null } }],
+    imageActiveId: 'a', imageWorkflow: WF_A, imageWorkflowName: 'A',
+  });
+  const s = comfySummary(loadComfyConfig());
+  assert.equal(s.imageWorkflowLib.length, 1);
+  const ov = s.imageWorkflowLib[0];
+  assert.deepEqual(Object.keys(ov).sort(), ['createdAt', 'id', 'lastTest', 'name', 'nodes']);
+  assert.equal(ov.nodes, 1);
+  assert.equal(ov.workflow, undefined, '概览绝不回传本体');
+  assert.equal(ov.lastTest.ok, true);
+  assert.equal(s.videoWorkflowLib.length, 0);
+  assert.deepEqual(s.imageWorkflow, { name: 'A', nodes: 1 }, '原单槽位概览保留');
+});
