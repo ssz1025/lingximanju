@@ -851,6 +851,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .pmm-snaps > div span:first-child { color: var(--muted); min-width: 84px; }
 .pmm-snaps .btn { margin-left: auto; padding: 3px 8px; font-size: 10px; }
 .pmm-empty { text-align: center; color: var(--muted); font-size: 10.5px; padding: 14px; }
+/* 封面生成调用记录：行内折叠过程日志（提示词 / 参考图 / 注入结果 / 运行日志） */
+.pmm-call { flex-wrap: wrap; }
+.pmm-call b.ok { color: var(--green); }
+.pmm-call b.err { color: #f87171; }
+.pmm-call details { margin-left: auto; }
+.pmm-call details[open] { flex: 1 0 100%; margin-left: 0; }
+.pmm-call summary { cursor: pointer; font-size: 10px; color: var(--muted); }
+.pmm-call-detail { width: 100%; margin-top: 6px; font-size: 10px; color: var(--text-2); line-height: 1.7; }
+.pmm-call-detail > div { margin: 2px 0; word-break: break-all; }
+.pmm-call-detail b { color: var(--muted); font-weight: 600; margin-right: 6px; }
+.pmm-call-logs { max-height: 160px; overflow: auto; background: var(--panel-3); border-radius: 6px; padding: 5px 8px; margin-top: 4px; }
+.pmm-call-logs div { font-family: ui-monospace, monospace; font-size: 9px; color: var(--muted); }
 .tag-ok { font-size: 9px; color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); border-radius: 4px; padding: 1px 5px; margin-left: 5px; }
 .tag-wait { font-size: 9px; color: var(--muted); background: var(--panel-3); border-radius: 4px; padding: 1px 5px; margin-left: 5px; }
 
@@ -1095,7 +1107,12 @@ body.view-workshop .canvas-only { display: none !important; }
 .aichat-msg.user .aichat-bubble { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .aichat-text { white-space: normal; word-break: break-word; }
 .aichat-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.aichat-imgs img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.aichat-imgs img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); cursor: zoom-in; }
+/* 对话内图片放大查看（当前封面 / 生成结果 / 参考图通用） */
+.aichat-lightbox { position: fixed; inset: 0; z-index: 400; display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 10, 16, 0.82); backdrop-filter: blur(3px); cursor: zoom-out; padding: 4vh 4vw; }
+.aichat-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55); }
 .aichat-promptbox { margin-top: 8px; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; }
 .aichat-promptbox b { display: block; font-size: 11px; color: var(--accent); margin-bottom: 4px; }
 .aichat-promptbox b small { color: var(--muted); font-weight: 400; }

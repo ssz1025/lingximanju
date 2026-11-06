@@ -413,7 +413,8 @@ export function applyManageAction(project, action, value) {
       if (source !== 'name' && !url) return { ok: false, message: '封面图片地址不能为空' };
       m.cover = {
         url, source,
-        prompt: String(value?.prompt || '').slice(0, 500),
+        // 完整保存生成时实际使用的提示词（不截断）：文本框内容即完整提示词，截断会破坏可复现性
+        prompt: String(value?.prompt || ''),
         updatedAt: Date.now(),
       };
       logHistory(m, 'cover', source === 'name' ? '恢复为项目名称封面'

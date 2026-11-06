@@ -416,15 +416,15 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | 持久化 | `src/core/store.mjs` | 项目索引字段（`projectIndex`）、快照写入 / 列举 / 读取（`data/snapshots/<id>/<ts>.json`） |
 | 编排 | `src/core/orchestrator.mjs` | `runProject(id, { scope })` 按节点类型白名单分阶段调度；不传 `scope` 时行为不变 |
 | 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；`rag` 用整本原著分块建库并落盘；`decomposer` 按事件 `processChain` 逐条检索并把 FRAGMENT 片段下发到 event / scene / shots；`generate('context')` 走本地 BM25 确定性检索 |
-| API | `src/api/routes.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover` 与 `POST /api/projects/:id/cover/generate`；工作流库 `/api/comfyui/library` |
+| API | `src/api/routes.mjs`、`src/api/routes/management.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover`、`POST /api/projects/:id/cover/chat`（对话式创作）与 `POST /api/projects/:id/cover/generate`（生成入资源库 + 调用记录 `management.coverCalls`）；工作流库 `/api/comfyui/library` |
 | 前端 | `public/wizard.js` | 极简新建向导：只有项目名称必填 + 可选一句话构想 |
 | 前端 | `public/project-view.js` | 项目工作台（进入创作项目后的默认全屏页）：左侧路线图 / 故事来源 / 资源，右侧项目信息（AI 补全）+ 步骤操作台 + 分集；顶栏 `V` 与画布视图互切 |
-| 前端 | `public/project-manager.js` | 侧栏项目列表（最近 / 更多、筛选、封面缩略图与名称封面兜底）、六步任务面板、画布步骤条、四 Tab 管理面板、`openCoverDialog()` 封面设置弹窗 |
+| 前端 | `public/project-manager.js`、`public/ai-chat.js` | 侧栏项目列表（最近 / 更多、筛选、封面缩略图与名称封面兜底）、六步任务面板、画布步骤条、四 Tab 管理面板、对话式封面创作（`openAIChat()` 复用对话弹窗：生成 → 大图预览确认 → 保存）与封面生成调用记录展示 |
 | 前端 | `public/app.js` | 状态同步、步骤执行、SSE `project:meta`、顶栏进度与快捷键 |
 | 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板；项目卡片缩略图 / 名称封面 / 封面弹窗样式；沿用现有 CSS 变量兼容深浅主题 |
 | 节点 | `public/nodes.js` | 新增 `episode` 类型（`▥` 分集，紫色，无默认智能体） |
 | 测试 | `tests/novel.test.mjs` | 解析 / 分集策略 / 校验 / 角色抽取 / 预览不泄漏全文（16 项） |
-| 测试 | `tests/project-steps.test.mjs` | 六步定义与论文映射 / 步骤状态机 / 管理动作（含 `cover`）/ 统计与索引（27 项） |
+| 测试 | `tests/project-steps.test.mjs` | 六步定义与论文映射 / 步骤状态机 / 管理动作（含 `cover`，提示词完整保存不截断）/ 统计与索引（38 项） |
 | 测试 | `tests/novel-project.test.mjs` | 项目骨架构建 / 分集节点对齐 / 连线完整性 / 刷新分集同步（11 项） |
 | 测试 | `tests/knowledge.test.mjs` | 式(6)：512/128 分块与重叠、BM25 召回、`processChain` 阈值聚合与分数累加、单命中保底、缓存往返、FRAGMENT 标签（11 项） |
 | 测试 | `tests/comfy-lib*.test.mjs` | 工作流库数据模型、批量导入去重、REST 切换 / 重命名 / 删除 / 批量真实试跑（13 项） |
@@ -448,12 +448,14 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
   "currentStep": 3,
   "history": [{ "id": "", "at": 0, "action": "", "detail": "" }],
   "theory": { "paper": "ViMax · arXiv:2606.07649v2", "doc": "docs/THEORY.md", "defaults": { "k": 2 } },
-  "cover": { "url": "", "source": "name|upload|comfyui", "prompt": "", "updatedAt": 0 }
+  "cover": { "url": "", "source": "name|upload|comfyui", "prompt": "", "updatedAt": 0 },
+  "coverCalls": [{ "id": "", "at": 0, "ok": true, "promptId": "", "durationMs": 0, "prompt": "", "negative": "", "refs": [], "refCount": 0, "promptInjection": { "positive": null, "negative": null, "warnings": [] }, "applied": [], "logs": [], "error": "" }]
 }
 ```
 
 - 原著全文只存 `management.source.text`（画布节点仅存摘要）。`rag` 节点用 `originalCorpus` 调 `chunkNovel(512,128)` 分块，缓存在 `data/knowledge/<projectId>.json`；分集节点用 `ref` 边把梗概传给 `script`，不参与 DAG 执行分层。
-- `cover` 由 `ensureManagement()` 为老项目惰性补齐；`projectIndex()` 同步下发到侧栏索引。`source:'name'` 表示使用项目名称封面（前端按项目名哈希生成稳定渐变色块 + 首字），`url` 非空时指向 `/assets/cover_*.png` 静态资源。
+- `cover` 由 `ensureManagement()` 为老项目惰性补齐；`projectIndex()` 同步下发到侧栏索引。`source:'name'` 表示使用项目名称封面（前端按项目名哈希生成稳定渐变色块 + 首字），`url` 非空时指向 `/assets/cover_*.png` 静态资源。`cover.prompt` **完整保存生成时实际使用的提示词（不截断）**——文本框内容即完整提示词，截断会破坏可复现性。
+- `coverCalls` 为封面生成调用记录（上限 20 条，成功 / 失败均留档）：记录 `promptId`、耗时、完整提示词、负向提示词、参考图列表、提示词注入结果（`promptInjection` 即 plan：注入节点 / 策略 / 告警）与 `runWorkflow` 过程日志（`logs`，上限 60 行），供「版本 / 记录」Tab 回溯每次调用。
 
 ### 14.3 六步状态机与分阶段执行
 
@@ -484,9 +486,10 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | GET / POST | `/api/projects/:id/snapshots` | 列举 / 创建快照 |
 | POST | `/api/projects/:id/restore` | 恢复快照（恢复前自动为当前状态留安全点） |
 | POST | `/api/projects/:id/step` | 六步执行 / 重置 |
-| POST | `/api/projects/:id/cover` | 上传本地封面（`{ dataUrl }` base64，校验格式 + 文件头 + 大小），写入 `data/assets` |
+| POST | `/api/projects/:id/cover` | 上传本地封面（`{ dataUrl }` base64，校验格式 + 文件头 + 大小），写入 `data/assets`；可随带 `prompt` 完整落盘 |
 | DELETE | `/api/projects/:id/cover` | 清除封面 → 回退「项目名称封面」 |
-| POST | `/api/projects/:id/cover/generate` | 用已配置的 ComfyUI 出图工作流生成封面，返回 `cover / url / durationMs` |
+| POST | `/api/projects/:id/cover/chat` | 对话式封面创作：需求 + 参考图 → `designCoverPrompt`（`coverPromptDesign` intent，VLM 看参考图）产出 40~120 字完整中文描述句 |
+| POST | `/api/projects/:id/cover/generate` | 用已配置的 ComfyUI 出图工作流生成封面：`rawPrompt` 原样直用（≤2000 字，不套模板），空则走 `designCoverPrompt`；多参考图逐 `LoadImage` 插槽注入。生成图只入资源库，返回 `generated{file,url} / prompt / promptId / durationMs`；确认后经 `POST /cover { asset, prompt }` 落定封面并**完整保存提示词**。每次调用（成功 / 失败）写入 `management.coverCalls` 调用记录（promptId / 耗时 / 提示词 / 参考图 / 注入结果 / 过程日志） |
 | POST / PUT | `/api/comfyui/library` | 批量导入工作流库 / 切换选中项 |
 | DELETE | `/api/comfyui/library/:kind/:id` | 删除工作流库条目 |
 
@@ -514,7 +517,7 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | `npm test` → **171 项全部通过**（`novel` 17 / `project-steps` 38 / `novel-project` 13 / `knowledge` 13 / `comfy-lib` 8 / `comfy-lib-api` 5 / **`comfy-prompt` 8** / **`cover` 12** / `asset-routes` 8 / `characters` 12 / `graph` 6 / `store` 4 / `assets` 8 / `orchestrator` 8 / `providers` 11），零依赖、毫秒级 |
+| 单元测试 | `npm test` → **186 项全部通过**（`novel` 17 / `project-steps` 38 / `novel-project` 13 / `novel-ai` 6 / `knowledge` 13 / `comfy-lib` 8 / `comfy-lib-api` 5 / **`comfy-prompt` 8** / **`cover` 16** / **`cover-dialog` 5** / `asset-routes` 8 / `characters` 12 / `graph` 6 / `store` 4 / `assets` 8 / `orchestrator` 8 / `providers` 11），零依赖、毫秒级 |
 | 后端 HTTP 闭环 | 新建创作项目 → 第 ③ 步 → 全部执行：`6/6` 步、42 节点 / 64 连线（2 集）、6 镜头、8 条 anchor、14 条 ref、0 失败，导演包 25 文件 CRC 全通过 |
 | 上传内容生效 | 剧本场景来自原著章节（「第一章 没有署名的信」/「第四章 回到码头」），角色抽取为沈砚 / 林夏等原著人物 |
 | 项目管理 | 重命名 / 收藏 / 标签 / 备注 / 归档 / 交付设置 / 复制 / 快照 / 恢复 / 删除全部通过，原有 4 个示例项目未受影响 |
@@ -570,10 +573,10 @@ management.source.text (原著全文)
 |---|---|---|
 | 项目名称封面（默认） | 无封面 / `DELETE /api/projects/:id/cover` | `public/project-manager.js · nameCoverHTML()` 按项目名字符和取 `hue % 360`，生成稳定渐变色块 + 首字，无需任何资源 |
 | 本地上传 | 卡片齿轮「设置项目封面」→「⇧ 上传本地图片」，或管理面板「概览」→「设置项目封面」 | 前端 `FileReader.readAsDataURL()` → `POST /api/projects/:id/cover { dataUrl }` → 后端正则校验 `png/jpeg/webp/gif`、base64 解码、文件头魔数校验、≤6 MB → `writeAssetBinary()` 写入 `data/assets` |
-| ComfyUI 生成 | 弹窗「✦ 用 ComfyUI 生成封面」 | `buildCoverPrompt()` 用片名 + 剧本梗概 + 首集摘要 + 可选画面要求拼提示词；复用 `imageWorkflow` 走 `parseWorkflow() → runWorkflow()`，产物 URL 写入 `cover.url` |
+| ComfyUI 生成 | 卡片齿轮「✦ 用 ComfyUI 生成封面」→ 对话式创作 | `POST /cover/chat` 对话式收集需求（`designCoverPrompt` 走 `coverPromptDesign` intent，VLM 看参考图产出 40~120 字完整中文描述句）→ 文本框内容**原样直用**（`rawPrompt` ≤2000，不套片名 / 风格模板），空则由 refs 感知的 `designCoverPrompt` 设计；多参考图逐 `LoadImage` 插槽注入，复用 `imageWorkflow` 走 `parseWorkflow() → runWorkflow()`（提示词注入三层优先级：显式绑定 > `{{占位符}}` > 沿图 BFS）→ 生成图只入资源库返回 `generated{file,url}` + `prompt / promptId / durationMs` → **大图预览确认后**才经 `POST /cover { asset, prompt }` 落定封面 |
 
-- 三个入口统一走 `applyManageAction(project, 'cover', value)` → `saveProject()` → `broadcastMeta()` → SSE `state`，并写入 `management.history`。
-- 前端 `openCoverDialog()` 同时兼容「列表索引对象（顶层 `cover`）」与「完整项目对象（`management.cover`）」两种数据源；成功后 `onChanged()` 触发项目列表与统计刷新。
-- 卡片缩略图 46×62，`✦ AI` / `⇧ 上传` 角标区分来源；弹窗预览 3:4，生成期间显示忙碌遮罩并禁用关闭，避免重复提交。
+- 三个入口统一走 `applyManageAction(project, 'cover', value)` → `saveProject()` → `broadcastMeta()` → SSE `state`，并写入 `management.history`；确认保存时随带生成实际使用的完整提示词（`prompt`）落盘**不截断**。
+- 每次 `/cover/generate`（成功 / 失败）写入 `management.coverCalls` 调用记录（上限 20 条）：`promptId`、耗时、完整提示词、负向、参考图、提示词注入结果（注入节点 / 策略 / 告警）、`applied` 绑定明细与 `runWorkflow` 过程日志；管理面板「版本 / 记录」Tab 以折叠 `<details>` 展示过程日志，生成消息中显示调用号。
+- 前端 `openAIChat()` 复用对话弹窗组件（消息气泡 / promptBlock / 建议 chips / 动作按钮 / 忙等）；`openGeneratedConfirm` 放大预览 3:4，生成期间显示忙碌遮罩并禁用关闭，避免重复提交。
 
 

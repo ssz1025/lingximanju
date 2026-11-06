@@ -77,7 +77,7 @@ cd lingximanju
 ### 自动化测试
 
 ```bash
-npm test        # node --test tests/*.test.mjs —— 171 项断言全部通过
+npm test        # node --test tests/*.test.mjs —— 186 项断言全部通过
 npm run check   # 关键文件语法检查
 ```
 
@@ -85,21 +85,22 @@ npm run check   # 关键文件语法检查
 
 | 测试文件 | 覆盖内容 | 用例数 |
 |---|---|---|
-| `tests/novel.test.mjs` | 章节识别（`第X章`/`Chapter N`/数字标题）、书名提取、三种分集策略与上下限钳制、尾集吸收溢出不丢原文、输入校验、角色抽取、预览不泄漏全文 | 16 |
-| `tests/project-steps.test.mjs` | 六步定义与论文映射完整性、步骤状态机、进度百分比、管理动作（重命名 / 收藏 / 归档 / 标签 / 备注 / 交付物 / 分集参数 / **项目封面**）、统计与索引字段、历史长度上限、**骨架项目重置语义** | 32 |
+| `tests/novel.test.mjs` | 章节识别（`第X章`/`Chapter N`/数字标题）、书名提取、三种分集策略与上下限钳制、尾集吸收溢出不丢原文、输入校验、角色抽取、预览不泄漏全文 | 17 |
+| `tests/project-steps.test.mjs` | 六步定义与论文映射完整性、步骤状态机、进度百分比、管理动作（重命名 / 收藏 / 归档 / 标签 / 备注 / 交付物 / 分集参数 / **项目封面**）、统计与索引字段、历史长度上限、**骨架项目重置语义**、**封面提示词完整保存不截断** | 38 |
 | `tests/novel-project.test.mjs` | 项目骨架构建、**极简骨架（六步全待执行）与延迟上传小说（attachSource）**、分集节点与 management 对齐、连线引用完整性、原著全文注入、刷新分集后画布同步、非法输入的报错语义 | 13 |
 | `tests/novel-ai.test.mjs` | **名称必填校验**、一句话构想写入 logline、Mock `storyIdea`/`novelOutline`/`novelChapter` 结构与主题、**大纲→整本注入（①② 自动完成、用户编辑的大纲生效、角色播种）**、AI 补全信息只补空字段、标准项目拒绝 AI 小说 | 6 |
-| `tests/knowledge.test.mjs` | 式(6)：512/128 分块与重叠、BM25 召回排序、`processChain` 逐条检索 / 0.7 阈值 / 分数累加、单命中保底、缓存落盘往返、FRAGMENT 标签 | 11 |
+| `tests/knowledge.test.mjs` | 式(6)：512/128 分块与重叠、BM25 召回排序、`processChain` 逐条检索 / 0.7 阈值 / 分数累加、单命中保底、缓存落盘往返、FRAGMENT 标签 | 13 |
 | `tests/comfy-lib.test.mjs` / `tests/comfy-lib-api.test.mjs` | 工作流库数据模型、批量导入去重与 `(2)` 后缀、REST 切换选中 / 重命名 / 删除、批量真实试跑与 SSE 进度 | 13 |
 | `tests/comfy-prompt.test.mjs` | 提示词注入：连线型工作流（Krea2）沿图回溯写入 User Prompt 源节点、跳过系统提示词 / 触发词、假 ComfyUI 服务验证两次 `/prompt` 载荷随提示词变化、经典双 CLIP / 占位符 / 显式绑定 / 兜底覆盖 / 无注入点告警、注入自检 REST | 8 |
-| `tests/cover.test.mjs` | 项目封面：AI 生成提示词（`coverPrompt` intent、嵌套 JSON 递归解包、Mock 补位 `__mockKeys` 显式标记、`/cover/prompt` 来源明示）、提示词文本框内容原样直用不套模板、多参考图逐 `LoadImage` 插槽对应 / 单图全槽兼容 / 缺图占位 / 越额告警、非法参考图拒绝 | 12 |
+| `tests/cover.test.mjs` | 项目封面：`coverPromptDesign` 提示词设计 agent（`designCoverPrompt`，VLM 看参考图产出完整描述句）、提示词文本框内容原样直用不套模板、多参考图逐 `LoadImage` 插槽对应 / 单图全槽兼容 / 缺图占位 / 越额告警 / 非法参考图拒绝、**确认保存完整落盘不截断（>500 字零丢失）**、**封面生成调用记录（promptId / 耗时 / 提示词 / 参考图 / 注入结果 / 过程日志，成功失败均留档）** | 16 |
+| `tests/cover-dialog.test.mjs` | 对话式封面创作（`/cover/chat`）：`buildCoverPrompt` 拼装、`resolveChatRefs` 引用解析、`coverChat` 路由、生成→放大预览→确认保存契约（保存请求体携带完整提示词） | 5 |
 | `tests/graph.test.mjs` | 图算法纯函数：拓扑分层、上下游子图、自动布局、DAG 环检测 | 6 |
 | `tests/store.test.mjs` | 持久层：uid / 资产路径清洗、项目存取与列表缓存失效、快照封顶 20 份 | 4 |
 | `tests/assets.test.mjs` | 资源索引：按文件名推断类型、自动收录与 `index.json` 落盘、打标签改名校验、重扫剔除与用户元数据保护、角色名归一化、**跨项目角色优先匹配**、统计聚合 | 8 |
-| `tests/orchestrator.test.mjs` | 编排器集成：波次调度、`scope` 白名单、失败与跳过传播、取消与并发保护（全程 mock） | 4 |
-| `tests/providers.test.mjs` | LLM 端点健壮性：挂起端点超时后回退 Mock 不卡死、调用方已取消时立即失败 | 5 |
+| `tests/orchestrator.test.mjs` | 编排器集成：波次调度、`scope` 白名单、失败与跳过传播、取消与并发保护（全程 mock） | 8 |
+| `tests/providers.test.mjs` | LLM 端点健壮性：挂起端点超时后回退 Mock 不卡死、调用方已取消时立即失败 | 11 |
 
-端到端闭环（真实 HTTP：创建 → 分步 → 全量执行 → 管理动作 → 快照恢复 → 复制 → 导演包下载 → 封面上传 / 生成 / 重置 → 清理）另有 jsdom 运行时验证，覆盖向导、步骤面板、管理面板、侧栏筛选与封面弹窗。
+端到端闭环（真实 HTTP：创建 → 分步 → 全量执行 → 管理动作 → 快照恢复 → 复制 → 导演包下载 → 封面上传 / 生成 / 重置 → 清理）另有 jsdom 运行时验证，覆盖向导、步骤面板、管理面板、侧栏筛选与对话式封面（生成 → 大图预览确认 → 保存）。
 
 ---
 

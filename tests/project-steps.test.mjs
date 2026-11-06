@@ -334,11 +334,12 @@ test('applyManageAction cover：上传 / ComfyUI 生成 / 恢复名称封面', (
   assert.ok(p.management.history.filter((h) => h.action === 'cover').length >= 3);
 });
 
-test('applyManageAction cover：url / prompt 长度钳制', () => {
+test('applyManageAction cover：url 钳制 300，提示词完整保存不截断', () => {
   const p = makeProject();
   applyManageAction(p, 'cover', { url: '/assets/' + 'x'.repeat(500), source: 'upload', prompt: 'p'.repeat(800) });
   assert.equal(p.management.cover.url.length, 300);
-  assert.equal(p.management.cover.prompt.length, 500);
+  // 提示词即完整提示词：生成时用什么就存什么（>500 字不得截断，否则无法复现生成结果）
+  assert.equal(p.management.cover.prompt.length, 800);
 });
 
 test('projectIndex 下发 cover 字段（供侧栏卡片渲染）', () => {

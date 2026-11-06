@@ -351,3 +351,59 @@ test('POST /cover/generate：提示词留空才套项目资料模板；非法参
   });
   assert.equal(missing.status, 400, '损坏的 dataUrl 参考图被拒绝');
 });
+
+/* ---------------- 完整提示词保存 + 调用记录（过程日志留档） ---------------- */
+test('POST /cover 确认保存：生成提示词完整落盘（>500 字不截断）；调用记录留档过程日志', async () => {
+  saveProject({ id: 'prj_cg3', name: '长夜微光', mode: 'idea2video', nodes: [], edges: [],
+    createdAt: Date.now(), updatedAt: Date.now() });
+  saveComfyConfig({
+    enabled: true, imageWorkflow: parseWorkflow(multiSlotWF()),
+    videoWorkflow: null, baseUrl: comfyCfg.baseUrl,
+    pollIntervalMs: 5, timeoutMs: 5000, negativePrompt: '默认负向',
+  });
+  const longPrompt = `雨夜霓虹的巷口，少女撑伞回望，${'电影感构图、体积光、细腻质感、丰富氛围，'.repeat(12)}cinematic movie poster, highly detailed, no text`;
+
+  const r = await api('POST', '/api/projects/prj_cg3/cover/generate', {
+    prompt: longPrompt, negative: 'watermark', refs: ['coverref1.png'],
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.prompt, longPrompt, '生成响应原样返回实际使用的完整提示词');
+
+  // 调用记录：每次生成（成功）都留档提示词 / 参考图 / 注入结果 / runWorkflow 过程日志
+  const calls = loadProject('prj_cg3').management.coverCalls;
+  assert.ok(Array.isArray(calls) && calls.length === 1, '写入 1 条调用记录');
+  const rec = calls[0];
+  assert.equal(rec.ok, true);
+  assert.ok(rec.promptId, '记录 ComfyUI promptId');
+  assert.ok(typeof rec.durationMs === 'number', '记录耗时');
+  assert.equal(rec.prompt, longPrompt, '记录完整提示词（不截断）');
+  assert.deepEqual(rec.refs, ['coverref1.png'], '记录参考图');
+  assert.ok(rec.logs.some((l) => /已排队|ComfyUI/.test(l)), '记录 runWorkflow 过程日志');
+  assert.ok(rec.promptInjection && rec.promptInjection.positive, '记录提示词注入结果');
+  assert.ok(Array.isArray(rec.applied), '记录注入参数明细');
+
+  // 确认保存：提示词随封面完整落盘（超过旧 500 字截断上限也不丢字）
+  const ok = await api('POST', '/api/projects/prj_cg3/cover', {
+    asset: r.data.generated.file, prompt: r.data.prompt,
+  });
+  assert.equal(ok.status, 200);
+  const cover = loadProject('prj_cg3').management.cover;
+  assert.equal(cover.prompt, longPrompt, '封面提示词完整保存，无截断');
+  assert.ok(cover.url.startsWith('/assets/'));
+});
+
+test('POST /cover/generate 失败也留调用记录：ok=false + 错误与已产生的日志', async () => {
+  saveProject({ id: 'prj_cg4', name: '断线测试', mode: 'idea2video', nodes: [], edges: [],
+    createdAt: Date.now(), updatedAt: Date.now() });
+  saveComfyConfig({
+    enabled: true, imageWorkflow: parseWorkflow(multiSlotWF()),
+    videoWorkflow: null, baseUrl: 'http://127.0.0.1:1', // 空闲端口：连接立即失败
+    pollIntervalMs: 5, timeoutMs: 2000, negativePrompt: '默认负向',
+  });
+  const r = await api('POST', '/api/projects/prj_cg4/cover/generate', { prompt: '霓虹雨夜' });
+  assert.equal(r.status, 502);
+  const rec = loadProject('prj_cg4').management.coverCalls[0];
+  assert.equal(rec.ok, false, '失败调用同样留档');
+  assert.ok(rec.error, '记录失败原因');
+  assert.equal(rec.prompt, '霓虹雨夜', '记录所用提示词');
+});

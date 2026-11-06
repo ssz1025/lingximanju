@@ -60,11 +60,20 @@ export function openAIChat(o = {}) {
   const sendBtn = backdrop.querySelector('[data-aichat="send"]');
   const closeBtn = backdrop.querySelector('[data-aichat="close"]');
 
+  /** 气泡内图片点击放大：组件内自建 lightbox，保持零依赖（不引入 panels 的预览弹窗） */
+  function openImgPreview(src) {
+    const lb = document.createElement('div');
+    lb.className = 'aichat-lightbox';
+    lb.innerHTML = `<img src="${$esc(src)}" alt="放大预览">`;
+    lb.addEventListener('click', () => lb.remove());
+    document.body.appendChild(lb);
+  }
+
   /** 消息渲染：气泡内可含图片行、提示词块、建议 chips、动作按钮 */
   function bubbleHTML(msg) {
     const isUser = msg.role === 'user';
     const imgs = (Array.isArray(msg.images) && msg.images.length)
-      ? `<div class="aichat-imgs">${msg.images.map((u) => `<img src="${$esc(u)}" alt="" loading="lazy">`).join('')}</div>` : '';
+      ? `<div class="aichat-imgs">${msg.images.map((u) => `<img src="${$esc(u)}" alt="" loading="lazy" title="点击放大查看">`).join('')}</div>` : '';
     const pb = msg.promptBlock
       ? `<div class="aichat-promptbox"><b>✦ 画面提示词${msg.promptBlock.negative ? ' <small>（已保存，可继续对话调整）</small>' : ''}</b>
           <p>${$esc(msg.promptBlock.prompt)}</p>${msg.promptBlock.negative ? `<small>负向：${$esc(msg.promptBlock.negative)}</small>` : ''}</div>` : '';
@@ -88,6 +97,8 @@ export function openAIChat(o = {}) {
       list.scrollTop = list.scrollHeight;
       const text = String(msg.text || '').trim();
       if (text) history.push({ role: msg.role === 'user' ? 'user' : 'assistant', content: text });
+      // 图片：点击放大查看（生成结果、当前封面、参考图都适用）
+      el.querySelectorAll('.aichat-imgs img').forEach((img) => img.addEventListener('click', () => openImgPreview(img.src)));
       // 建议 chips：点击即作为用户消息发送；同气泡内按钮互斥（点击后全部禁用，防重复触发）
       el.querySelectorAll('[data-aichat-chip]').forEach((chip) => chip.addEventListener('click', () => {
         if (busy) return;

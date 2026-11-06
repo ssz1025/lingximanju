@@ -175,6 +175,25 @@ export async function handleManagement(req, res, url) {
       } catch (err) {
         return json(res, { error: err.message }, 400), true;
       }
+      // 调用记录：把本次 ComfyUI 调用的完整过程日志（提示词、参考图、注入结果、runWorkflow 日志）留档
+      const callLogs = [];
+      const logLine = (level, msg) => {
+        callLogs.push(`[${level}] ${msg}`);
+        emit('log', { projectId: id, level, message: `封面生成 · ${msg}` });
+      };
+      const recordCall = (extra = {}) => {
+        const rec = {
+          id: uid('call'), at: Date.now(), ok: false,
+          prompt, negative,
+          refs: imageRefs.map((r) => r.name), refCount: imageRefs.length,
+          logs: callLogs.slice(-60),
+          ...extra,
+        };
+        m.coverCalls = [rec, ...(m.coverCalls || [])].slice(0, 20);
+        m.updatedAt = Date.now();
+        saveProject(project);
+        return rec;
+      };
       try {
         const result = await runWorkflow(config, wf, {
           prompt, negative,
@@ -182,17 +201,24 @@ export async function handleManagement(req, res, url) {
           imageRefs,
         }, {
           bindings: config.bindings?.image || [],
-          log: (level, msg) => emit('log', { projectId: id, level, message: `封面生成 · ${msg}` }),
+          log: logLine,
         });
         const url = result.primary?.url;
-        if (!url) return json(res, { error: 'ComfyUI 未返回封面图片' }, 502), true;
+        const file = String(url || '').startsWith('/assets/') ? String(url).slice(8) : '';
+        recordCall({
+          ok: Boolean(file),
+          promptId: result.promptId, durationMs: result.durationMs,
+          promptInjection: result.promptInjection || null,
+          applied: (result.applied || []).map((a) => ({ node: a.node, input: a.input, by: a.by })),
+          error: file ? '' : 'ComfyUI 未返回封面图片',
+        });
+        if (!file) return json(res, { error: 'ComfyUI 未返回封面图片' }, 502), true;
         // 不直接设为封面：先入资源库，由前端放大预览，用户确认后才经 POST /cover {asset} 落定
-        const file = String(url).startsWith('/assets/') ? String(url).slice(8) : '';
-        if (!file) return json(res, { error: '生成结果不是可用的资源文件' }, 502), true;
         registerAsset({ file, kind: 'cover', name: `${project.name} 封面`, sourceProjectId: id, sourceProjectName: project.name });
         return json(res, { ok: true, generated: { file, url }, prompt,
           promptId: result.promptId, durationMs: result.durationMs, message: '封面已生成，预览确认后保存' }), true;
       } catch (err) {
+        recordCall({ error: err.message, durationMs: 0 });
         return json(res, { error: `封面生成失败：${err.message}` }, 502), true;
       }
     }
@@ -200,14 +226,15 @@ export async function handleManagement(req, res, url) {
     // 本地上传（dataURL base64），存入 /assets/ 供静态服务直接访问
     if (coverMatch && method === 'POST') {
       const body = await readBody(req);
-      // 从资源库复用已有图片：只接受指向 /assets/ 的合法图片文件，完整走 commitCover 链路
+      // 从资源库复用已有图片：只接受指向 /assets/ 的合法图片资源，完整走 commitCover 链路；
+      // 确认保存 ComfyUI 生成结果时随带生成提示词（prompt），完整落盘不截断
       if (body.asset) {
         const name = String(body.asset);
         if (!/^[a-zA-Z0-9_.-]+$/.test(name) || !/\.(png|jpe?g|webp|gif)$/i.test(name)) {
           return json(res, { error: '仅支持从资源库选择 PNG / JPEG / WebP / GIF 图片' }, 400), true;
         }
         if (!readAsset(name)) return json(res, { error: '资源不存在或已被删除' }, 404), true;
-        const out = commitCover({ url: `/assets/${name}`, source: 'upload' });
+        const out = commitCover({ url: `/assets/${name}`, source: 'upload', prompt: String(body.prompt || '') });
         if (!out.ok) return json(res, out, 400), true;
         return json(res, { ok: true, cover: m.cover, url: m.cover?.url, message: out.message }), true;
       }

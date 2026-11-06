@@ -104,7 +104,7 @@ test('点击「保存为封面」：POST /cover {asset} 保存并应用，弹窗
   let changed = 0;
   const r = openGeneratedConfirm({
     project: { id: 'p1' },
-    generated: { file: 'gen_2.png', url: '/assets/gen_2.png' },
+    generated: { file: 'gen_2.png', url: '/assets/gen_2.png', prompt: '完整提示词Y' },
     applyCover: (c) => applied.push(c),
     onChanged: async () => { changed += 1; },
     ui: { addMessage: (m) => messages.push(m) },
@@ -114,7 +114,8 @@ test('点击「保存为封面」：POST /cover {asset} 保存并应用，弹窗
   assert.equal(fetchCalls.length, 1, '应恰好发出一次保存请求');
   assert.equal(fetchCalls[0].method, 'POST');
   assert.equal(fetchCalls[0].url, '/api/projects/p1/cover');
-  assert.deepEqual(fetchCalls[0].body, { asset: 'gen_2.png' }, '以资源文件名走 cover {asset} 通道');
+  assert.deepEqual(fetchCalls[0].body, { asset: 'gen_2.png', prompt: '完整提示词Y' },
+    '以资源文件名走 cover {asset} 通道，并随带生成时实际使用的完整提示词');
   assert.deepEqual(applied, [{ url: '/assets/gen_2.png', source: 'upload', updatedAt: 1 }], '后端封面写回 applyCover');
   assert.equal(changed, 1, 'onChanged 已通知列表刷新');
   assert.ok(messages.some((m) => String(m.text).includes('已保存为项目封面')), '对话里追加保存成功消息');

@@ -330,10 +330,11 @@ export function openCoverDialog(ctx = {}) {
         prompt: lastPrompt, negative: lastNegative, refs: refsPayload(),
       });
       const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
-      const g = d.generated || {};
+      // 生成结果带上实际使用的提示词：确认保存时原样回传落盘（只用这提示词、完整保存）
+      const g = { ...(d.generated || {}), prompt: d.prompt || lastPrompt, promptId: d.promptId || '' };
       ui.addMessage({
         role: 'assistant',
-        text: `✓ 封面已生成${secs}${refs.length ? ` · 参考图 ${refs.length} 张` : ''}，请在大图预览中确认后保存`,
+        text: `✓ 封面已生成${secs}${refs.length ? ` · 参考图 ${refs.length} 张` : ''}${d.promptId ? ` · 调用 ${d.promptId}` : ''}，请在大图预览中确认后保存`,
         images: [g.url].filter(Boolean),
         actions: [
           { label: '✓ 保存为封面', act: 'confirm-cover', primary: true },
@@ -419,8 +420,9 @@ export function openCoverDialog(ctx = {}) {
     placeholder: '描述你想要的封面（如「水墨风、留白多、带点孤寂感」）…',
     welcome: {
       role: 'assistant',
-      text: `我是封面创作助手，已了解《${p.name}》的资料${cover.url ? '，当前已有封面，可随时替换' : ''}。`
+      text: `我是封面创作助手，已了解《${p.name}》的资料${cover.url ? '，当前封面如下（点击可放大），可随时替换' : ''}。`
         + `${comfyReady ? '可以一句话告诉我方向，或直接选择：' : '⚠ 尚未配置 ComfyUI 出图工作流，生成前请先在设置中导入「导出(API)」工作流；也可以直接上传图片作封面。'}`,
+      images: cover.url ? [`${cover.url}${cover.url.includes('?') ? '&' : '?'}t=${cover.updatedAt || ''}`] : [],
       actions: [
         { label: '✦ 一键生成封面', act: 'one-click', primary: true, disabled: !comfyReady },
         { label: '⇧ 上传参考图', act: 'upload-refs' },
@@ -444,9 +446,9 @@ export function openCoverDialog(ctx = {}) {
       'confirm-cover': async (ui) => {
         if (!lastGenerated) return ui.addMessage({ role: 'assistant', text: '✗ 没有待确认的生成结果，请先生成封面' });
         try {
-          const d = await api(`/api/projects/${p.id}/cover`, { asset: lastGenerated.file });
+          const d = await api(`/api/projects/${p.id}/cover`, { asset: lastGenerated.file, prompt: lastGenerated.prompt || '' });
           applyCover(d.cover);
-          ui.addMessage({ role: 'assistant', text: '✓ 已保存为项目封面', images: [cover.url] });
+          ui.addMessage({ role: 'assistant', text: '✓ 已保存为项目封面（提示词已随封面完整保存）', images: [cover.url] });
           toast('项目封面已保存', 'ok');
           await ctx.onChanged?.();
         } catch (err) { ui.addMessage({ role: 'assistant', text: `✗ ${err.message}` }); }
@@ -524,9 +526,10 @@ export function openGeneratedConfirm({ project, ui = { addMessage: () => {} }, g
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
-      const d = await api(`/api/projects/${project.id}/cover`, { asset: generated.file });
+      // 随封面保存生成时实际使用的完整提示词（不截断），保证可复现
+      const d = await api(`/api/projects/${project.id}/cover`, { asset: generated.file, prompt: generated.prompt || '' });
       applyCover(d.cover);
-      ui.addMessage({ role: 'assistant', text: '✓ 已保存为项目封面', images: [d.cover?.url].filter(Boolean) });
+      ui.addMessage({ role: 'assistant', text: '✓ 已保存为项目封面（提示词已随封面完整保存）', images: [d.cover?.url].filter(Boolean) });
       toastFn('项目封面已保存', 'ok');
       await onChanged?.();
       done();
@@ -1165,11 +1168,30 @@ export function openProjectManager(ctx = {}) {
   }
 
   function renderVersions(body, p, s) {
+    const calls = (p.management?.coverCalls || []);
     body.innerHTML = `<div class="cf-section"><h4>项目快照</h4>
       <div class="cf-row"><button class="btn primary" data-act="snapshot">＋ 创建快照</button><span class="cf-note" style="margin:0">恢复前会自动为当前状态再存一个安全点</span></div>
       <div class="pmm-snaps">${snapshots.length ? snapshots.map((x) => `<div><span>${fmtTime(x.at)}</span><b>${x.nodeCount} 节点</b><span>${fmtBytes(x.size)}</span><button class="btn" data-restore="${x.at}">恢复</button></div>`).join('') : '<div class="pmm-empty">暂无快照</div>'}</div></div>
       <div class="cf-section"><h4>运行记录（最近 ${s.runCount || 0} 次）</h4>
         <div class="pmm-snaps">${(p.runs || []).slice(0, 8).map((r) => `<div><span>${fmtTime(r.finishedAt)}</span><b>${r.nodeCount} 节点 / ${r.waves} 波</b><span>${((r.durationMs || 0) / 1000).toFixed(1)}s · ${esc(r.status)}</span></div>`).join('') || '<div class="pmm-empty">暂无运行记录</div>'}</div></div>
+      <div class="cf-section"><h4>封面生成调用记录（最近 ${calls.length} 次）</h4>
+        <div class="pmm-snaps pmm-calls">${calls.map((c) => `<div class="pmm-call">
+          <span>${fmtTime(c.at)}</span>
+          <b class="${c.ok ? 'ok' : 'err'}">${c.ok ? '✓ 成功' : '✗ 失败'}</b>
+          <span>${((c.durationMs || 0) / 1000).toFixed(1)}s${c.refCount ? ` · 参考图 ${c.refCount} 张` : ''}${c.promptId ? ` · ${esc(c.promptId)}` : ''}</span>
+          <details><summary>过程日志</summary>
+            <div class="pmm-call-detail">
+              <div><b>提示词</b>${esc(cut(c.prompt, 200))}${String(c.prompt || '').length > 200 ? '…' : ''}</div>
+              ${c.negative ? `<div><b>负向</b>${esc(cut(c.negative, 120))}</div>` : ''}
+              ${(c.refs || []).length ? `<div><b>参考图</b>${esc(c.refs.join('、'))}</div>` : ''}
+              ${c.promptInjection ? `<div><b>提示词注入</b>${esc(c.promptInjection.positive ? `${c.promptInjection.positive.node}.${c.promptInjection.positive.input} · ${c.promptInjection.positive.strategy || ''}` : '未找到注入点')}${(c.promptInjection.warnings || []).length ? ` · ⚠ ${esc(c.promptInjection.warnings.join('；'))}` : ''}</div>` : ''}
+              ${c.applied?.length ? `<div><b>注入参数</b>${c.applied.map((a) => esc(`${a.node}.${a.input}(${a.by})`)).join('、')}</div>` : ''}
+              ${c.error ? `<div><b>错误</b>${esc(c.error)}</div>` : ''}
+              <div class="pmm-call-logs">${(c.logs || []).map((l) => `<div>${esc(l)}</div>`).join('')}</div>
+            </div>
+          </details>
+        </div>`).join('') || '<div class="pmm-empty">暂无调用记录</div>'}</div>
+        <div class="cf-note">每次 ComfyUI 封面生成（含失败）都会留档：所用完整提示词、参考图、提示词注入结果与运行日志。</div></div>
       <div class="cf-section"><h4>项目操作</h4><div class="cf-row">
         <button class="btn" data-act="duplicate">⧉ 复制项目</button>
         <button class="btn" data-act="export">⇩ 导出 JSON</button>
