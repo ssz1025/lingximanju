@@ -11,6 +11,7 @@ const state = {
 let saveTimer = null;
 let renderScheduled = false;
 let inspectorScheduled = false;
+let bigGraphHinted = false;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -190,7 +191,7 @@ function renderSidebar() {
   $('project-list').innerHTML = state.projects.map((p) => `
     <div class="project-item ${p.id === state.project?.id ? 'active' : ''}" data-id="${p.id}">
       <span class="pi-icon">◈</span>
-      <span class="pi-main"><span class="pi-name">${escapeHTML(p.name)}</span>
+      <span class="pi-main"><span class="pi-name">${escapeHTML(p.name)}${p.nodeCount > 0 && p.doneCount === p.nodeCount ? '<span class="pi-tag">全完成</span>' : ''}</span>
       <span class="pi-sub">${p.nodeCount} 节点 · ${p.doneCount} 已完成</span></span>
       <button class="pi-del" data-del="${p.id}" title="删除项目">×</button>
     </div>`).join('');
@@ -257,9 +258,16 @@ async function refreshProjects() {
 async function loadProject(id) {
   const p = await api(`/api/projects/${id}`);
   state.project = p; state.selected = []; state.movedByUser = false;
+  const savedViewport = p.viewport && Number.isFinite(p.viewport.zoom) && p.viewport.zoom > 0;
   canvas.setProject(p);
   updateHeader(); updateStats(); updateRunUI(); renderSidebar(); renderInspector();
-  setTimeout(() => canvas.fitView(), 60);
+  // 有保存过的视口就尊重它：大图强行 fit-all 会把节点缩到几十像素，看起来像空画布。
+  // 需要看全图时用画布右下角的「⤢ 适应视图」，节点全在视口外时也会自动出现回到内容按钮。
+  if (!savedViewport) setTimeout(() => canvas.fitView(), 60);
+  if (p.nodes.length > 20 && !bigGraphHinted) {
+    bigGraphHinted = true;
+    UI.toast(`已载入 ${p.nodes.length} 节点的完成示例 · 滚轮放大看细节，⤢ 查看全图`, 'ok');
+  }
 }
 async function applyTemplate(id) {
   if (!state.project) return;

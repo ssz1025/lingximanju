@@ -146,7 +146,7 @@ export class CanvasController {
   zoomAt(factor, sx, sy) {
     const r = this.rect();
     const px = sx - r.left, py = sy - r.top;
-    const nz = clamp(this.vp.zoom * factor, 0.2, 2.5);
+    const nz = clamp(this.vp.zoom * factor, 0.1, 2.5);
     if (nz === this.vp.zoom) return;
     this.vp.x = px - (px - this.vp.x) * (nz / this.vp.zoom);
     this.vp.y = py - (py - this.vp.y) * (nz / this.vp.zoom);
