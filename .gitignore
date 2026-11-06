@@ -1,4 +1,5 @@
 node_modules/
+release/
 .DS_Store
 data/projects/*.json
 data/assets/*

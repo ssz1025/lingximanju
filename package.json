@@ -3,12 +3,46 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
   "description": "无限画布 × 智能体制片流水线 · 零依赖 Node.js 全栈实现",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node server.mjs",
-    "check": "node --check server.mjs && node --check src/api/routes.mjs && node --check src/core/orchestrator.mjs"
+    "electron": "electron .",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux",
+    "check": "node --check server.mjs && node --check src/api/routes.mjs && node --check src/core/orchestrator.mjs && node --check electron/main.cjs"
   },
   "engines": { "node": ">=18" },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.lingximanju.app",
+    "productName": "lingximanju",
+    "directories": { "output": "release" },
+    "files": [
+      "server.mjs",
+      "src/**/*",
+      "public/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.graphics-design"
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Graphics"
+    }
+  },
   "license": "MIT"
 }

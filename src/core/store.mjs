@@ -4,7 +4,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-export const DATA_DIR = path.join(ROOT, 'data');
+// 数据目录解析优先级：
+// 1. LINGXIMANJU_DATA_DIR —— Electron 打包后由主进程注入（OS 用户数据目录），也可手动指定；
+// 2. 默认跟随仓库 ./data —— 源码/开发形态行为完全不变。
+export const DATA_DIR = process.env.LINGXIMANJU_DATA_DIR
+  ? path.resolve(process.env.LINGXIMANJU_DATA_DIR)
+  : path.join(ROOT, 'data');
 export const PROJECT_DIR = path.join(DATA_DIR, 'projects');
 export const ASSET_DIR = path.join(DATA_DIR, 'assets');
 export const PUBLIC_DIR = path.join(ROOT, 'public');
