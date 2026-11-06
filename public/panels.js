@@ -94,12 +94,20 @@ export async function openSettings(project, onSave) {
       <div class="cf-section">
         <h4>出图工作流库（关键帧 / 角色 / 转场 / 海报）</h4>
         <div class="cf-note">${esc(WF_HELP).replace(/\n/g, '<br>')}</div>
+        <div class="cf-row" style="margin-top:9px">
+          <button class="btn" id="cf-import-image" type="button">⇧ 导入 JSON</button>
+          <button class="btn" id="cf-testall-image" type="button">▶ 测试全部</button>
+        </div>
         <div class="wf-lib" id="cf-lib-image"></div>
       </div>
 
       <div class="cf-section">
         <h4>视频工作流库（图生视频 / 首尾帧 / 导演台）</h4>
         <div class="cf-note">选中项即当前生效的工作流，切换即时生效；无选中时该环节使用 Mock 自绘。测试 = 提交本地 ComfyUI 真实串行试跑一次。</div>
+        <div class="cf-row" style="margin-top:9px">
+          <button class="btn" id="cf-import-video" type="button">⇧ 导入 JSON</button>
+          <button class="btn" id="cf-testall-video" type="button">▶ 测试全部</button>
+        </div>
         <div class="wf-lib" id="cf-lib-video"></div>
       </div>
 
@@ -356,7 +364,96 @@ export async function openSettings(project, onSave) {
     });
   };
 
-  for (const kind of ['image', 'video']) { setupLib(kind); renderLib(kind); }
+  /* ---------- 批量真实试跑（进度经 SSE log 事件回显） ---------- */
+  let testES = null;
+  const testBatch = async (kind, ids) => {
+    if (!ids.length) { toast('库为空，先导入工作流', 'err'); return; }
+    ids.forEach((id) => testing.add(id));
+    renderLib(kind);
+    const box = root.querySelector('#cf-result');
+    box.hidden = false;
+    box.innerHTML = `<div class="wf-run"><span class="wf-spin"></span> 串行试跑 ${ids.length} 项 · 进度实时回显</div>`;
+    testES?.close();
+    testES = new EventSource('/api/events');
+    testES.onmessage = (ev) => {
+      let e; try { e = JSON.parse(ev.data); } catch { return; }
+      if (e.type !== 'log' || e.source !== 'wf-test') return;
+      if (!document.contains(box)) { testES?.close(); testES = null; return; }
+      const line = document.createElement('div');
+      if (e.level === 'error') line.className = 'err';
+      line.textContent = e.message;
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    };
+    try {
+      const d = await postJSON('/api/comfyui/test-batch', { kind, ids });
+      if (d.connectionError) throw new Error(d.connectionError);
+      applyConfig(d);
+      const ok = d.results.filter((x) => x.ok).length;
+      const fail = d.results.length - ok;
+      box.querySelector('.wf-run')?.remove();
+      box.insertAdjacentHTML('afterbegin',
+        `<b class="${fail ? 'err' : 'ok'}">${fail ? '试跑完成（存在失败项）' : '✓ 试跑全部成功'}</b> 成功 ${ok} · 失败 ${fail}`);
+      box.scrollTop = 0;
+      toast(`试跑完成：成功 ${ok} · 失败 ${fail}`, fail ? '' : 'ok');
+    } catch (e) {
+      const conn = /无法连接/.test(e.message);
+      box.querySelector('.wf-run')?.remove();
+      box.insertAdjacentHTML('afterbegin',
+        `<b class="err">✕ ${conn ? 'ComfyUI 连接失败' : '试跑失败'}</b> ${esc(e.message)}${conn ? ' · 请先启动 ComfyUI（--listen 127.0.0.1 --port 8188）' : ''}`);
+      box.scrollTop = 0;
+      toast(`试跑失败：${e.message}`, 'err');
+    } finally {
+      testES?.close(); testES = null;
+      ids.forEach((id) => testing.delete(id));
+      renderLib(kind);
+    }
+  };
+
+  /* ---------- 多选导入：入库 → toast 汇总 → 自动逐个串行试跑 ---------- */
+  const importLib = (kind) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = '.json,application/json';
+    input.onchange = async () => {
+      const files = Array.from(input.files || []);
+      if (!files.length) return;
+      const box = root.querySelector('#cf-result');
+      box.hidden = false;
+      const items = [];
+      const bad = [];
+      for (const f of files) {
+        try { items.push({ name: f.name.replace(/\.json$/i, ''), workflow: JSON.parse(await f.text()) }); }
+        catch { bad.push(f.name); }
+      }
+      if (bad.length) toast(`${bad.length} 个文件不是合法 JSON：${bad.join('、')}`, 'err');
+      if (!items.length) return;
+      box.textContent = `正在导入 ${items.length} 个文件…`;
+      try {
+        const d = await postJSON('/api/comfyui/library', { kind, items });
+        applyConfig(d);
+        const summary = `新增 ${d.added.length}${d.failed.length ? ` · 失败 ${d.failed.length}` : ''}`;
+        box.innerHTML = d.failed.length
+          ? `<b class="ok">✓ ${summary}</b><div class="cf-code" style="margin-top:6px">${d.failed.map((x) => `<div><b class="err">✕ ${esc(x.name)}</b> ${esc(x.error)}</div>`).join('')}</div>`
+          : `<b class="ok">✓ ${summary}</b> 已入库，开始自动串行试跑…`;
+        toast(summary, d.failed.length ? '' : 'ok');
+        if (d.added.length) await testBatch(kind, d.added.map((x) => x.id));
+      } catch (e) {
+        box.innerHTML = `<b class="err">✕ 导入失败</b> ${esc(e.message)}`;
+        toast(`导入失败：${e.message}`, 'err');
+      }
+    };
+    input.click();
+  };
+
+  for (const kind of ['image', 'video']) {
+    setupLib(kind);
+    renderLib(kind);
+    root.querySelector(`#cf-import-${kind}`).addEventListener('click', () => importLib(kind));
+    root.querySelector(`#cf-testall-${kind}`).addEventListener('click', () =>
+      testBatch(kind, (cfg[libKey(kind)] || []).map((e) => e.id)));
+  }
 }
 
 /* ---------- 新建项目 ---------- */
