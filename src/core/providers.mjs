@@ -304,22 +304,36 @@ export function createProviders(settings = {}, log = () => {}) {
     };
   }
 
-  async function callLLM(system, user, signal) {
-    const base = String(settings.baseUrl).replace(/\/+$/, '');
-    const url = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
-      body: JSON.stringify({
-        model: settings.model || 'gpt-4o-mini',
-        temperature: 0.7,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      }),
-      signal,
-    });
-    if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 160)}`);
-    const json = await res.json();
-    return extractJSON(json?.choices?.[0]?.message?.content || '');
+  // 端点挂起兜底：LLM 调用没有超时会让节点永久卡死；超时按普通失败处理，回退 Mock
+  const LLM_TIMEOUT_MS = Number(settings.llmTimeoutMs) || 120_000;
+
+  async function callLLM(system, user, callerSignal) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error(`LLM 调用超时（${LLM_TIMEOUT_MS / 1000}s）`)), LLM_TIMEOUT_MS);
+    const onAbort = () => ctrl.abort(callerSignal?.reason);
+    const attached = Boolean(callerSignal) && !callerSignal.aborted;
+    if (callerSignal?.aborted) ctrl.abort(callerSignal.reason);
+    else if (attached) callerSignal.addEventListener('abort', onAbort, { once: true });
+    try {
+      const base = String(settings.baseUrl).replace(/\/+$/, '');
+      const url = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
+        body: JSON.stringify({
+          model: settings.model || 'gpt-4o-mini',
+          temperature: 0.7,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 160)}`);
+      const json = await res.json();
+      return extractJSON(json?.choices?.[0]?.message?.content || '');
+    } finally {
+      clearTimeout(timer);
+      if (attached) callerSignal.removeEventListener('abort', onAbort);   // 长运行中避免在 run 级 signal 上堆积监听器
+    }
   }
 
   async function generate(intent, vars = {}, signal) {
