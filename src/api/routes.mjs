@@ -1,7 +1,7 @@
 // REST + SSE 路由层
 import fs from 'node:fs';
 import path from 'node:path';
-import { listProjects, loadProject, saveProject, deleteProject, uid, readAsset,
+import { listProjects, loadProject, saveProject, deleteProject, uid, assetPath,
   writeAssetBinary, writeSnapshot, listSnapshots, readSnapshot, EXAMPLES_DIR } from '../core/store.mjs';
 import { emit, subscribe } from '../core/events.mjs';
 import { autoLayout, validate } from '../core/graph.mjs';
@@ -28,16 +28,27 @@ function json(res, data, status = 200) {
   res.end(body);
 }
 
-function binary(res, buf, filename, type = 'application/octet-stream') {
-  if (!buf) return json(res, { error: '文件不存在或已被清理' }, 404), true;
+/** 资产磁盘绝对路径（存在且为文件才返回），避免为判存在性把整个 zip/mp4 读进内存 */
+function assetFile(name) {
+  const file = name ? assetPath(name) : null;
+  try { return file && fs.statSync(file).isFile() ? file : null; } catch { return null; }
+}
+
+/** 流式下发资产：成片/导演包可达数百 MB，整读内存会放大峰值且客户端断开后无法释放 */
+function streamAsset(res, name, filename, type = 'application/octet-stream') {
+  const file = assetFile(name);
+  if (!file) return json(res, { error: '文件不存在或已被清理' }, 404), true;
   const safe = String(filename).replace(/[^A-Za-z0-9_.-]/g, '_');
   res.writeHead(200, {
     'Content-Type': type,
-    'Content-Length': buf.length,
+    'Content-Length': fs.statSync(file).size,
     'Content-Disposition': `attachment; filename="${safe}"`,
     'Cache-Control': 'no-store',
   });
-  res.end(buf);
+  const stream = fs.createReadStream(file);
+  stream.on('error', () => res.destroy());
+  res.on('close', () => stream.destroy());   // 客户端中途断开即释放文件句柄
+  stream.pipe(res);
   return true;
 }
 
@@ -601,14 +612,14 @@ export async function handleApi(req, res, url) {
       }
       if (method === 'GET') {
         const existing = project.nodes.find((n) => n.type === 'final')?.data?.directorPack;
-        const info = existing?.file && readAsset(existing.file) ? existing : exportDirectorPack(project, cfg);
-        return binary(res, readAsset(info.file), info.filename, 'application/zip'), true;
+        const info = existing?.file && assetFile(existing.file) ? existing : exportDirectorPack(project, cfg);
+        return streamAsset(res, info.file, info.filename, 'application/zip'), true;
       }
     }
     if (kind === 'film' && method === 'GET') {
       const film = project.nodes.find((n) => n.type === 'final')?.data?.film;
       if (!film?.file) return json(res, { error: '尚未生成成片，请先运行流水线并接入 ComfyUI 视频工作流' }, 404), true;
-      return binary(res, readAsset(film.file), `lingximanju-${project.id}.mp4`, 'video/mp4'), true;
+      return streamAsset(res, film.file, `lingximanju-${project.id}.mp4`, 'video/mp4'), true;
     }
   }
 
