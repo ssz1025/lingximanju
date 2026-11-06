@@ -1,0 +1,37 @@
+{
+  "_comment": "lingximanju 图生视频工作流示例（MiniMax H3 / Wan / LTX 等节点可替换）。首帧由 lingximanju 自动上传到 ComfyUI input 并写入 LoadImage.image；{{frames}} / {{fps}} / {{width}} / {{height}} 可按镜头时长注入。请优先使用本机「导出(API)」的真实工作流。",
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "lingximanju_reference.png" }
+  },
+  "9": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "qwen3vl.safetensors", "type": "minimax" }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "{{prompt}}", "clip": ["9", 0] }
+  },
+  "3": {
+    "class_type": "MiniMaxH3ImageToVideo",
+    "inputs": {
+      "num_frames": 124,
+      "fps": 24,
+      "width": 864,
+      "height": 480,
+      "image": ["1", 0],
+      "prompt": ["2", 0]
+    }
+  },
+  "4": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "{{filename_prefix}}",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "images": ["3", 0]
+    }
+  }
+}

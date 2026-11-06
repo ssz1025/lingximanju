@@ -1,0 +1,14 @@
+{
+  "name": "lingximanju",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "无限画布 × 智能体制片流水线 · 零依赖 Node.js 全栈实现",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "check": "node --check server.mjs && node --check src/api/routes.mjs && node --check src/core/orchestrator.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}
