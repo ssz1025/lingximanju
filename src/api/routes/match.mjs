@@ -8,6 +8,14 @@ export const MATCH = {
   deliverable: /^\/api\/projects\/([^/]+)\/(director-pack|film)$/,
   cover: /^\/api\/projects\/([^/]+)\/cover$/,
   coverGenerate: /^\/api\/projects\/([^/]+)\/cover\/generate$/,
+  // AI 生成封面提示词：按项目名 / 简介 / 小说摘要产出可编辑的文生图提示词
+  coverPrompt: /^\/api\/projects\/([^/]+)\/cover\/prompt$/,
+  // 角色管理：从小说提取角色 / 生成角色多视图（字面尾段，先于通用模式）
+  charExtract: /^\/api\/projects\/([^/]+)\/characters\/extract$/,
+  charViews: /^\/api\/projects\/([^/]+)\/characters\/views$/,
+  // AI 生成小说（大纲 / 整本注入）与 AI 补全项目信息（创作设定）
+  novelAi: /^\/api\/projects\/([^/]+)\/novel\/ai$/,
+  bibleAi: /^\/api\/projects\/([^/]+)\/bible\/ai$/,
   assets: /^\/api\/assets\/?$/,
   // 字面路径优先于下面的 :file 模式匹配（reindex 本身也匹配 [a-zA-Z0-9_.-]+）
   assetReindex: /^\/api\/assets\/reindex$/,

@@ -14,9 +14,13 @@
 |---|---|---|
 | 显式绑定 | `settings.bindings.image/video = [{node:'6', input:'text', value:'{{prompt}}'}]` | 节点 ID 不常规、需要精确控制 |
 | 占位符 | 在工作流任意字符串输入里写 `{{prompt}}` `{{negative_prompt}}` `{{seed}}` `{{width}}` `{{height}}` `{{frames}}` `{{fps}}` `{{duration}}` `{{filename_prefix}}` `{{title}}` `{{shot_no}}` | 最直观，推荐 |
-| 自动识别 | 按 `class_type` 定位：第一个/第二个 `CLIPTextEncode.text` → 正/负提示词；`seed/noise_seed` → 每次随机（避开 ComfyUI 缓存）；`width/height`；`num_frames/frame_count/length` → 镜头时长 × fps；`fps`；`filename_prefix`；`LoadImage.image`；`SaveImage`/`VHS_VideoCombine` 等输出节点 | 不想改工作流时 |
+| 自动识别 | 沿图回溯 `KSampler.positive/negative → CLIPTextEncode → 上游字符串节点`，定位真正的提示词源；`seed/noise_seed/sampling_mode.seed` → 每次随机（避开 ComfyUI 缓存）；`width/height`；`num_frames/frame_count/length` → 镜头时长 × fps；`fps`；`filename_prefix`；`LoadImage.image`；`SaveImage`/`VHS_VideoCombine` 等输出节点 | 不想改工作流时 |
 
-运行时链路：`POST /upload/image`（上传首帧 / 角色参考，SVG 自动渲染成 PNG）→ `POST /prompt` → 轮询 `GET /history/{prompt_id}` → `GET /view` 下载产物到 `data/assets/` → 回填到画布节点。支持超时、取消、`node_errors` 可读化；`strict=false`（默认）时失败自动回退 Mock 并在日志标注。
+> ⚠️ **「所有镜头生成的都是同一张图」的根因**：Krea2 / Qwen-Image / Flux 等现代工作流把提示词放在 `PrimitiveStringMultiline`、`StringConcatenate`、`TextGenerate`（提示词润色）或 `Switch` 里，`CLIPTextEncode.text` 只是连线 `[节点ID, 0]`。旧版只认「`CLIPTextEncode.text` 是字符串」的节点，于是一个提示词都不注入，每次都沿用工作流里写死的那句话，只剩随机种子带来一点姿态差异。现在注入器会沿输入连线回溯，自动找到真正的用户提示词节点（例如 Krea2 的 `30:19.value`「Text String (User Prompt)」），并**跳过系统提示词、LoRA 触发词与负向链路**；确实找不到任何文本源时，才兜底把提示词直接写进 `CLIPTextEncode.text`（会绕过润色链路，同时在日志告警）。
+
+**自检**：设置页「⌗ 提示词注入自检」在打开面板时自动本地干跑一次（不连 ComfyUI），显示两份生效工作流把提示词写到了哪个节点、用的什么策略（`binding` / `placeholder` / `clipText` / `primitive` / `overrideLink`）。若显示「✕ 有风险 / 未找到注入点」，说明该工作流仍会产出雷同画面 —— 请在提示词节点写 `{{prompt}}`，或用显式绑定指定节点。运行日志同样回显注入位置，例如 `提示词 → 30:19.value「Text String (User Prompt)」· primitive · "雨夜霓虹街头…"`。
+
+运行时链路：`POST /upload/image`（上传首帧 / 角色参考，SVG 自动渲染成 PNG）→ `POST /prompt` → 轮询 `GET /history/{prompt_id}` → `GET /view` 下载产物到 `data/assets/` → 回填到画布节点。每次运行的 `filename_prefix` 带唯一后缀，避免自定义输出节点复用同名文件。支持超时、取消、`node_errors` 可读化；`strict=false`（默认）时失败自动回退 Mock 并在日志标注。
 
 ### 3. 两种最终产物
 
@@ -47,8 +51,9 @@ extra/manifest.json / README.md    来源信息与导入步骤
 |---|---|---|
 | GET / PUT | `/api/comfyui/config` | 读取 / 保存全局连接与工作流配置 |
 | POST | `/api/comfyui/test` | 探测 `/system_stats`，返回版本与设备 |
-| POST | `/api/comfyui/analyze` | 分析一份工作流，返回可注入节点清单 |
-| POST | `/api/comfyui/run-test` | 用当前配置试跑一次工作流 |
+| POST | `/api/comfyui/analyze` | 分析工作流（可传 `kind` 取当前生效工作流），返回可注入节点清单 + `promptInjection` 干跑计划 |
+| POST | `/api/comfyui/inject-check` | 本地干跑自检：图片 / 视频两份生效工作流的提示词注入位置、策略与告警 |
+| POST | `/api/comfyui/run-test` | 用当前配置试跑一次工作流，响应含 `promptInjection` |
 | GET / POST | `/api/projects/:id/director-pack` | 下载 / 重新生成导演包 |
 | GET | `/api/projects/:id/film` | 下载拼接后的成片 MP4 |
 

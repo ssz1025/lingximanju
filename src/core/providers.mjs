@@ -3,7 +3,7 @@
 // - openai：任意 OpenAI 兼容 /chat/completions，失败自动回退 mock
 // - comfyui：图片 / 视频直接提交本地 ComfyUI 导出的 API 格式 workflow（主路径）
 import { uid, writeAsset, readAsset } from './store.mjs';
-import { hash, storyboardSVG, characterSVG, transitionSVG, posterSVG } from './artwork.mjs';
+import { hash, storyboardSVG, characterSVG, characterViewSVG, transitionSVG, posterSVG } from './artwork.mjs';
 import { parseWorkflow, runWorkflow } from './comfyui.mjs';
 import { placeholderFrame } from './raster.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './knowledge.mjs';
@@ -13,10 +13,17 @@ const SCHEMAS = {
   events: '事件图谱：{events:[{title,summary,processChain:[字符串],scenes:[{title,location,time,summary}]}]}',
   shots: '分镜表：{shots:[{shotNo,size,angle,movement,ffDesc,motionDesc,audioDesc,duration,characters:[名称]}]}',
   characters: '角色设定：{characters:[{name,role,appearance,palette:[颜色],traits:[字符串]}]}',
+  charExtract: '角色抽取：{characters:[{name,aliases:[string],role,gender,age,personality,appearance,hair,costume,props,relations:[{target,label}],palette:[颜色],viewPrompt}]}',
   cameras: '机位依赖图：{cameras:[{id,label,shotNos:[数字],parent,reason}]}',
   context: '检索结果：{query, passages:[字符串], notes:[字符串]}',
   spatial: '转场说明：{fromCam,toCam,spatialNotes,axisRule,cameraPath}',
   review: '评审：{reason, highlights:[字符串]}',
+  coverPrompt: '封面文生图提示词：{prompt:string(可直接喂 SDXL 的完整正向提示词), negative:string(负向提示词), style:string}（输出该 JSON 对象本身，不要加外层键名包裹）',
+  // 项目信息 AI 补全：按一句话构想产出创作设定各字段（bible）
+  storyIdea: '项目信息补全：{title, genre, audience, logline, tone, artStyle, firstEpisodeTheme, worldview}（logline 为一句话简介，worldview 200 字以内）',
+  // AI 生成小说：先出分章大纲，再逐章写正文
+  novelOutline: '小说分章大纲：{title, genre, logline, chapters:[{title, summary, hook}]}（title 形如「第X章 · 标题」，summary 80 字内，hook 为结尾悬念句）',
+  novelChapter: '小说章节正文：{title, text}（text 为该章完整正文，简体中文小说文体，多段落，不含章节标题行，不写「本章完」）',
 };
 
 const THEMES = [
@@ -183,6 +190,29 @@ function mockGenerate(intent, vars = {}) {
         })),
       };
     }
+    case 'charExtract': {
+      // 用启发式候选名 / 主题角色映射成完整角色属性结构，零 Key 可跑通角色提取
+      const candidates = Array.isArray(vars.candidates) && vars.candidates.length
+        ? vars.candidates : theme.chars.map((c) => ({ name: c.name, hits: 1 }));
+      return {
+        characters: candidates.slice(0, 8).map((c, i) => ({
+          name: c.name,
+          aliases: [],
+          role: ['主角', '关键配角', '反派', '线索人物'][i % 4],
+          gender: ['男', '女'][i % 2],
+          age: ['18岁上下', '25岁上下', '30岁上下', '16岁上下'][i % 4],
+          personality: '动机连贯，立场鲜明，能在冲突中保持稳定的性格特征。',
+          appearance: theme.chars.find((t) => t.name === c.name)?.appearance
+            || `${c.name}的外貌由角色属性驱动，${theme.styleHint} 画面下辨识度高。`,
+          hair: '发型颜色与整体配色一致',
+          costume: '与身份相符的日常服装，颜色呼应主配色',
+          props: '随身物件待补充',
+          relations: i > 0 ? [{ target: candidates[0].name, label: '同伴' }] : [],
+          palette: ['#0b111c', ['#3a506b', '#6b4f8a', '#7a6fc4', '#3f6b5c'][i % 4], '#ff9a5c'],
+          viewPrompt: '',
+        })),
+      };
+    }
     case 'cameras': {
       const shots = vars.shots || [];
       const groups = [];
@@ -224,19 +254,128 @@ function mockGenerate(intent, vars = {}) {
     case 'review': {
       return { reason: '候选与镜头规格的语义对齐度更高，角色身份与空间布局更稳定。', highlights: ['构图符合景别', '角色可辨识', '光照方向一致'] };
     }
+    case 'coverPrompt': {
+      // 封面文生图提示词：片名 + 剧情梗概 + 电影海报视觉要求，可直接喂 SDXL；
+      // 与 management.buildCoverPrompt 同构，作为零 Key / LLM 失败时的确定性回退
+      const title = String(vars.title || '').trim().slice(0, 40) || shortTitle(idea) || '未命名故事';
+      const gist = String(vars.logline || vars.summary || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+        || String(idea).replace(/\s+/g, ' ').trim().slice(0, 160)
+        || (Array.isArray(vars.episodes) && vars.episodes.length ? String(vars.episodes[0]?.summary || '').slice(0, 160) : '');
+      const custom = String(vars.custom || '').trim().slice(0, 400);
+      const subject = custom || gist || '一部富有戏剧张力的故事';
+      return {
+        prompt: `电影海报风格的项目封面插画，片名《${title}》，${subject}，` +
+          `cinematic movie poster, dramatic cinematic lighting, rich atmosphere, centered composition, ` +
+          `highly detailed, film grain, no text, no watermark, no lettering`,
+        negative: 'text, watermark, logo, lettering, caption, low quality, blurry, deformed',
+        style: vars.style || theme.styleHint,
+      };
+    }
+    case 'storyIdea': {
+      // 项目信息 AI 补全：一句话构想 → 创作设定各字段；零 Key 时用主题模板确定性生成
+      const name = String(vars.title || '').trim() || shortTitle(idea) || '未命名项目';
+      const brief = String(vars.idea || '').replace(/\s+/g, ' ').trim();
+      return {
+        title: name,
+        genre: theme.genre,
+        audience: '16–30 岁 · 短剧 / 漫剧观众',
+        logline: brief.slice(0, 80) || `《${name}》：${theme.scenes[0].summary}；${theme.scenes[2].summary}。`,
+        tone: '张弛有度 · 情绪浓度高',
+        artStyle: vars.style || theme.styleHint,
+        firstEpisodeTheme: theme.scenes[0].summary,
+        worldview: `以「${theme.genre}」为基调的近现实世界观：${theme.scenes.map((s) => s.location).join('、')}是主要舞台，${theme.chars.map((c) => c.name).join('、')}的命运在此交汇。`,
+      };
+    }
+    case 'novelOutline': {
+      const count = Math.max(1, Math.min(8, Number(vars.chapterCount) || 3));
+      const title = String(vars.title || '').trim() || NOVEL_TITLES[theme.key] || NOVEL_TITLES.general;
+      return {
+        title,
+        genre: theme.genre,
+        logline: String(vars.idea || '').slice(0, 80) || `${theme.scenes[0].summary}，${theme.chars[0].name}被卷入其中。`,
+        chapters: Array.from({ length: count }, (_, i) => {
+          const scene = theme.scenes[i % theme.scenes.length];
+          const last = i === count - 1;
+          return {
+            title: `第${CN_NUM[i] || i + 1}章 · ${shortTitle(scene.location) || `转折 ${i + 1}`}`,
+            summary: last ? `${scene.summary}，所有线索收束，真相浮出水面。` : `${scene.summary}，${theme.chars[i % theme.chars.length].name}决定追查到底。`,
+            hook: last ? '故事在黎明前抵达终点，也抵达了新的起点。' : `就在这时，${theme.chars[(i + 1) % theme.chars.length].name}带来了一个谁也没想到的消息。`,
+          };
+        }),
+      };
+    }
+    case 'novelChapter': {
+      const ch = {
+        title: String(vars.chapterTitle || vars.title || '第一章'),
+        summary: String(vars.summary || ''),
+        hook: String(vars.hook || ''),
+      };
+      return {
+        title: ch.title,
+        text: mockChapterText(theme, ch, {
+          chapterChars: vars.chapterChars,
+          index: Number(vars.index) || 0,
+          total: Number(vars.total) || 1,
+        }),
+      };
+    }
     default:
       return { text: `${intent} 的模拟输出`, seed };
   }
 }
 
+/** AI 小说 Mock 素材：确定性段落模板，围绕主题角色与场景生成可读正文 */
+const NOVEL_TITLES = { noir: '雨夜来信', scifi: '坐标之外', youth: '夏末纸条', general: '未命名故事' };
+const CN_NUM = ['一', '二', '三', '四', '五', '六', '七', '八'];
+
+function mockChapterText(theme, ch, opts = {}) {
+  const target = Math.max(300, Math.min(2000, Number(opts.chapterChars) || 800));
+  const [c0, c1, c2] = [theme.chars[0], theme.chars[1 % theme.chars.length], theme.chars[2 % theme.chars.length] || theme.chars[0]];
+  const scene = theme.scenes[(opts.index || 0) % theme.scenes.length];
+  const beats = [
+    `${scene.time}的${scene.location}比往日更安静。${c0.name}站在${['街角', '窗前', '灯影里'][opts.index % 3 || 0]}，${c0.appearance || ''}，目光落在${ch.hook ? '远处' : '手里的东西上'}。${String(ch.summary || scene.summary).replace(/。$/, '')}，这件事从一开始就不像看上去那么简单。`,
+    `「${opts.index === 0 ? '你确定要从这里开始吗？' : '线索到这里就断了。'}」${c1.name}${['低声问', '抬起眼', '把声音压得很低'][opts.index % 3 || 0]}。${c1.appearance || ''}。${c0.name}没有立刻回答，只是${['把那张纸又看了一遍', '望向雨幕深处', '轻轻摇了摇头'][opts.index % 3 || 0]}。`,
+    `回忆像潮水一样涌上来。${scene.summary}——那是所有事情的起点。${c2.name}曾经说过：「真相不会自己走出来，它要等一个愿意弯腰的人。」这句话，${c0.name}一直记到现在。`,
+    `时间一点点过去，${scene.location}的光线慢慢变了。${c0.name}终于开口：「${opts.total > (opts.index || 0) + 1 ? '继续查下去，不管结局是什么。' : '现在，是时候把这一切讲完了。'}」${c1.name}点了点头，两个人都没有再说话。`,
+    `${ch.hook ? `直到${ch.hook.replace(/。$/, '')}，${c0.name}才意识到，真正的答案一直藏在最显眼的地方。` : `风从${scene.location}穿过，吹散了最后一点犹豫。`}故事还远没有结束，但方向已经清晰。`,
+  ];
+  let text = beats.join('\n\n');
+  // 不足目标字数时按确定性顺序循环补段（内容围绕主题，不重复整段）
+  let i = 0;
+  while (text.length < target) {
+    const s = theme.scenes[i % theme.scenes.length];
+    text += `\n\n${s.time}，${s.location}。${s.summary}。${theme.chars[i % theme.chars.length].name}在这里停留了很久，把每一个细节都记进心里——这些细节，后来都成了拼图上不可或缺的一块。`;
+    i += 1;
+  }
+  return text.slice(0, target + 80);
+}
+
 function mergeDefaults(intent, real, vars) {
   const base = mockGenerate(intent, vars);
-  if (!real || typeof real !== 'object') return base;
-  const merged = { ...base, ...real };
+  const merged = { ...base, ...(real && typeof real === 'object' ? real : {}) };
+  // 真实输出缺字段时由 Mock 补位——逐键标注补位来源，避免模板内容冒充 LLM 产物
+  const mockKeys = [];
   for (const key of Object.keys(base)) {
-    if (Array.isArray(base[key]) && (!Array.isArray(merged[key]) || !merged[key].length)) merged[key] = base[key];
+    const v = merged[key];
+    const empty = v === undefined || v === null || v === ''
+      || (Array.isArray(base[key]) && (!Array.isArray(v) || !v.length));
+    if (empty) merged[key] = base[key];
+    if (empty || !(real && typeof real === 'object' && key in real)) mockKeys.push(key);
   }
-  return merged;
+  return mockKeys.length ? { ...merged, __mockKeys: mockKeys } : merged;
+}
+
+/** 模型常把结果包进以任务命名的单键里（如 {"cover文生图提示词":"{\"prompt\":...}"}），递归解包 */
+function unwrapNested(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  const keys = Object.keys(obj);
+  if (keys.length === 1 && typeof obj[keys[0]] === 'string') {
+    const inner = obj[keys[0]].trim();
+    if (inner.startsWith('{')) {
+      try { return unwrapNested(JSON.parse(inner)); } catch { /* 值不是 JSON，保持原样 */ }
+    }
+  }
+  return obj;
 }
 
 function extractJSON(text = '') {
@@ -244,7 +383,7 @@ function extractJSON(text = '') {
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start < 0 || end <= start) throw new Error('响应中没有 JSON 对象');
-  return JSON.parse(cleaned.slice(start, end + 1));
+  return unwrapNested(JSON.parse(cleaned.slice(start, end + 1)));
 }
 
 export function createProviders(settings = {}, log = () => {}, onUsage = null) {
@@ -398,7 +537,8 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     if (comfyWorkflows.image) {
       try {
         const ref = referenceBuffer((opts.refs || [])[0], { seed, shotNo, style });
-        const fullPrompt = `${prompt}｜${size}｜${angle}｜${movement}｜${style}`;
+        // 角色多视图提示词已含视图角度，不再叠加景别/机位默认值
+        const fullPrompt = kind === 'character-view' ? `${prompt}｜${style}` : `${prompt}｜${size}｜${angle}｜${movement}｜${style}`;
         const result = await runComfy('image', {
           prompt: fullPrompt, seed: `${kind}-${seed}-${shotNo}`, style, shotNo,
           filenamePrefix: `lingximanju_${kind}_${shotNo}`,
@@ -433,6 +573,7 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     await delay(180 + (hash(seed + prompt) % 320), signal);
     let svg;
     if (kind === 'character') svg = characterSVG({ name: label, appearance: prompt, style, seed });
+    else if (kind === 'character-view') svg = characterViewSVG({ name: label, appearance: prompt, view: opts.view, palette: opts.palette, style, seed });
     else if (kind === 'transition') svg = transitionSVG({ from: opts.from, to: opts.to, style, seed });
     else if (kind === 'poster') svg = posterSVG({ title: label, shotCount: opts.shotCount || 0, duration: opts.duration || 0, style });
     else svg = storyboardSVG({ title: label, shotNo, size, angle, movement, prompt, style, characters, seed, kind });

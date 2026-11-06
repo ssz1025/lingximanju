@@ -50,10 +50,12 @@ function cellMedia(a) {
  * @param {object} o
  * @param {'manage'|'pick'} o.mode    manage=管理（筛选/搜索/打标/预览/删除）；pick=选择并回调
  * @param {'all'|'image'|'video'} o.accept  pick 模式下限制可选类型
- * @param {(asset)=>void} o.onPick    pick 模式选中回调
+ * @param {boolean} [o.multi]        pick 模式多选：点击勾选，确认后按勾选顺序回调全部所选
+ * @param {(asset)=>void} o.onPick    pick 模式选中回调；multi 模式下回调资产数组
  */
 export function openAssetLibrary(o = {}) {
   const mode = o.mode === 'pick' ? 'pick' : 'manage';
+  const multi = mode === 'pick' && o.multi === true;
   const accept = ['image', 'video'].includes(o.accept) ? o.accept : 'all';
   let assets = [];
   let stats = null;
@@ -91,6 +93,16 @@ export function openAssetLibrary(o = {}) {
     }).sort(SORTS[sortBy]?.fn || SORTS.new.fn);
   }
 
+  /** 多选挑选模式：勾选变化后就地刷新计数 / 按钮（不重绘，保持滚动与焦点） */
+  function updatePickBar() {
+    backdrop.querySelectorAll('.asset-selbar b').forEach((b) => { b.textContent = String(selSet.size); });
+    backdrop.querySelectorAll('[data-pick-confirm]').forEach((b) => {
+      b.toggleAttribute('disabled', !selSet.size);
+      b.textContent = `✓ 使用所选（${selSet.size}）`;
+    });
+    backdrop.querySelector('[data-sel-clear]')?.toggleAttribute('disabled', !selSet.size);
+  }
+
   function render() {
     const shown = visible();
     const kindChips = KIND_ORDER.map((k) => {
@@ -114,7 +126,7 @@ export function openAssetLibrary(o = {}) {
 
     const st = stats ? `共 ${stats.total} 项 · ${fmtBytes(stats.bytes)}${stats.tagCount ? ` · ${stats.tagCount} 个标签` : ''}` : `${assets.length} 项`;
     backdrop.innerHTML = `<div class="modal asset-modal" role="dialog" aria-label="资源库">
-      <div class="pmm-head"><div><h2>▣ 资源库</h2><div class="sub">${mode === 'pick' ? '点击资源即可选用' : `${st} · 生成的封面 / 角色 / 片段统一管理，可打标签跨项目复用`}</div></div>
+      <div class="pmm-head"><div><h2>▣ 资源库</h2><div class="sub">${mode === 'pick' ? (multi ? '点击勾选，可多选后按勾选顺序使用' : '点击资源即可选用') : `${st} · 生成的封面 / 角色 / 片段统一管理，可打标签跨项目复用`}</div></div>
         <button class="icon-btn" data-act="close" aria-label="关闭">✕</button></div>
       <div class="asset-toolbar">
         <div class="asset-filters">${kindChips}</div>
@@ -126,6 +138,10 @@ export function openAssetLibrary(o = {}) {
         </div>
       </div>
       ${(tagChips || projChips) ? `<div class="asset-filters sub">${tagChips}${projChips}${activeTags}</div>` : ''}
+      ${multi ? `<div class="asset-selbar"><b>${selSet.size}</b> 项已选（按勾选顺序返回）
+        <button class="btn sm" data-sel-all>全选本页</button>
+        <button class="btn sm" data-sel-clear ${selSet.size ? '' : 'disabled'}>清空</button>
+        <button class="btn sm primary" data-pick-confirm ${selSet.size ? '' : 'disabled'}>✓ 使用所选（${selSet.size}）</button></div>` : ''}
       ${selMode && mode === 'manage' ? `<div class="asset-selbar"><b>${selSet.size}</b> 项已选
         <button class="btn sm" data-sel-all>全选本页</button>
         <button class="btn sm primary" data-batch-tag ${selSet.size ? '' : 'disabled'}>批量打标</button>
@@ -135,6 +151,7 @@ export function openAssetLibrary(o = {}) {
       <div class="modal-actions">${mode === 'manage' ? `<button class="btn" data-act="orphan" title="删除未被任何项目引用的资源">⌫ 清理孤儿</button>
         <button class="btn" data-act="reindex">↻ 重扫目录</button>
         <button class="btn${selMode ? ' primary' : ''}" data-act="sel-toggle">${selMode ? '☑ 完成多选' : '☑ 多选'}</button>` : ''}
+        ${multi ? `<button class="btn primary" data-pick-confirm ${selSet.size ? '' : 'disabled'}>✓ 使用所选（${selSet.size}）</button>` : ''}
         <button class="btn" data-act="close">关闭</button></div>
     </div>`;
 
@@ -164,6 +181,14 @@ export function openAssetLibrary(o = {}) {
       } catch (err) { toast(err.message, 'err'); }
     });
     backdrop.querySelector('[data-batch-tag]')?.addEventListener('click', () => batchTagDialog());
+    backdrop.querySelector('[data-sel-clear]')?.addEventListener('click', () => { selSet.clear(); render(); });
+    backdrop.querySelectorAll('[data-pick-confirm]').forEach((btn) => btn.addEventListener('click', () => {
+      if (!selSet.size) return;
+      // 按勾选顺序返回（Set 保持插入序），供多参考图这类「顺序有意义」的场景使用
+      const list = [...selSet].map((file) => assets.find((a) => a.file === file)).filter(Boolean);
+      close();
+      o.onPick?.(list);
+    }));
     backdrop.querySelector('[data-act="orphan"]')?.addEventListener('click', async () => {
       try {
         const d = await api('/api/assets/orphans');
@@ -199,7 +224,8 @@ export function openAssetLibrary(o = {}) {
             ${(a.tags || []).length ? `<span class="asset-tags">${a.tags.map((t) => `<i>#${esc(t)}</i>`).join('')}</span>` : ''}
             ${a.sourceProjectName ? `<span class="asset-src" title="来源项目">⌂ ${esc(a.sourceProjectName)}</span>` : ''}
           </div>
-          ${mode === 'pick' ? '<span class="asset-pick-badge">选择</span>'
+          ${multi ? `<span class="asset-check${selSet.has(a.file) ? ' on' : ''}">${selSet.has(a.file) ? '✓' : ''}</span>`
+            : mode === 'pick' ? '<span class="asset-pick-badge">选择</span>'
             : selMode ? `<span class="asset-check${selSet.has(a.file) ? ' on' : ''}">${selSet.has(a.file) ? '✓' : ''}</span>`
             : `<button class="asset-del" data-del="${esc(a.file)}" title="删除资源">✕</button>`}
         </div>`).join('')}</div>`;
@@ -211,7 +237,16 @@ export function openAssetLibrary(o = {}) {
         if (e.target.closest('[data-del]') || e.target.closest('[data-edit]')) return;
         const a = assets.find((x) => x.file === cell.dataset.file);
         if (!a) return;
-        if (mode === 'pick') { close(); o.onPick?.(a); return; }
+        if (mode === 'pick') {
+          if (!multi) { close(); o.onPick?.(a); return; }
+          // 多选：点击 = 勾选/取消，确认后按勾选顺序一次性回调
+          if (selSet.has(a.file)) selSet.delete(a.file); else selSet.add(a.file);
+          cell.classList.toggle('selected', selSet.has(a.file));
+          cell.querySelector('.asset-check')?.classList.toggle('on', selSet.has(a.file));
+          cell.querySelector('.asset-check')?.replaceChildren(selSet.has(a.file) ? '✓' : '');
+          updatePickBar();
+          return;
+        }
         // 多选模式下点击 = 勾选/取消；单选模式点击 = 预览
         if (selMode) {
           if (selSet.has(a.file)) selSet.delete(a.file); else selSet.add(a.file);

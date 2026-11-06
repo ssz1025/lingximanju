@@ -15,6 +15,15 @@ const fmtTime = (ts) => {
 };
 const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
 
+/** 角色多视图定义（与后端 characters.mjs CHARACTER_VIEWS 对齐） */
+const CHARACTER_VIEWS = [
+  { key: 'front', label: '正面' },
+  { key: 'side', label: '侧面' },
+  { key: 'back', label: '背面' },
+];
+/** 多视图生成中的进度状态（跨 render 保持） */
+let viewGen = { charId: null, current: 0, total: 0 };
+
 async function api(path, body, method) {
   const res = await fetch(path, {
     method: method || (body === undefined ? 'GET' : 'POST'),
@@ -145,6 +154,10 @@ export function renderProjectList(host, ctx = {}) {
     const meta = isNovel
       ? `${p.episodeCount || 0} 集 · 任务 ${p.stepDone ?? 0}/${p.stepTotal ?? 6}`
       : `${p.nodeCount || 0} 节点 · ${p.doneCount || 0} 已完成`;
+    // 项目级 token 累积（runs 汇总，projectIndex 下发）；无消耗时不显示避免噪音
+    const tok = p.tokens?.total
+      ? `<span class="pm-tok" title="项目累积 LLM Token 消耗（输入 ${(p.tokens.prompt || 0).toLocaleString()} / 输出 ${(p.tokens.completion || 0).toLocaleString()} · ${p.tokens.calls || 0} 次调用）">Σ ${fmtTok(p.tokens.total)} tok</span>`
+      : '';
     return `<div class="pm-item ${p.id === ctx.currentId ? 'active' : ''} ${p.archived ? 'is-archived' : ''}" data-id="${esc(p.id)}">
       ${coverThumbHTML(p)}
       <div class="pm-card-main">
@@ -158,6 +171,7 @@ export function renderProjectList(host, ctx = {}) {
         <span class="pm-status st-${esc(p.status)}"><i></i>${esc(STATUS_TEXT[p.status] || p.status)}</span>
         ${isNovel ? '<span class="pm-kind">小说分集</span>' : ''}
         <span class="pm-sub">${esc(meta)}</span>
+        ${tok}
       </div>
       <div class="pm-bar"><span class="pm-bar-track"><i class="st-${esc(p.status)}" style="width:${pct}%"></i></span><em class="st-${esc(p.status)}">${pct}%</em></div>
       ${(p.tags || []).length ? `<div class="pm-tags">${p.tags.slice(0, 3).map((t) => `<span>${esc(t)}</span>`).join('')}</div>` : ''}
@@ -255,7 +269,8 @@ export function renderProjectList(host, ctx = {}) {
 }
 
 /* ------------------------------------------------------------------ 项目封面设置弹窗
- * 三种来源：ComfyUI 出图生成 / 本地上传 / 清除后回退「项目名称封面」。
+ * 来源：ComfyUI 出图生成（可带多参考图）/ 本地上传 / 清除后回退「项目名称封面」。
+ * 提示词可由 AI 按项目名 / 简介 / 小说摘要先生成一版，用户编辑后再生成封面。
  * 卡片缩略图与这里共用同一套 nameCoverHTML 渲染，视觉一致。
  * ---------------------------------------------------------------- */
 export function openCoverDialog(ctx = {}) {
@@ -266,6 +281,10 @@ export function openCoverDialog(ctx = {}) {
   let cover = { ...readCover(p) };
   let busy = false;
   let message = '';
+  let draft = String(cover.prompt || '');  // 文本框草稿：重绘不丢失用户输入
+  let coverNegative = '';                  // AI 生成的负向提示词，生成时随请求提交
+  let promptBusy = false;                  // AI 提示词生成中（LLM 秒级，与出图 busy 分开，避免误显 1–2 分钟遮罩）
+  let refs = [];                           // 多参考图（有序）：{file?, name, url, dataUrl?, bytes?}
   /** 同步到列表索引与完整项目两处，避免弹窗关闭后卡片短暂回退 */
   const applyCover = (next) => {
     cover = { ...next };
@@ -274,19 +293,22 @@ export function openCoverDialog(ctx = {}) {
   };
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
-  const close = () => { if (!busy) backdrop.remove(); };
+  const close = () => { if (!busy && !promptBusy) backdrop.remove(); };
   backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
 
   const sourceLabel = () => cover.source === 'comfyui' ? '✦ ComfyUI 生成'
     : cover.source === 'upload' ? '⇧ 本地上传' : '项目名称封面（默认）';
 
+  let rendered = false;                    // 首次渲染后才允许显示；重渲染压制 modalIn 动画重播（避免弹窗晃动）
+
   function render() {
     const preview = cover.url
       ? `<img src="${esc(cover.url)}?t=${encodeURIComponent(String(cover.updatedAt || ''))}" alt="项目封面">`
       : nameCoverHTML({ name: p.name });
+    backdrop.className = 'modal-backdrop' + (rendered ? ' no-anim' : '');
     backdrop.innerHTML = `<div class="modal cover-modal" role="dialog" aria-label="项目封面设置">
       <div class="pmm-head"><div><h2>🖼 项目封面</h2><div class="sub">${esc(p.name)} · ${esc(sourceLabel())}</div></div>
-        <button class="icon-btn" data-act="close" ${busy ? 'disabled' : ''} aria-label="关闭">✕</button></div>
+        <button class="icon-btn" data-act="close" ${busy || promptBusy ? 'disabled' : ''} aria-label="关闭">✕</button></div>
       <div class="cover-body">
         <div class="cover-preview">${preview}
           ${busy ? '<div class="cover-busy"><span class="cover-spinner"></span><b>ComfyUI 正在生成封面</b><small>约 1–2 分钟，请勿关闭窗口</small></div>' : ''}
@@ -294,17 +316,34 @@ export function openCoverDialog(ctx = {}) {
         <div class="cover-side">
           <p class="cover-tip">未设置封面时，项目卡片会自动使用<b>项目名称封面</b>（按名称生成的渐变色块）。<br>
             生成封面会调用已配置的 ComfyUI 出图工作流；上传支持 PNG / JPEG / WebP / GIF，单张不超过 4 MB。</p>
-          <label class="field"><span>补充画面要求（可选）</span>
-            <textarea id="cover-prompt" rows="6" placeholder="如：雨夜霓虹、水墨风、暖色调电影海报…">${esc(cover.prompt || '')}</textarea></label>
+          <label class="field"><span class="cover-field-head">画面提示词<small class="cover-count" id="cover-count">${draft.length} 字</small></span>
+            <textarea id="cover-prompt" rows="7" placeholder="输入完整文生图提示词（原样使用，不套片名 / 风格模板）；留空则按项目资料自动生成。也可点「✦ AI 生成提示词」按项目名称、简介、小说总结自动写好一版">${esc(draft)}</textarea></label>
           <div class="cover-actions">
-            <button class="btn primary" data-act="generate" ${busy ? 'disabled' : ''}>✦ 用 ComfyUI 生成封面</button>
-            <button class="btn" data-act="upload" ${busy ? 'disabled' : ''}>⇧ 上传本地图片</button>
-            <button class="btn" data-act="from-library" ${busy ? 'disabled' : ''}>▣ 从资源库选择</button>
-            <button class="btn" data-act="reset" ${busy || !cover.url ? 'disabled' : ''}>↺ 使用项目名称封面</button>
+            <button class="btn" data-act="ai-prompt" ${busy || promptBusy ? 'disabled' : ''}>${promptBusy ? '✦ 提示词生成中…' : '✦ AI 生成提示词'}</button>
+            <button class="btn primary" data-act="generate" ${busy || promptBusy ? 'disabled' : ''}>✦ 用 ComfyUI 生成封面</button>
+            <div class="cover-actions-row">
+              <button class="btn" data-act="upload" ${busy || promptBusy ? 'disabled' : ''}>⇧ 上传本地图片</button>
+              <button class="btn" data-act="from-library" ${busy || promptBusy ? 'disabled' : ''}>▣ 从资源库选择</button>
+              <button class="btn" data-act="reset" ${busy || promptBusy || !cover.url ? 'disabled' : ''}>↺ 恢复名称封面</button>
+            </div>
+          </div>
+          <div class="cover-refs">
+            <div class="cover-refs-head"><b>参考图（可选 · 多张）</b>
+              <button class="btn sm" data-act="pick-refs" ${busy ? 'disabled' : ''}>▣ 资源库多选</button>
+              <button class="btn sm" data-act="upload-refs" ${busy ? 'disabled' : ''}>⇧ 本地上传</button>
+              ${refs.length ? `<button class="btn sm" data-act="clear-refs" ${busy ? 'disabled' : ''}>✕ 清空</button>` : ''}
+            </div>
+            ${refs.length ? `<div class="cover-ref-grid">${refs.map((r, i) => `
+              <div class="cover-ref" title="${esc(r.name)}"><img src="${esc(r.url)}" alt="${esc(r.name)}">
+                <span class="cover-ref-no">${i + 1}</span>
+                <button class="cover-ref-del" data-act="del-ref" data-i="${i}" ${busy ? 'disabled' : ''} title="移除">✕</button></div>`).join('')}</div>
+              <small class="cover-ref-note">参考图按顺序对应工作流的 LoadImage 插槽（共 ${refs.length} 张）</small>`
+              : '<small class="cover-ref-note">不选参考图时按工作流默认方式生成；多张参考图按顺序注入工作流的多个 LoadImage 插槽（仅 PNG / JPEG / WebP）</small>'}
           </div>
           ${message ? `<div class="cover-status ${message.startsWith('✗') ? 'err' : ''}">${esc(message)}</div>` : ''}
           <div class="cover-note">${ctx.comfy?.imageWorkflow ? '✓ 已检测到 ComfyUI 出图工作流' : '⚠ 未检测到 ComfyUI 出图工作流，生成前请先在设置中导入'}</div>
           <input type="file" id="cover-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          <input type="file" id="ref-files" accept="image/png,image/jpeg,image/webp" multiple hidden>
         </div>
       </div>
       <div class="modal-actions"><button class="btn" data-act="close" ${busy ? 'disabled' : ''}>关闭</button></div>
@@ -312,20 +351,92 @@ export function openCoverDialog(ctx = {}) {
 
     backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
     const promptInput = $('cover-prompt');
+    promptInput?.addEventListener('input', () => {
+      draft = promptInput.value;
+      const counter = $('cover-count');
+      if (counter) counter.textContent = `${draft.length} 字`;
+    });
+
+    // AI 生成封面提示词：按项目名 / 简介 / 小说摘要产出可编辑的完整提示词
+    backdrop.querySelector('[data-act="ai-prompt"]')?.addEventListener('click', async () => {
+      if (busy || promptBusy) return;
+      const custom = promptInput?.value || '';
+      promptBusy = true; message = ''; render(); // 提示词是 LLM 秒级调用，状态只反馈在按钮上，不盖左侧图片区
+      try {
+        const d = await api(`/api/projects/${p.id}/cover/prompt`, { custom });
+        draft = String(d.prompt || '');
+        coverNegative = String(d.negative || '');
+        message = `✓ ${d.message}`;
+        toast(d.fellBack ? '已用内置模板生成提示词' : '封面提示词已生成', d.fellBack ? 'warn' : 'ok');
+      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
+      promptBusy = false; render();
+    });
 
     backdrop.querySelector('[data-act="generate"]')?.addEventListener('click', async () => {
       if (busy) return;
       const prompt = promptInput?.value || '';
-      busy = true; message = ''; render();
+      busy = true; message = refs.length ? `正在按参考图（${refs.length} 张）生成封面…` : ''; render();
       try {
-        const d = await api(`/api/projects/${p.id}/cover/generate`, { prompt });
+        const d = await api(`/api/projects/${p.id}/cover/generate`, {
+          prompt, negative: coverNegative,
+          refs: refs.map((r) => (r.file ? { asset: r.file } : { dataUrl: r.dataUrl })),
+        });
         applyCover(d.cover);
+        draft = String(d.prompt || prompt);
         const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
-        message = `✓ 封面已由 ComfyUI 生成${secs}`;
+        message = `✓ 封面已由 ComfyUI 生成${secs}${refs.length ? ` · 参考图 ${refs.length} 张` : ''}`;
         toast('项目封面已生成', 'ok');
         await ctx.onChanged?.();
       } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
       busy = false; render();
+    });
+
+    // 多参考图：资源库多选（按勾选顺序）/ 本地多选上传；按顺序对应 LoadImage 插槽
+    backdrop.querySelector('[data-act="pick-refs"]')?.addEventListener('click', () => {
+      if (busy) return;
+      openAssetLibrary({
+        mode: 'pick', multi: true, accept: 'image',
+        onPick: (list) => {
+          const chosen = (Array.isArray(list) ? list : [list])
+            .filter((a) => /\.(png|jpe?g|webp)$/i.test(a.file))
+            .map((a) => ({ file: a.file, name: a.name, url: a.url }));
+          refs = [...refs, ...chosen].slice(0, 6);
+          render();
+        },
+      });
+    });
+    backdrop.querySelector('[data-act="upload-refs"]')?.addEventListener('click', () => $('ref-files')?.click());
+    backdrop.querySelector('[data-act="clear-refs"]')?.addEventListener('click', () => { refs = []; render(); });
+    backdrop.querySelectorAll('[data-act="del-ref"]').forEach((btn) => btn.addEventListener('click', () => {
+      refs.splice(Number(btn.dataset.i) || 0, 1);
+      render();
+    }));
+    $('ref-files')?.addEventListener('change', async () => {
+      const input = $('ref-files');
+      const files = [...(input?.files || [])];
+      if (input) input.value = '';
+      if (busy || !files.length) return;
+      const added = [];
+      let total = refs.reduce((s, r) => s + (r.bytes || 0), 0);
+      for (const file of files) {
+        if (refs.length + added.length >= 6) break;
+        if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { message = '✗ 参考图仅支持 PNG / JPEG / WebP'; continue; }
+        if (file.size > 2 * 1024 * 1024) { message = '✗ 单张参考图不超过 2 MB，请压缩后再上传'; continue; }
+        if (total + file.size > 3.5 * 1024 * 1024) { message = '✗ 本地参考图总计不超过 3.5 MB，超出请改用「资源库多选」'; break; }
+        total += file.size;
+        try {
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(new Error('读取图片失败'));
+            reader.readAsDataURL(file);
+          });
+          added.push({ dataUrl, name: file.name, url: dataUrl, bytes: file.size });
+        } catch (err) { message = `✗ ${err.message}`; }
+      }
+      refs = [...refs, ...added].slice(0, 6);
+      if (added.length) message = `✓ 已添加 ${added.length} 张本地参考图`;
+      render();
     });
 
     const fileInput = $('cover-file');
@@ -383,6 +494,8 @@ export function openCoverDialog(ctx = {}) {
       } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
       busy = false; render();
     });
+
+    rendered = true;                       // 后续重渲染不再重播 modalIn 入场动画
   }
 
   root.appendChild(backdrop);
@@ -484,9 +597,10 @@ export function renderStepPanel(host, ctx = {}) {
   // 骨架项目（尚未上传小说）：第 ① 步内嵌上传入口，替代「执行本步」
   const needSource = !m.source?.text;
   if (!expandedStep || !states[expandedStep]) expandedStep = current?.id || null;
-  // Token 统计：全部步骤累计 + 运行中的实时计数（llm:usage 事件驱动）
-  const sumTok = (m.steps || []).reduce((a, s) => {
-    for (const k of ['prompt', 'completion', 'total', 'calls']) a[k] += s.tokens?.[k] || 0;
+  // Token 统计：项目级口径 = 全部 runs 汇总（与侧栏卡片一致，覆盖画布运行与步骤运行两种入口）
+  // 步骤自身消耗在每步的 tokens/lastTokens 中单独归因
+  const sumTok = (ctx.project?.runs || []).reduce((a, r) => {
+    for (const k of ['prompt', 'completion', 'total', 'calls']) a[k] += r.tokens?.[k] || 0;
     return a;
   }, { prompt: 0, completion: 0, total: 0, calls: 0 });
   const live = running ? ctx.liveTokens : null;
@@ -608,10 +722,121 @@ function bibleHintHTML(m) {
   return `<div class="cf-note pmm-bible-hint">创作设定：${esc(bits.join(' · '))}（<a href="javascript:void 0" data-goto-bible>编辑创作设定</a>）</div>`;
 }
 
+/** 角色卡片：三视图缩略 + 属性摘要 + 操作按钮；生成中显示逐视图进度 */
+function charCardHTML(c, gen = { charId: null }) {
+  const generating = gen.charId === c.id;
+  const views = CHARACTER_VIEWS.map((v) => {
+    const img = c.views?.[v.key];
+    return img
+      ? `<div class="pmm-char-view"><img src="${esc(img.url)}" alt="${esc(v.label)}"><span>${v.label}</span></div>`
+      : `<div class="pmm-char-view empty"><i></i><span>${v.label}</span></div>`;
+  }).join('');
+  const srcLabel = { llm: 'LLM 提取', heuristic: '启发式', manual: '手动' }[c.source] || c.source || '手动';
+  return `<div class="pmm-char-card" data-char-id="${esc(c.id)}">
+    <div class="pmm-char-views">${views}</div>
+    <div class="pmm-char-info">
+      <div class="pmm-char-title"><b>${esc(c.name)}</b>
+        ${(c.aliases || []).map((a) => `<span class="pmm-chip">${esc(a)}</span>`).join('')}
+        <span class="pmm-chip">${esc(srcLabel)}</span></div>
+      ${c.role ? `<div class="pmm-char-role">${esc(c.role)}</div>` : ''}
+      ${c.personality ? `<div class="pmm-char-desc">${esc(cut(c.personality, 60))}</div>` : ''}
+      <div class="pmm-char-pal">${(c.palette || []).map((col) => `<i style="background:${esc(col)}"></i>`).join('')}</div>
+    </div>
+    <div class="pmm-char-acts">
+      ${generating
+      ? `<span class="pmm-char-gen">正在生成 ${CHARACTER_VIEWS[gen.current - 1]?.label || ''} ${gen.current}/${gen.total}…</span>`
+      : `<button class="btn sm" data-char-edit="${esc(c.id)}">✎ 编辑</button>
+      <button class="btn sm primary" data-char-views="${esc(c.id)}">✦ 生成多视图</button>
+      <button class="btn sm" data-char-del="${esc(c.id)}">✕</button>`}
+    </div>
+  </div>`;
+}
+
+/** 角色属性编辑弹窗：新增/编辑角色（含别名、人物关系、配色、多视图提示词），保存走 char-upsert */
+export function openCharacterEditor(char = {}, onSave) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  const close = () => backdrop.remove();
+  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+  let relations = (char.relations || []).map((r) => ({ ...r }));
+
+  const renderBody = () => {
+    backdrop.innerHTML = `<div class="modal char-editor" role="dialog" aria-label="角色属性">
+      <div class="pmm-head"><div><h2>${char.id ? '✎ 编辑角色' : '＋ 新增角色'}</h2><div class="sub">角色属性驱动多视图生成与关键帧一致性</div></div>
+        <button class="icon-btn" data-act="close">✕</button></div>
+      <div class="pmm-body">
+        <div class="modal-grid">
+          <div class="field"><label>姓名 *</label><input id="ce-name" maxlength="20" value="${esc(char.name || '')}"></div>
+          <div class="field"><label>别名（逗号分隔）</label><input id="ce-aliases" value="${esc((char.aliases || []).join('，'))}"></div>
+          <div class="field"><label>身份 / 定位</label><input id="ce-role" maxlength="60" value="${esc(char.role || '')}"></div>
+          <div class="field"><label>性别</label><input id="ce-gender" maxlength="8" value="${esc(char.gender || '')}"></div>
+          <div class="field"><label>年龄</label><input id="ce-age" maxlength="24" value="${esc(char.age || '')}"></div>
+        </div>
+        <div class="modal-grid">
+          <div class="field"><label>性格</label><textarea id="ce-personality" rows="2">${esc(char.personality || '')}</textarea></div>
+          <div class="field"><label>外貌描述</label><textarea id="ce-appearance" rows="2">${esc(char.appearance || '')}</textarea></div>
+          <div class="field"><label>发型</label><input id="ce-hair" value="${esc(char.hair || '')}"></div>
+          <div class="field"><label>随身物件</label><input id="ce-props" value="${esc(char.props || '')}"></div>
+          <div class="field" style="grid-column:1/-1"><label>服装 / 配饰</label><textarea id="ce-costume" rows="2">${esc(char.costume || '')}</textarea></div>
+        </div>
+        <div class="cf-section"><h4>人物关系</h4>
+          <div class="char-rel-list">${relations.map((r, i) => `
+            <div class="char-rel-row">
+              <input data-rel="target" data-i="${i}" placeholder="对象（如：林夏）" value="${esc(r.target || '')}">
+              <input data-rel="label" data-i="${i}" placeholder="关系（如：同门师兄）" value="${esc(r.label || '')}">
+              <button class="btn sm" data-rel-del="${i}">✕</button>
+            </div>`).join('') || '<div class="cf-note" style="margin:0">暂无人物关系</div>'}</div>
+          <button class="btn sm" data-act="add-rel">＋ 添加关系</button>
+        </div>
+        <div class="cf-section"><h4>配色（3–5 个，用于多视图与关键帧）</h4>
+          <div class="char-pal-row">${[0, 1, 2, 3, 4].map((i) => `<input type="color" data-pal="${i}" value="${esc((char.palette || [])[i] || ['#1a2233', '#3a506b', '#ff9a5c', '#6b4f8a', '#3f6b5c'][i])}">`).join('')}</div>
+        </div>
+        <div class="field"><label>多视图提示词（可选，留空则按上方属性自动拼装）</label>
+          <textarea id="ce-view-prompt" placeholder="直接描述角色造型要求，生成多视图时优先使用…">${esc(char.viewPrompt || '')}</textarea></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" data-act="close">取消</button>
+        <button class="btn primary" data-act="save">保存角色</button>
+      </div>
+    </div>`;
+    backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
+    backdrop.querySelector('[data-act="add-rel"]').addEventListener('click', () => {
+      relations.push({ target: '', label: '' });
+      renderBody();
+    });
+    backdrop.querySelectorAll('[data-rel]').forEach((el) => el.addEventListener('input', () => {
+      relations[Number(el.dataset.i)][el.dataset.rel] = el.value;
+    }));
+    backdrop.querySelectorAll('[data-rel-del]').forEach((b) => b.addEventListener('click', () => {
+      relations.splice(Number(b.dataset.relDel), 1);
+      renderBody();
+    }));
+    backdrop.querySelector('[data-act="save"]').addEventListener('click', () => {
+      const val = (sel) => String(backdrop.querySelector(sel)?.value || '').trim();
+      const name = val('#ce-name');
+      if (!name) { backdrop.querySelector('#ce-name')?.focus(); return; }
+      onSave({
+        ...(char.id ? { id: char.id } : {}),
+        name,
+        aliases: val('#ce-aliases').split(/[,，、]/).map((s) => s.trim()).filter(Boolean),
+        role: val('#ce-role'), gender: val('#ce-gender'), age: val('#ce-age'),
+        personality: val('#ce-personality'), appearance: val('#ce-appearance'),
+        hair: val('#ce-hair'), costume: val('#ce-costume'), props: val('#ce-props'),
+        relations: relations.filter((r) => r.target || r.label),
+        palette: [...backdrop.querySelectorAll('[data-pal]')].map((el) => el.value),
+        viewPrompt: val('#ce-view-prompt'),
+      });
+      close();
+    });
+  };
+  renderBody();
+  $('modal-root').appendChild(backdrop);
+}
+
 export function openProjectManager(ctx = {}) {
   const toast = ctx.toast || (() => {});
   const root = $('modal-root');
-  let tab = 'overview';
+  let tab = ['overview', 'bible', 'characters', 'episodes', 'deliverables', 'versions'].includes(ctx.tab) ? ctx.tab : 'overview';
   let snapshots = [];
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
@@ -648,7 +873,7 @@ export function openProjectManager(ctx = {}) {
     backdrop.innerHTML = `<div class="modal pm-modal" role="dialog" aria-label="项目管理">
       <div class="pmm-head"><div><h2>▦ 项目管理</h2><div class="sub">${esc(p.name)} · ${m.kind === 'novel' ? '小说分集创作项目' : '标准流水线项目'} · 六步 ${esc(prog.label)}</div></div>
         <button class="icon-btn" data-act="close">✕</button></div>
-      <div class="pmm-tabs">${[['overview', '概览'], ['bible', '创作设定'], ['episodes', '分集'], ['deliverables', '产物'], ['versions', '版本 / 记录']].map(([k, label]) => `<button class="pmm-tab ${tab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}</div>
+      <div class="pmm-tabs">${[['overview', '概览'], ['bible', '创作设定'], ['characters', '角色'], ['episodes', '分集'], ['deliverables', '产物'], ['versions', '版本 / 记录']].map(([k, label]) => `<button class="pmm-tab ${tab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}</div>
       <div class="pmm-body" id="pmm-body"></div>
       <div class="modal-actions"><button class="btn" data-act="close">关闭</button></div>
     </div>`;
@@ -658,9 +883,82 @@ export function openProjectManager(ctx = {}) {
     const body = $('pmm-body');
     if (tab === 'overview') renderOverview(body, m, s, prog);
     if (tab === 'bible') renderBible(body, m);
+    if (tab === 'characters') renderCharacters(body, m);
     if (tab === 'episodes') renderEpisodes(body, m);
     if (tab === 'deliverables') renderDeliverables(body, m, s);
     if (tab === 'versions') renderVersions(body, p, s);
+  }
+
+  /** 「角色」Tab：从小说提取角色属性（LLM 优先）、手动维护、逐视图生成多视图 */
+  function renderCharacters(body, m) {
+    const chars = Array.isArray(m.characters) ? m.characters : [];
+    const hasNovel = !!m.source?.text;
+    body.innerHTML = `
+      <div class="cf-section"><h4>角色库 · 从小说提取 · 多视图生成</h4>
+        <div class="cf-row">
+          <button class="btn primary" id="pmm-char-extract" ${hasNovel ? '' : 'disabled'}>✦ 从原著提取（LLM）</button>
+          <button class="btn" id="pmm-char-heur" ${hasNovel ? '' : 'disabled'}>⚙ 启发式提取</button>
+          <button class="btn" id="pmm-char-add">＋ 新增角色</button>
+          <span class="cf-note" style="margin:0" id="pmm-char-status">${hasNovel ? '' : '请先上传小说后再提取角色'}</span>
+        </div>
+        ${chars.length
+        ? `<div class="pmm-chars">${chars.map((c) => charCardHTML(c, viewGen)).join('')}</div>`
+        : '<div class="cf-note">还没有角色。可从小说自动提取（LLM 优先、启发式兜底），或手动新增角色。</div>'}
+      </div>`;
+    body.querySelector('#pmm-char-add').addEventListener('click', () => {
+      openCharacterEditor({}, (obj) => manage('char-upsert', obj));
+    });
+    const extract = async (mode) => {
+      const status = $('pmm-char-status');
+      const btns = [body.querySelector('#pmm-char-extract'), body.querySelector('#pmm-char-heur')].filter(Boolean);
+      btns.forEach((b) => { b.disabled = true; });
+      if (status) status.textContent = mode === 'heuristic' ? '启发式提取中…' : 'LLM 提取中，可能需要 30 秒以上，请耐心等待…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/extract`, { mode });
+        toast(d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`, d.fellBack ? 'err' : 'ok');
+        await refresh();
+        await ctx.onChanged?.();
+      } catch (e) {
+        toast(`提取失败：${e.message}`, 'err');
+        if (status) status.textContent = '';
+        btns.forEach((b) => { b.disabled = false; });
+      }
+    };
+    if (hasNovel) {
+      body.querySelector('#pmm-char-extract').addEventListener('click', () => extract('llm'));
+      body.querySelector('#pmm-char-heur').addEventListener('click', () => extract('heuristic'));
+    }
+    body.querySelectorAll('[data-char-edit]').forEach((b) => b.addEventListener('click', () => {
+      const c = chars.find((x) => x.id === b.dataset.charEdit);
+      if (c) openCharacterEditor(c, (obj) => manage('char-upsert', obj));
+    }));
+    body.querySelectorAll('[data-char-del]').forEach((b) => b.addEventListener('click', () => manage('char-del', b.dataset.charDel)));
+    body.querySelectorAll('[data-char-views]').forEach((b) => b.addEventListener('click', () => {
+      const c = chars.find((x) => x.id === b.dataset.charViews);
+      if (c) generateViews(c);
+    }));
+  }
+
+  /** 逐视图生成角色多视图：每张一次请求、逐张反馈进度，单张失败继续后续视图 */
+  async function generateViews(c) {
+    viewGen = { charId: c.id, current: 0, total: CHARACTER_VIEWS.length };
+    render();
+    let okCount = 0;
+    const fails = [];
+    for (let i = 0; i < CHARACTER_VIEWS.length; i++) {
+      const v = CHARACTER_VIEWS[i];
+      viewGen = { charId: c.id, current: i + 1, total: CHARACTER_VIEWS.length };
+      render();
+      try {
+        await api(`/api/projects/${ctx.project.id}/characters/views`, { characterId: c.id, view: v.key });
+        okCount += 1;
+      } catch (e) { fails.push(`${v.label}：${e.message}`); }
+    }
+    viewGen = { charId: null, current: 0, total: 0 };
+    if (fails.length) toast(`「${c.name}」多视图完成 ${okCount}/${CHARACTER_VIEWS.length}，失败 ${fails.join('；')}`, 'err');
+    else toast(`「${c.name}」多视图已生成：${okCount} 张，已登记资源库`, 'ok');
+    await refresh();
+    await ctx.onChanged?.();
   }
 
   function renderOverview(body, m, s, prog) {

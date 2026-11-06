@@ -2,6 +2,7 @@
 import { defineAgent } from '../core/agent.mjs';
 import { hash } from '../core/artwork.mjs';
 import { matchCharacters, registerAsset } from '../core/assets.mjs';
+import { buildCharacterPrompt } from '../core/characters.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
   saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
 import { topoLayers } from '../core/graph.mjs';
@@ -157,8 +158,20 @@ defineAgent({
   async run(ctx) {
     const script = findScript(ctx) || { characters: [] };
     ctx.progress(0.2);
-    const res = await ctx.providers.generate('characters', { characters: script.characters }, ctx.signal);
-    const wanted = res.characters || [];
+    // 优先消费项目管理「角色」维护的结构化属性（LLM/启发式提取 + 手动增删改）
+    const managed = (ctx.project.management?.characters || []).filter((c) => c && c.name);
+    let wanted;
+    if (managed.length) {
+      wanted = managed.map((c) => ({
+        name: c.name, role: c.role || '原著角色',
+        appearance: buildCharacterPrompt(c) || c.appearance || `${c.name}角色设定`,
+        palette: c.palette || [],
+      }));
+      ctx.log('info', `使用项目管理中维护的 ${wanted.length} 位角色属性驱动造型生成`);
+    } else {
+      const res = await ctx.providers.generate('characters', { characters: script.characters }, ctx.signal);
+      wanted = res.characters || [];
+    }
     // 优先匹配：资源库里已有同名角色定妆图（可来自其他项目）→ 直接复用，不再重复生成
     const { map: matched, reused } = matchCharacters(wanted);
     if (reused) ctx.log('info', `资源库命中 ${reused}/${wanted.length} 位已生成角色，直接复用定妆图（可打标签共享给其他项目）`);

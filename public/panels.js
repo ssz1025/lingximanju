@@ -115,6 +115,15 @@ export async function openSettings(project, onSave) {
       </div>
 
       <div class="cf-section">
+        <h4>提示词注入自检 <span id="cf-inject-badge" class="wf-badge none">未检查</span></h4>
+        <div class="cf-note">检查每个镜头 / 封面的提示词是否真的写进了工作流。若显示「未找到注入点」，所有镜头都会沿用工作流里写死的那句提示词，生成的图片会高度雷同。自检只做本地干跑，不调用 ComfyUI。</div>
+        <div class="cf-row" style="margin-top:9px">
+          <button class="btn" id="cf-inject-check" type="button">⌗ 检查提示词注入</button>
+        </div>
+        <div id="cf-inject-result" class="cf-note" style="margin-top:9px">尚未检查。</div>
+      </div>
+
+      <div class="cf-section">
         <h4>生成参数</h4>
         <div class="modal-grid">
           <div class="field"><label>宽</label>${num('width', 864)}</div>
@@ -267,6 +276,41 @@ export async function openSettings(project, onSave) {
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     return d;
   };
+
+  /* ---------- 提示词注入自检：纯本地干跑，打开设置即自动跑一次 ---------- */
+  const injectBadge = root.querySelector('#cf-inject-badge');
+  const injectBox = root.querySelector('#cf-inject-result');
+  const injectLine = (label, p) => {
+    if (!p) return `<div style="margin-bottom:7px"><b>${label}</b> · 未配置工作流，该环节回退 Mock 自绘</div>`;
+    const warns = p.warnings?.length
+      ? `<br><span class="cf-note">⚠ ${esc(p.warnings.join('；'))}</span>` : '';
+    if (!p.ok || !p.positive) {
+      return `<div style="margin-bottom:7px"><b class="err">✕ ${label}</b> · 未找到提示词注入点（${esc(p.name || '')}）${warns}</div>`;
+    }
+    const g = p.positive;
+    const where = `<code>${esc(g.node)}.${esc(g.input)}</code>${g.title ? `「${esc(g.title)}」` : ''}`;
+    const neg = p.negative ? ` · 负向 → <code>${esc(p.negative.node)}.${esc(p.negative.input)}</code>` : '';
+    return `<div style="margin-bottom:7px"><b class="ok">✓ ${label}</b> · ${esc(p.name || '')}（${p.nodes || 0} 节点）
+      <br>提示词 → ${where} · ${esc(g.strategy)}${neg}
+      <br><span class="cf-note">示例文本：${esc(p.samplePrompt || '')}</span>${warns}</div>`;
+  };
+  const runInjectCheck = async () => {
+    injectBox.textContent = '检查中…';
+    try {
+      const d = await postJSON('/api/comfyui/inject-check', {});
+      injectBox.innerHTML = injectLine('出图', d.image) + injectLine('视频', d.video);
+      const configured = [d.image, d.video].filter(Boolean);
+      const bad = configured.some((p) => !p.ok);
+      injectBadge.className = `wf-badge ${!configured.length ? 'none' : bad ? 'err' : 'ok'}`;
+      injectBadge.textContent = !configured.length ? '未配置' : bad ? '✕ 有风险' : '✓ 正常';
+    } catch (err) {
+      injectBox.innerHTML = `<b class="err">✕ 自检失败</b> ${esc(err.message)}`;
+      injectBadge.className = 'wf-badge err';
+      injectBadge.textContent = '✕ 失败';
+    }
+  };
+  root.querySelector('#cf-inject-check').addEventListener('click', runInjectCheck);
+  runInjectCheck();
 
   const libItemHTML = (kind, e) => {
     const t = e.lastTest;

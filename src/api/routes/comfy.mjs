@@ -2,7 +2,7 @@
 import { json, readBody } from '../http.mjs';
 import { MATCH } from './match.mjs';
 import { loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems } from '../../core/comfy-config.mjs';
-import { parseWorkflow, analyzeWorkflow, testConnection, runWorkflow } from '../../core/comfyui.mjs';
+import { parseWorkflow, analyzeWorkflow, describeWorkflow, testConnection, runWorkflow } from '../../core/comfyui.mjs';
 import { emit } from '../../core/events.mjs';
 
 export async function handleComfy(req, res, url) {
@@ -35,8 +35,40 @@ export async function handleComfy(req, res, url) {
   }
   if (pathname === '/api/comfyui/analyze' && method === 'POST') {
     const body = await readBody(req);
-    const wf = parseWorkflow(body.workflow);
-    return json(res, { nodes: Object.keys(wf).length, detected: analyzeWorkflow(wf) }), true;
+    const config = loadComfyConfig();
+    // 不传 workflow 时按 kind 取「当前生效」的工作流，方便设置页直接自检
+    const raw = body.workflow !== undefined
+      ? body.workflow : (body.kind ? config[`${body.kind}Workflow`] : null);
+    if (!raw) return json(res, { error: '没有可分析的工作流，请先导入「导出(API)」工作流' }, 400), true;
+    const wf = parseWorkflow(raw);
+    return json(res, {
+      nodes: Object.keys(wf).length,
+      detected: analyzeWorkflow(wf),
+      promptInjection: describeWorkflow(wf, {
+        prompt: body.prompt, negative: config.negativePrompt, cfg: config,
+      }, config.bindings?.[body.kind] || []),
+    }), true;
+  }
+  // 提示词注入自检：不连 ComfyUI，纯本地干跑，一次返回图片 / 视频两份工作流的注入计划
+  if (pathname === '/api/comfyui/inject-check' && method === 'POST') {
+    const config = loadComfyConfig();
+    const result = {};
+    for (const kind of ['image', 'video']) {
+      const raw = config[`${kind}Workflow`];
+      if (!raw) { result[kind] = null; continue; }
+      try {
+        result[kind] = {
+          name: config[`${kind}WorkflowName`] || '未命名工作流',
+          nodes: Object.keys(raw).length,
+          ...describeWorkflow(parseWorkflow(raw, `${kind} 工作流`), {
+            negative: config.negativePrompt, cfg: config,
+          }, config.bindings?.[kind] || []),
+        };
+      } catch (err) {
+        result[kind] = { ok: false, warnings: [`工作流解析失败：${err.message}`] };
+      }
+    }
+    return json(res, { ok: true, ...result }), true;
   }
   if (pathname === '/api/comfyui/run-test' && method === 'POST') {
     const body = await readBody(req);
@@ -49,7 +81,7 @@ export async function handleComfy(req, res, url) {
     }, { bindings: config.bindings?.[kind] || [] });
     return json(res, {
       ok: true, promptId: result.promptId, durationMs: result.durationMs,
-      applied: result.applied, assets: result.assets,
+      applied: result.applied, assets: result.assets, promptInjection: result.promptInjection,
     }), true;
   }
 

@@ -34,7 +34,7 @@ lingximanju/
 │   │   ├── providers.mjs       # Mock / OpenAI / ComfyUI Provider + 内容生成模板
 │   │   ├── artwork.mjs         # 自绘 SVG 分镜 / 三视图 / 转场 / 海报
 │   │   ├── comfy-config.mjs    # 全局 ComfyUI 连接与产物配置（data/comfyui.json）
-│   │   ├── comfyui.mjs         # API 工作流解析 / 参数注入 / 提交 / 轮询 / 下载
+│   │   ├── comfyui.mjs         # API 工作流解析 / 沿图提示词注入 / 提交 / 轮询 / 下载
 │   │   ├── raster.mjs          # 零依赖 PNG 编码器 + 分镜占位帧栅格化
 │   │   ├── zip.mjs             # 零依赖 ZIP 写入器（导演包）
 │   │   ├── film.mjs            # ffmpeg 片段拼接 → 成片 MP4
@@ -58,8 +58,9 @@ lingximanju/
 │   ├── styles.css              # 设计系统 + 四态视觉提示
 │   ├── canvas.js               # 无限画布引擎（自研，创作项目层未改动）
 │   ├── nodes.js                # 节点类型与渲染（新增 episode 分集节点）
-│   ├── wizard.js               # 新建创作项目向导（单屏极简：名称 + 交付物，小说上传可跳过）+ 六步引导
-│   ├── project-manager.js      # 项目列表 / 六步面板（第 ① 步内嵌上传小说入口）/ 画布步骤条 / 管理面板
+│   ├── wizard.js               # 新建创作项目向导（只有「项目名称」必填 + 可选一句话构想，其余进项目后补）
+│   ├── project-view.js         # 项目工作台：左侧漫剧路线图 / 故事来源（上传·AI 生成）/ 资源；右侧项目信息（AI 补全）+ 步骤操作台 + 分集
+│   ├── project-manager.js      # 项目列表 / 六步面板（第 ① 步内嵌上传小说入口）/ 画布步骤条 / 管理面板（支持指定 Tab）
 │   ├── asset-manager.js        # 全局资源库：类型/标签/来源项目筛选 · 搜索 · 改名打标 · 复用选择
 │   ├── link-picker.js          # 拖拽松手后的「选择下一个节点 / 连接关系」浮层
 │   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片

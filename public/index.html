@@ -55,13 +55,14 @@
       </div>
       <div class="tb-center"><div id="run-status" class="run-status"><span class="rs-dot"></span><span id="run-status-text">就绪</span></div></div>
       <div class="tb-right">
-        <button id="btn-step-run" class="btn primary" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
+        <button id="btn-view-toggle" class="btn" title="切换 项目工作台 / 画布视图">⬡ 画布</button>
+        <button id="btn-step-run" class="btn primary canvas-only" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
         <button id="btn-project-manage" class="btn" title="项目管理：分集 / 产物 / 快照 / 标签">▦ 项目管理</button>
-        <button id="btn-arrange" class="btn" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
-        <button id="btn-fit" class="btn" title="适应视图 (F)">⤢ 适应</button>
-        <button id="btn-run" class="btn primary" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
-        <button id="btn-stop" class="btn danger" hidden>■ 停止</button>
-        <button id="btn-director-pack" class="btn" title="生成并下载导演包（可导入 ComfyUI 导演工作台）">▤ 导演包</button>
+        <button id="btn-arrange" class="btn canvas-only" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
+        <button id="btn-fit" class="btn canvas-only" title="适应视图 (F)">⤢ 适应</button>
+        <button id="btn-run" class="btn primary canvas-only" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
+        <button id="btn-stop" class="btn danger canvas-only" hidden>■ 停止</button>
+        <button id="btn-director-pack" class="btn canvas-only" title="生成并下载导演包（可导入 ComfyUI 导演工作台）">▤ 导演包</button>
         <span class="tb-sep"></span>
         <button id="btn-export" class="icon-btn" title="导出项目 JSON">⇩</button>
         <button id="btn-asset-lib" class="icon-btn" title="资源库：已生成资源统一管理与复用">▣</button>
@@ -102,6 +103,8 @@
         <div id="canvas-hint" class="canvas-hint">空格 + 拖拽平移 · 滚轮缩放 · 端口拖出连线 · 右键节点更多操作</div>
         <div id="canvas-stepbar" class="canvas-stepbar" hidden></div>
       </div>
+
+      <div id="project-view" hidden></div>
 
       <aside id="inspector">
         <div class="insp-tabs">

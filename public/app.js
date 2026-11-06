@@ -6,6 +6,7 @@ import { openLinkPicker, closeLinkPicker, isLinkPickerOpen } from './link-picker
 import { openAssetLibrary } from './asset-manager.js';
 import { openCreationWizard } from './wizard.js';
 import * as PM from './project-manager.js';
+import * as PV from './project-view.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -13,6 +14,7 @@ const state = {
   running: false, logs: [], movedByUser: false, nodeCountBeforeRun: 0,
   steps: [], stats: {}, projectStats: {}, stepBusy: false,
   liveTokens: null,   // 本次运行的实时 token 计数（llm:usage 事件驱动，落库后清空）
+  view: 'canvas',     // 'workshop' = 项目工作台（创作项目默认）；'canvas' = 无限画布（高级编辑）
 };
 let saveTimer = null;
 let renderScheduled = false;
@@ -231,6 +233,7 @@ function handleEvent(e) {
     if (e.stats) state.projectStats = e.stats;
     state.liveTokens = null;   // 步骤落库后以持久化数据为准，清实时计数
     renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
+    renderProjectView();
     return;
   }
 
@@ -299,6 +302,7 @@ function handleEvent(e) {
       if (['storyboard'].includes(e.reason)) UI.toast('Agent 已在画布上生成镜头链', 'ok');
       renderInspector(); updateStats(); updateHeader();
       renderStepPanel(); renderCanvasStepBar();
+      renderProjectView();
       break;
     }
     case 'run:done':
@@ -332,6 +336,7 @@ async function syncProject() {
   updateStats(); renderInspector(); updateHeader();
   // 任何项目刷新都同步步骤面板，避免顶栏进度与六步卡状态出现短暂不一致
   renderStepPanel(); renderCanvasStepBar();
+  renderProjectView();
 }
 
 /* ---------------- 渲染 ---------------- */
@@ -485,6 +490,9 @@ async function loadProject(id) {
   canvas.setProject(p);
   updateHeader(); updateStats(); updateRunUI(); renderSidebar(); renderInspector();
   renderStepPanel(); renderCanvasStepBar();
+  // 创作项目默认进入「项目工作台」（整个页面都是项目信息 + 路线图）；
+  // 标准流水线项目留在画布视图。顶栏「▦ 工作台 / ⬡ 画布」随时切换。
+  setView(p.management?.kind === 'novel' ? 'workshop' : 'canvas');
   // 有保存过的视口就尊重它：大图强行 fit-all 会把节点缩到几十像素，看起来像空画布。
   // 需要看全图时用画布右下角的「⤢ 适应视图」，节点全在视口外时也会自动出现回到内容按钮。
   if (!savedViewport) setTimeout(() => canvas.fitView(), 60);
@@ -493,38 +501,72 @@ async function loadProject(id) {
     UI.toast(`已载入 ${p.nodes.length} 节点的完成示例 · 滚轮放大看细节，⤢ 查看全图`, 'ok');
   }
 }
+
+/* ---------------- 项目工作台（workshop）与画布视图切换 ---------------- */
+function setView(view) {
+  state.view = view === 'workshop' ? 'workshop' : 'canvas';
+  const isW = state.view === 'workshop';
+  document.body.classList.toggle('view-workshop', isW);
+  $('project-view').hidden = !isW;
+  $('canvas-wrapper').hidden = isW;
+  $('inspector').hidden = isW;
+  $('btn-view-toggle').textContent = isW ? '⬡ 画布' : '▦ 工作台';
+  $('btn-view-toggle').title = isW ? '切换到画布视图（高级节点编辑）' : '切换到项目工作台（路线图与项目信息）';
+  if (isW) renderProjectView();
+  else canvas.drawMinimap();
+}
+
+function projectViewCtx() {
+  return {
+    project: state.project, steps: state.steps, stats: state.projectStats,
+    busy: state.stepBusy, liveTokens: state.liveTokens, toast: UI.toast,
+    onRunStep: (id, all, force) => runStep(id, all, force),
+    onManage: (tab) => openManagePanel(tab),
+    onOpenCanvas: () => setView('canvas'),
+    onOpenAssets: () => openAssetLibrary({ mode: 'manage' }),
+    onOpenCover: () => PM.openCoverDialog({
+      project: state.project, toast: UI.toast, comfy: state.comfy,
+      onChanged: async () => { await refreshProjects(); renderProjectListOnly(); renderProjectView(); },
+    }),
+    onDownloadPack: () => exportPack(false),
+    // 管理动作（保存信息 / 分集参数 / 交付物 / 画面设置）后：侧栏与顶栏同步，工作台由调用方重绘
+    onChanged: async () => { await refreshProjects(); updateHeader(); renderProjectListOnly(); },
+    // 上传 / AI 生成小说注入成功：刷新项目（节点注入 + ①② 完成 + 分集列表）
+    onSourceUploaded: async (out) => {
+      UI.toast(out.message || '小说已注入项目', 'ok');
+      await refreshProjects();
+      await loadProject(state.project.id);
+    },
+  };
+}
+function renderProjectView() {
+  if (state.view !== 'workshop') return;
+  PV.renderProjectView($('project-view'), projectViewCtx());
+}
 /* ---------------- 创作项目管理：向导 / 六步执行 / 管理面板 ---------------- */
 function openWizard() {
   openCreationWizard({
-    steps: state.steps, toast: UI.toast,
+    toast: UI.toast,
+    // 极简向导（只填项目名称）创建后直接落到项目工作台，从「准备故事」开始
     onCreated: async (project) => {
       await refreshProjects();
       await loadProject(project.id);
-      switchInspector('steps');
-    },
-    onStart: (stepId) => { switchInspector('steps'); runStep(stepId, false); },
-    // 骨架项目引导「⇧ 上传小说」：打开步骤面板并展开第 ① 步的上传入口
-    onOpenPanel: (stepId) => {
-      if (stepId) PM.setExpandedStep(stepId);
-      switchInspector('steps');
-      renderStepPanel();
-      if (stepId === 'upload') setTimeout(() => document.getElementById('sp-src-text')?.focus(), 60);
     },
   });
 }
 
-async function runStep(stepId, all = false) {
+async function runStep(stepId, all = false, force = false) {
   const p = state.project;
   if (!p || state.stepBusy) return;
   if (p.management?.kind !== 'novel') { UI.toast('这是标准流水线项目，请用「运行完整流水线」', 'err'); return; }
   state.stepBusy = true;
   PM.setExpandedStep(all ? null : (stepId || null));
-  renderStepPanel(); updateHeader();
+  renderStepPanel(); updateHeader(); renderProjectView();
   const label = all ? '全部执行' : `第 ${state.steps.find((s) => s.id === stepId)?.no || ''} 步`;
   UI.toast(`${label}开始 · 画布节点会随智能体执行实时生长`, 'ok');
   try {
     const out = await api(`/api/projects/${p.id}/step`, {
-      method: 'POST', body: JSON.stringify({ stepId: stepId || undefined, all }),
+      method: 'POST', body: JSON.stringify({ stepId: stepId || undefined, all, force: force || undefined }),
     });
     if (!out.ok) throw new Error(out.error || '执行失败');
     state.project.management = out.management;
@@ -538,6 +580,7 @@ async function runStep(stepId, all = false) {
   } finally {
     state.stepBusy = false;
     renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
+    renderProjectView();
   }
 }
 
@@ -568,7 +611,7 @@ function focusStepNodes(stepId) {
   UI.toast(`已定位「${def.title}」相关 ${nodes.length} 个画布节点`, 'ok');
 }
 
-async function openManagePanel() {
+async function openManagePanel(tab) {
   if (!state.project) return;
   const v = stepVisual();
   // 打开时拉取当前项目的真实统计（节点 / 产物 / 运行记录），不用侧栏的全局统计
@@ -578,7 +621,7 @@ async function openManagePanel() {
     if (d.management) state.project.management = d.management;
   } catch { /* 后端不可达时退回缓存的统计 */ }
   PM.openProjectManager({
-    project: state.project, stats: state.projectStats, comfy: state.comfy,
+    project: state.project, stats: state.projectStats, comfy: state.comfy, tab,
     progress: { label: `${v.done}/${v.total}`, percent: v.percent },
     toast: UI.toast,
     onChanged: (deleted) => onProjectsChanged(deleted),
@@ -741,6 +784,7 @@ async function sendChat(text) {
 /* ---------------- 事件绑定 ---------------- */
 function bindUI() {
   $('btn-new-project').addEventListener('click', () => openWizard());
+  $('btn-view-toggle').addEventListener('click', () => setView(state.view === 'workshop' ? 'canvas' : 'workshop'));
   $('btn-project-manage').addEventListener('click', () => openManagePanel());
   $('btn-step-run').addEventListener('click', () => runStep(null, false));
   $('btn-import').addEventListener('click', () => {
@@ -839,10 +883,21 @@ function bindUI() {
     }
     const tag = (e.target.tagName || '').toLowerCase();
     const typing = ['input', 'textarea', 'select'].includes(tag) || e.target.isContentEditable;
-    if (e.code === 'Space' && !typing) { e.preventDefault(); canvas.setSpace(true); return; }
+    if (e.code === 'Space' && !typing && state.view === 'canvas') { e.preventDefault(); canvas.setSpace(true); return; }
     if (e.key === 'Escape') { UI.hideContextMenu(); canvas.select([]); return; }
     if (typing || $('modal-root').children.length) return;
     const cmd = e.metaKey || e.ctrlKey;
+    // 工作台视图：屏蔽画布快捷键，只保留通用操作；V 在两个视图间切换
+    if (state.view === 'workshop') {
+      const k = e.key.toLowerCase();
+      if (k === 'n') openWizard();
+      else if (k === 's') runStep(null, false);
+      else if (k === 'p') openManagePanel();
+      else if (k === 'v') setView('canvas');
+      else if (e.key === '?') UI.openHelp();
+      return;
+    }
+    if (e.key.toLowerCase() === 'v' && state.project?.management?.kind === 'novel') { setView('workshop'); return; }
     if (cmd && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) canvas.redo(); else canvas.undo(); return; }
     if (cmd && e.key.toLowerCase() === 'a') { e.preventDefault(); canvas.selectAll(); return; }
     if (cmd && e.key.toLowerCase() === 'd') { e.preventDefault(); canvas.duplicateSelection(); return; }

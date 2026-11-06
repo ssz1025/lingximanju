@@ -14,6 +14,7 @@ import { buildTemplate } from './templates.mjs';
 import { makeNode, makeEdge } from '../core/agent.mjs';
 import { parseNovel, splitEpisodes, validateNovelInput, extractCharacters } from '../core/novel.mjs';
 import { createManagement, ensureManagement, finishStep } from '../core/project-steps.mjs';
+import { mergeExtracted } from '../core/characters.mjs';
 
 const cut = (s, n) => { const t = String(s || '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
 /** 式(1) 输入归一：各集中部摘录拼接（≤2400 字），覆盖全部分集而非只取第一集 */
@@ -48,10 +49,11 @@ function resolveOpts(opts = {}) {
 export function buildNovelSkeleton(opts = {}) {
   const { deliverables, split } = resolveOpts(opts);
   const name = String(opts.name || '').trim().slice(0, 80) || '未命名创作项目';
+  const ideaText = String(opts.idea || '').trim().slice(0, 300);
 
   const project = buildTemplate('novel2video', {
     name, style: opts.style || 'cinematic',
-    idea: `${name}｜待上传小说`,
+    idea: ideaText ? `${name}｜${cut(ideaText, 60)}` : `${name}｜待上传小说`,
   });
 
   const idea = project.nodes.find((n) => n.type === 'idea');
@@ -85,6 +87,11 @@ export function buildNovelSkeleton(opts = {}) {
   };
 
   project.management = createManagement({ kind: 'novel', title: name, deliverables, split, skeleton: true });
+  // 创建时可选带上一句话构想：写入创作设定 logline，供 AI 补全 / AI 生成小说复用
+  if (ideaText) {
+    project.management.bible.logline = ideaText;
+    project.management.history[0].detail = '新建创作项目（含一句话构想，待上传小说）';
+  }
   project.settings = {
     ...(project.settings || {}),
     k: 2, concurrency: 3, style: opts.style || 'cinematic', aspect: opts.aspect || '16:9',
@@ -186,6 +193,8 @@ export function attachSource(project, opts = {}) {
   };
   m.episodes = episodes.map((e) => ({ no: e.no, title: e.title, chars: e.chars, summary: e.summary, hook: e.hook, sourceTitles: e.sourceTitles || [] }));
   m.split = split;
+  // 上传即播种角色候选（启发式归一）：重复上传只补空字段，不覆盖手动维护的角色属性
+  m.characters = mergeExtracted(m.characters || [], characters, { source: 'heuristic' }).characters;
 
   const t0 = Date.now();
   finishStep(m, 'upload', { ok: true, note: `已解析 ${novel.chapterCount} 章 · ${novel.totalChars} 字`, durationMs: Date.now() - t0 });

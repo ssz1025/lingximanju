@@ -27,3 +27,24 @@
 | 前端运行时 | jsdom + 原生 ESM 连真实服务：向导三阶段、实时分集预览、创建后六步引导、四态步骤面板 `2/6 → 3/6 → 6/6`、管理面板四 Tab、侧栏筛选与更多菜单，**0 运行时错误** |
 | 修复的真实缺陷 | 步骤请求体未按 `api()` 约定包装导致 GET 404；管理面板误用全局统计且 `project:meta` 覆盖侧栏统计；顶栏进度与步骤面板刷新时机不同步 |
 | 画布保留 | `public/canvas.js` 未改动；创作项目初始图 = `novel2video` DAG + `episode` 节点，运行中动态节点仍画在同一画布 |
+
+## 2026-11-06 · ComfyUI 提示词注入修复
+
+| 项目 | 结果 |
+|---|---|
+| 缺陷复现 | 现网生效的 Krea2 Turbo 工作流把提示词写在 `30:19 PrimitiveStringMultiline.value`，`30:6 CLIPTextEncode.text` 只是连线 `["30:28", 0]`；旧注入器只写进了 `filename_prefix` 与 `seed`，`analyzeWorkflow` 的文本槽位为空 → 每个镜头都沿用「甜酷 Y2K 千禧年风格」那句固定提示词，`data/assets/` 里 15 张出图全是同一位少女的不同姿态 |
+| 修复验证 | 干跑注入后 `30:19.value` 被替换为镜头提示词，`30:18`（系统提示词）与 `30:27.string_b`（LoRA 触发词）保持原值，`30:6.text` 连线保留（润色链路仍生效）；`30:3.seed` 与 `30:16.sampling_mode.seed` 逐次随机，`29.filename_prefix` 带唯一后缀 |
+| 端到端 | 假 ComfyUI 服务接收两次 `/prompt`：载荷分别含两段不同镜头提示词，均不含工作流内置固定提示词，产物各自落到不同 `/assets/*` 文件 |
+| 兼容矩阵 | 经典双 `CLIPTextEncode`（正/负分别注入）、`{{占位符}}`、显式绑定（不会重复注入）、连线但无文本源（兜底覆盖 `CLIPTextEncode.text` 并告警）、完全无文本节点（明确告警）全部通过 |
+| 自检接口 | `POST /api/comfyui/inject-check` 对当前生效的出图 / 视频工作流返回注入节点、策略与告警；设置页打开即自动干跑并显示 ✓ / ✕ 徽标 |
+| 回归基线 | `npm run check` 57 文件通过；`npm test` **142/142 通过**（新增 `tests/comfy-prompt.test.mjs` 8 项） |
+
+## 2026-11-06 · 项目封面增强 + AI 提示词接口修复
+
+| 项目 | 结果 |
+|---|---|
+| 缺陷复现 | 「✦ AI 生成提示词」返回的是内置模板原文（`的故事。，cinematic…` 拼接痕迹）却标 `source:llm`：目标模型（mimo-v2.6-pro）把 JSON 包进以任务命名的单键返回（`{"cover文生图提示词":"{\"prompt\":...}"}`），`extractJSON` 解出的对象无 `prompt` 键，`mergeDefaults` 静默用 Mock 模板补位后仍按 LLM 计 |
+| 修复验证 | `unwrapNested` 递归解包「单键 + JSON 字符串值」包裹后，实测接口返回模型真实提示词（水墨风黑色电影构图、按项目资料与自定义要求撰写），`source:llm`；Mock 补位改为逐键打 `__mockKeys` 标记，缺 `prompt` 字段时响应明示「LLM 未返回有效提示词，已回退内置模板」，不再冒充 AI |
+| 提示词直用 | 文本框内容即完整提示词原样注入工作流（去掉 `exact` 勾选框与后端条件分支），留空才按项目资料套片名模板；假 ComfyUI 载荷断言 `6.text` 与文本框逐字一致 |
+| 多参考图 | `refs`（资源库图片 / 本地上传）按顺序对应工作流多个 `LoadImage` 插槽；单图沿用全槽同图旧语义、缺图占位填充、越额与无插槽均告警；非法文件名 / 损坏 dataUrl 拒绝 |
+| 回归基线 | `npm run check` 60 文件通过；`npm test` **171/171 通过**（新增 `tests/cover.test.mjs` 12 项） |

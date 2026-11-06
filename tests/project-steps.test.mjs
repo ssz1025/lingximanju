@@ -353,6 +353,19 @@ test('projectIndex 下发 cover 字段（供侧栏卡片渲染）', () => {
   assert.equal(idx2.cover.prompt, '海报');
 });
 
+test('projectIndex 下发项目级 tokens 累积（按 runs 汇总）', () => {
+  const p = makeProject();
+  p.runs = [
+    { id: 'r1', status: 'done', tokens: { prompt: 100, completion: 30, total: 130, calls: 1 } },
+    { id: 'r2', status: 'done', tokens: { prompt: 220, completion: 70, total: 290, calls: 2 } },
+    { id: 'r3', status: 'error' },                     // 旧运行无 tokens 字段也应兼容
+  ];
+  const idx = projectIndex(p);
+  assert.deepEqual(idx.tokens, { prompt: 320, completion: 100, total: 420, calls: 3 });
+  const idxEmpty = projectIndex({ ...p, runs: [] });
+  assert.deepEqual(idxEmpty.tokens, { prompt: 0, completion: 0, total: 0, calls: 0 });
+});
+
 /* ---------------------------------------------------------------- Token 用量统计 */
 test('finishStep 记录本次运行 tokens 并按运行累加，startStep 清空上次明细', () => {
   const m = createManagement({ kind: 'novel', title: 'T' });
@@ -396,4 +409,74 @@ test('resetAllSteps 与 projectStats 的 tokens 汇总', () => {
 
   resetAllSteps(m);
   assert.equal(m.steps.every((s) => s.tokens.total === 0 && s.lastTokens === null), true, '全部重置后 tokens 清零');
+});
+
+/* ---------------------------------------------------------------- 角色库管理动作 */
+test('createManagement 初始化角色库，ensureManagement 为老项目补齐并归一', () => {
+  const p = makeProject();
+  assert.deepEqual(p.management.characters, []);
+
+  const old = { id: 'old', name: '老项目', nodes: [], edges: [], management: createManagement({}) };
+  delete old.management.characters;
+  assert.deepEqual(ensureManagement(old).characters, []);
+
+  // 旧数据逐项归一：补 id、过滤非法 palette、补 views 结构
+  old.management.characters = [{ name: '林晚', palette: ['#112233', 'red'], source: 'llm' }];
+  const m = ensureManagement(old);
+  assert.equal(m.characters.length, 1);
+  assert.ok(m.characters[0].id);
+  assert.deepEqual(m.characters[0].palette, ['#112233']);
+  assert.deepEqual(m.characters[0].views, { front: null, side: null, back: null });
+});
+
+test('applyManageAction char-upsert：新增 / 更新 / 校验', () => {
+  const p = makeProject();
+  let r = applyManageAction(p, 'char-upsert', { name: '林晚', role: '女主角', palette: ['#112233'] });
+  assert.equal(r.ok, true);
+  assert.equal(r.character.name, '林晚');
+  assert.equal(r.character.source, 'manual');
+  assert.equal(p.management.characters.length, 1);
+  const id = r.character.id;
+
+  // 更新：保留 source 与 views，只改属性
+  p.management.characters[0].source = 'llm';
+  p.management.characters[0].views.front = { file: 'a.png', url: '/assets/a.png', prompt: '', provider: '', at: 1 };
+  r = applyManageAction(p, 'char-upsert', { id, name: '林晚', role: '女一号', gender: '女' });
+  assert.equal(r.ok, true);
+  assert.equal(p.management.characters.length, 1, '按 id 更新不应新增');
+  assert.equal(p.management.characters[0].role, '女一号');
+  assert.equal(p.management.characters[0].source, 'llm', '更新保留原来源');
+  assert.equal(p.management.characters[0].views.front.url, '/assets/a.png', '更新不碰 views 产物');
+
+  assert.equal(applyManageAction(p, 'char-upsert', { name: '   ' }).ok, false, '空名应被拒绝');
+  assert.ok(p.management.history.filter((h) => h.action === 'characters').length >= 2);
+});
+
+test('applyManageAction char-upsert：上限 12 个角色', () => {
+  const p = makeProject();
+  for (let i = 0; i < 12; i++) {
+    assert.equal(applyManageAction(p, 'char-upsert', { name: `角色${i}` }).ok, true);
+  }
+  const r = applyManageAction(p, 'char-upsert', { name: '第13个' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /最多/);
+  assert.equal(p.management.characters.length, 12);
+});
+
+test('applyManageAction char-del：按 id 删除，不存在则拒绝', () => {
+  const p = makeProject();
+  const { character } = applyManageAction(p, 'char-upsert', { name: '沈默' });
+  assert.equal(applyManageAction(p, 'char-del', character.id).ok, true);
+  assert.deepEqual(p.management.characters, []);
+  assert.equal(applyManageAction(p, 'char-del', 'chr_none').ok, false);
+});
+
+test('applyManageAction characters：整体替换并归一（滤空名、限上限）', () => {
+  const p = makeProject();
+  const list = Array.from({ length: 15 }, (_, i) => ({ name: i < 14 ? `角色${i}` : '', palette: ['bad', '#aabbcc'] }));
+  const r = applyManageAction(p, 'characters', list);
+  assert.equal(r.ok, true);
+  assert.equal(p.management.characters.length, 12, '滤掉空名后仍受 12 上限约束');
+  assert.deepEqual(p.management.characters[0].palette, ['#aabbcc'], '非法配色被过滤');
+  assert.ok(p.management.characters[0].id);
 });

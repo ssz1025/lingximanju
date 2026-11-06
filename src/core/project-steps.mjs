@@ -5,6 +5,8 @@
  * 并把每一步映射到本仓库真实执行的节点类型（scope），供 orchestrator 分阶段调度。
  * 理论依据与消融数据见 docs/THEORY.md；论文原文见 docs/paper/。
  * ==========================================================================*/
+import { normalizeCharacter, MAX_CHARACTERS } from './characters.mjs';
+
 export const STEP_STATUS = {
   pending: { label: '待执行', color: 'muted' },
   running: { label: '进行中', color: 'accent' },
@@ -119,6 +121,7 @@ export function defaultBible(opts = {}) {
   return {
     title: String(opts.title || '').slice(0, 80),        // 剧名（可与项目名不同）
     genre: '', audience: '',
+    logline: String(opts.logline || '').slice(0, 300),   // 一句话简介（AI 补全 / 手动填写）
     totalEpisodes: Number(opts.totalEpisodes) || 0,      // 总集数：0 = 未设定
     ending: '', artStyle: '', tone: '',
     firstEpisodeTheme: '',                               // 首集锚定主题
@@ -138,6 +141,8 @@ export function createManagement(opts = {}) {
     status: kind === 'novel' ? 'draft' : 'standard',
     favorite: false, archived: false, tags: [], note: '',
     bible: defaultBible(opts.bible || {}),
+    // 角色库（角色管理 Tab）：从小说提取 + 手动维护，属性驱动多视图生成
+    characters: [],
     // 封面：空 url + source:'name' 时前端渲染「项目名称封面」；
     // source:'upload' / 'comfyui' 时 url 指向 /assets/ 下的图片
     cover: { url: '', source: 'name', updatedAt: now(), prompt: '' },
@@ -182,6 +187,9 @@ export function ensureManagement(project) {
   if (!project.management.cover) project.management.cover = { url: '', source: 'name', updatedAt: Date.now(), prompt: '' };
   // 老项目惰性补创作设定
   if (!project.management.bible) project.management.bible = defaultBible();
+  // 老项目惰性补角色库并逐项归一
+  if (!Array.isArray(project.management.characters)) project.management.characters = [];
+  else project.management.characters = project.management.characters.map((c) => normalizeCharacter(c));
   return project.management;
 }
 
@@ -333,6 +341,7 @@ export function applyManageAction(project, action, value) {
       // undefined = 本次未提交该字段，保留原值；空串 = 用户显式清空
       const s = (k, max) => value?.[k] === undefined ? b[k] : String(value[k]).slice(0, max);
       b.title = s('title', 80); b.genre = s('genre', 24); b.audience = s('audience', 24);
+      b.logline = s('logline', 300);
       b.ending = s('ending', 24); b.artStyle = s('artStyle', 24); b.tone = s('tone', 24);
       b.firstEpisodeTheme = s('firstEpisodeTheme', 300);
       b.adaptation = s('adaptation', 1200); b.bottomLines = s('bottomLines', 1200);
@@ -347,6 +356,53 @@ export function applyManageAction(project, action, value) {
       }
       logHistory(m, 'bible', `更新创作设定${b.title ? ` ·《${b.title}》` : ''}${b.totalEpisodes ? ` · 总集数 ${b.totalEpisodes}` : ''}`);
       return { ok: true, message: '创作设定已保存', bible: b };
+    }
+    case 'char-upsert': {
+      if (!Array.isArray(m.characters)) m.characters = [];
+      const raw = { ...(value || {}) };
+      const name = String(raw.name || '').trim();
+      if (!name) return { ok: false, message: '角色姓名不能为空' };
+      const idx = raw.id ? m.characters.findIndex((x) => x.id === raw.id) : -1;
+      if (idx >= 0) {
+        // 只在本 action 内合并更新；views 产物只由生成端点写入
+        const prev = m.characters[idx];
+        const next = normalizeCharacter({ ...prev, ...raw, id: prev.id, source: prev.source, views: prev.views, updatedAt: now() });
+        m.characters[idx] = next;
+        logHistory(m, 'characters', `更新角色「${next.name}」属性`);
+        return { ok: true, message: `角色「${next.name}」已保存`, character: next };
+      }
+      if (m.characters.length >= MAX_CHARACTERS) return { ok: false, message: `角色最多 ${MAX_CHARACTERS} 个` };
+      const created = normalizeCharacter({ ...raw, id: '', source: raw.source === 'llm' ? 'llm' : 'manual', updatedAt: now() });
+      m.characters.push(created);
+      logHistory(m, 'characters', `新增角色「${created.name}」`);
+      return { ok: true, message: `角色「${created.name}」已添加`, character: created };
+    }
+    case 'char-del': {
+      const id = String(value || '');
+      const before = m.characters?.length || 0;
+      m.characters = (m.characters || []).filter((c) => c.id !== id);
+      if (m.characters.length === before) return { ok: false, message: '角色不存在' };
+      logHistory(m, 'characters', '删除了一个角色');
+      return { ok: true, message: '角色已删除' };
+    }
+    case 'characters': {
+      const list = (Array.isArray(value) ? value : [])
+        .map((c) => normalizeCharacter(c)).filter((c) => c.name).slice(0, MAX_CHARACTERS);
+      m.characters = list;
+      logHistory(m, 'characters', `角色列表已更新：${list.length} 个`);
+      return { ok: true, message: `角色列表已更新：${list.length} 个`, characters: list };
+    }
+    case 'settings': {
+      // 画面设置：风格 / 画幅（项目信息页可逐步补充，作用于 Provider 出图与视频）
+      project.settings = project.settings || {};
+      if (value?.style !== undefined) project.settings.style = String(value.style).slice(0, 24);
+      if (value?.aspect !== undefined) {
+        const aspect = String(value.aspect).slice(0, 8);
+        if (!['16:9', '9:16'].includes(aspect)) return { ok: false, message: '画幅只支持 16:9 / 9:16' };
+        project.settings.aspect = aspect;
+      }
+      logHistory(m, 'settings', `画面设置：风格 ${project.settings.style || '默认'} · 画幅 ${project.settings.aspect || '默认'}`);
+      return { ok: true, message: '画面设置已保存' };
     }
     case 'reset-steps':
       resetAllSteps(m);
@@ -408,6 +464,11 @@ export function projectStats(project) {
 export function projectIndex(p) {
   const m = p.management || createManagement({ kind: 'standard', title: p.name });
   const prog = stepProgress(m);
+  // 项目级 token 累积：按全部运行汇总（创作类每步=一次运行，标准类每次编排=一次运行，两类项目统一口径）
+  const tokens = (p.runs || []).reduce((a, r) => {
+    for (const k of ['prompt', 'completion', 'total', 'calls']) a[k] += r.tokens?.[k] || 0;
+    return a;
+  }, { prompt: 0, completion: 0, total: 0, calls: 0 });
   return {
     id: p.id, name: p.name, mode: p.mode, updatedAt: p.updatedAt || 0,
     createdAt: p.createdAt || 0,
@@ -416,6 +477,7 @@ export function projectIndex(p) {
     kind: m.kind, status: prog.status, favorite: !!m.favorite, archived: !!m.archived,
     tags: m.tags || [], episodeCount: (m.episodes || []).length,
     stepDone: prog.done, stepTotal: prog.total, progress: prog.percent,
+    tokens,
     deliverables: m.deliverables || { video: true, pack: true },
     cover: m.cover || { url: '', source: 'name', updatedAt: 0, prompt: '' },
     hasPack: !!(p.nodes || []).find((n) => n.type === 'final')?.data?.directorPack?.file,

@@ -132,6 +132,33 @@ export function characterSVG(opts = {}) {
   return svgFrame({ w, h, inner });
 }
 
+/** 角色多视图单张定妆：正面 / 侧面 / 背面之一 + 角色配色色板 */
+export function characterViewSVG(opts = {}) {
+  const { name = '角色', appearance = '', view = 'front', palette: charColors = [], style = 'cinematic', seed = '' } = opts;
+  const p = palette(style);
+  const w = 640, h = 360;
+  const label = { front: '正面', side: '侧面', back: '背面' }[view] || '正面';
+  const swatches = (charColors.length ? charColors : ['#0b111c', p.sky[1], p.accent]).slice(0, 5);
+  const narrow = view === 'side' ? 0.62 : 1;
+  const figure = `<g transform="translate(320 0) scale(${narrow} 1)" fill="#0b111c" opacity=".9">
+      <circle cx="0" cy="106" r="22"/>
+      <path d="M-30 132 Q0 120 30 132 L38 258 L-38 258 Z"/>
+      <path d="M-38 258 L-24 320 L-8 320 L-6 258 Z M38 258 L24 320 L8 320 L6 258 Z"/>
+      ${view === 'back' ? '' : `<rect x="-34" y="136" width="68" height="10" fill="${p.accent}" opacity=".55"/>`}
+    </g>`;
+  const inner = `<rect width="640" height="360" fill="${p.sky[0]}"/>
+    <rect x="0" y="0" width="640" height="46" fill="#080b12" opacity=".85"/>
+    <text x="20" y="30" fill="${p.accent}" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="17" font-weight="700">${esc(name)} · 角色多视图 · ${label}</text>
+    <g>
+      <rect x="242" y="60" width="156" height="250" rx="10" fill="${p.sky[1]}" opacity=".28" stroke="rgba(255,255,255,.12)"/>
+      ${figure}
+      <text x="320" y="302" text-anchor="middle" fill="${p.text}" font-size="12" font-family="PingFang SC,sans-serif" opacity=".8">${label}</text>
+    </g>
+    <text x="20" y="340" fill="${p.text}" opacity=".72" font-size="12" font-family="PingFang SC,sans-serif">${esc(appearance || '造型由角色属性驱动')}</text>
+    <g transform="translate(${620 - swatches.length * 18} 330)">${swatches.map((c, i) => `<circle cx="${i * 18}" cy="0" r="7" fill="${c}"/>`).join('')}</g>`;
+  return svgFrame({ w, h, inner });
+}
+
 /** 转场/空间锚点图：左右机位 + 中间平滑过渡带 */
 export function transitionSVG(opts = {}) {
   const { from = '机位 A', to = '机位 B', style = 'cinematic', seed = '' } = opts;

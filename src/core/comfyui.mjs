@@ -1,6 +1,6 @@
 // ComfyUI 本地 API 客户端
 // 设计目标：用户把 ComfyUI 里「导出(API)」得到的 workflow JSON 原样贴进来即可运行，
-// 不要求改写节点图。参数注入有三层优先级：显式绑定 > {{占位符}} > 按 class_type 自动识别。
+// 不要求改写节点图。参数注入有三层优先级：显式绑定 > {{占位符}} > 按图自动识别。
 //
 // 官方链路：POST /prompt → 轮询 /history/{prompt_id} → GET /view 下载产物
 // 参考图：POST /upload/image（multipart）→ 把返回的 name 写进 LoadImage.image
@@ -10,6 +10,133 @@ import { placeholderFrame } from './raster.mjs';
 const PLACEHOLDER_RE = /\{\{\s*([\w.-]+)\s*\}\}/g;
 const VIDEO_EXTS = /\.(mp4|webm|mov|mkv|m4v|gif)$/i;
 const IMAGE_EXTS = /\.(png|jpe?g|webp|bmp)$/i;
+// 支持 seed / noise_seed / sampling_mode.seed 这类带命名空间的种子字段
+const SEED_KEY_RE = /^(?:.*\.)?(seed|noise_seed|rand_seed)$/i;
+
+/* ------------------------------------------------------------------ *
+ * 提示词注入点识别
+ *
+ * 很多现代工作流（Krea2 / Qwen-Image / Flux 等）并不把提示词直接写在
+ * CLIPTextEncode.text 上，而是走「PrimitiveStringMultiline → StringConcatenate
+ * / TextGenerate 提示词润色 / Switch → CLIPTextEncode」这类连线链路。
+ * 旧实现只认「CLIPTextEncode.text 是字符串」的节点，遇到连线型工作流就一个
+ * 提示词都不注入：每个镜头都沿用工作流里写死的那句话，表现为「所有图片都
+ * 是同一张」。这里沿图回溯，找出真正提供文本的源节点并写入本次镜头提示词。
+ * ------------------------------------------------------------------ */
+const TEXT_INPUT_KEYS = new Set([
+  'text', 'value', 'prompt', 'string', 'string_a', 'string_b',
+  'positive', 'negative', 'positive_prompt', 'negative_prompt',
+  'text_positive', 'text_negative', 'text_g', 'text_l',
+  'prompt_text', 'input_text', 'wildcard_text', 'string_value',
+]);
+const SYSTEM_TITLE_RE = /system|系统|template|模板|instruction|指令|规则/i;
+const SYSTEM_VALUE_RE = /^\s*(you are\b|as an?\b.*(?:expert|assistant)|think step by step|follow these rules|你是|您是|你的任务是|请按以下规则)/i;
+const NEGATIVE_RE = /negative|负面|反向|反提示|ngative/i;
+const PROMPT_TITLE_RE = /prompt|提示词|正向|用户|user|positive|画面|描述|caption/i;
+const TEXT_NODE_RE = /String|Multiline|CLIPTextEncode|TextBox|TextGenerate|Prompt|TextInput/i;
+
+const isLink = (v) => Array.isArray(v) && v.length >= 2 && (typeof v[0] === 'string' || typeof v[0] === 'number');
+const nodeTitle = (n) => String(n?._meta?.title || '');
+const placeholderKeys = (str) => [...String(str).matchAll(PLACEHOLDER_RE)].map((m) => m[1]);
+const clip = (s, n = 90) => String(s ?? '').slice(0, n);
+
+/** 从若干节点沿输入连线向上回溯，返回可达节点（含起点），自动防环 */
+function upstreamNodes(wf, startIds) {
+  const seen = new Set();
+  const queue = [...startIds].map(String);
+  while (queue.length) {
+    const id = queue.shift();
+    if (seen.has(id) || !wf[id]) continue;
+    seen.add(id);
+    for (const val of Object.values(wf[id].inputs || {})) {
+      if (isLink(val)) queue.push(String(val[0]));
+      else if (Array.isArray(val)) {
+        for (const v of val) if (isLink(v)) queue.push(String(v[0]));
+      }
+    }
+  }
+  return seen;
+}
+
+/** 判定正 / 负向 CLIPTextEncode：优先按 KSampler.positive / negative 反查 */
+function textChains(wf) {
+  const clipNodes = Object.entries(wf)
+    .filter(([id, n]) => !String(id).startsWith('_') && /CLIPTextEncode/i.test(n.class_type))
+    .map(([id]) => id)
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  const positiveClips = new Set();
+  const negativeClips = new Set();
+  for (const [id, n] of Object.entries(wf)) {
+    if (String(id).startsWith('_')) continue;
+    for (const role of ['positive', 'negative']) {
+      const link = n.inputs?.[role];
+      if (!isLink(link)) continue;
+      const chain = upstreamNodes(wf, [String(link[0])]);
+      for (const c of clipNodes) {
+        if (!chain.has(c)) continue;
+        (role === 'positive' ? positiveClips : negativeClips).add(c);
+      }
+    }
+  }
+  // 无采样器显式连线时沿用旧启发式：按节点 ID 排序，第一个正向、第二个负向
+  if (!positiveClips.size && !negativeClips.size) {
+    if (clipNodes[0]) positiveClips.add(clipNodes[0]);
+    if (clipNodes[1]) negativeClips.add(clipNodes[1]);
+  }
+  // 同一个 CLIP 节点同时供正负向（如 ConditioningZeroOut）时不算独立负向链路，
+  // 否则会把负向词写回正向提示词源节点。
+  for (const c of [...negativeClips]) if (positiveClips.has(c)) negativeClips.delete(c);
+  return { clipNodes, positiveClips, negativeClips };
+}
+
+/** 收集所有「字符串文本槽位」并按是否位于正/负向链路打分 */
+function collectTextSlots(wf, chains) {
+  const positiveReach = upstreamNodes(wf, [...chains.positiveClips]);
+  const negativeReach = upstreamNodes(wf, [...chains.negativeClips]);
+  const slots = [];
+  for (const [id, n] of Object.entries(wf)) {
+    if (String(id).startsWith('_')) continue;
+    const cls = String(n.class_type || '');
+    const title = nodeTitle(n);
+    for (const [key, val] of Object.entries(n.inputs || {})) {
+      if (!TEXT_INPUT_KEYS.has(key) || typeof val !== 'string') continue;
+      const system = SYSTEM_TITLE_RE.test(title) || SYSTEM_VALUE_RE.test(val);
+      const negative = NEGATIVE_RE.test(`${title} ${key}`);
+      let base = 0;
+      if (system) base -= 10000;                                  // 系统提示词 / 模板绝不覆盖
+      if (negative) base -= 300;
+      if (/CLIPTextEncode/i.test(cls) && key === 'text') base += 250;
+      if (PROMPT_TITLE_RE.test(title)) base += 100;
+      if (TEXT_NODE_RE.test(cls)) base += 60;
+      if (/Concatenate|Switch|Preview|Selector/i.test(cls)) base -= 40;
+      if (/^string_[ab]$/.test(key)) base -= 30;
+      if (/trigger|lora|风格触发/i.test(title)) base -= 60;
+      if (val.length > 40) base += 20;
+      if (placeholderKeys(val).length) base -= 5;
+      slots.push({
+        node: id, input: key, classType: cls, title, value: val, base,
+        system, negative,
+        inPositive: positiveReach.has(id), inNegative: negativeReach.has(id),
+      });
+    }
+  }
+  return { slots, positiveReach, negativeReach };
+}
+
+function slotScore(s, role, hasClips) {
+  let v = s.base;
+  if (!hasClips) return v;
+  if (role === 'positive') {
+    v += s.inPositive ? 300 : -300;
+    if (s.inNegative && !s.inPositive) v -= 600;
+    if (s.negative) v -= 400;
+  } else {
+    v += s.inNegative ? 300 : -300;
+    if (s.negative) v += 400;
+    if (s.inPositive && !s.inNegative) v -= 300;
+  }
+  return v;
+}
 
 export function parseWorkflow(input, label = 'workflow') {
   let wf = input;
@@ -36,7 +163,7 @@ export function parseWorkflow(input, label = 'workflow') {
   return Object.fromEntries(entries);
 }
 
-/** 扫描工作流，给出自动识别到的可注入位置（供设置页展示与测试） */
+/** 扫描工作流，给出自动识别到的可注入位置（供设置页展示与自检） */
 export function analyzeWorkflow(wf) {
   const found = [];
   const textNodes = [];
@@ -45,13 +172,10 @@ export function analyzeWorkflow(wf) {
     const push = (input, role) => found.push({ node: id, classType: node.class_type, input, role, value: node.inputs[input] });
     for (const key of Object.keys(node.inputs)) {
       const val = node.inputs[key];
-      if (typeof val === 'string' && PLACEHOLDER_RE.test(val)) {
-        PLACEHOLDER_RE.lastIndex = 0;
-        const keys = [...val.matchAll(PLACEHOLDER_RE)].map((m) => m[1]);
-        PLACEHOLDER_RE.lastIndex = 0;
-        push(key, `占位符 ${keys.join(',')}`);
+      if (typeof val === 'string' && placeholderKeys(val).length) {
+        push(key, `占位符 ${placeholderKeys(val).join(',')}`);
       }
-      if (/^(seed|noise_seed|rand_seed)$/i.test(key)) push(key, 'seed');
+      if (SEED_KEY_RE.test(key)) push(key, 'seed');
       if (/^(width|height)$/i.test(key) && Number.isFinite(Number(val))) push(key, key.toLowerCase());
       if (/^(num_frames|frame_count|length|total_frames)$/i.test(key) && Number.isFinite(Number(val))) push(key, 'frames');
       if (/^fps$/i.test(key)) push(key, 'fps');
@@ -71,6 +195,23 @@ export function analyzeWorkflow(wf) {
     node: t.node, classType: 'CLIPTextEncode', input: 'text',
     role: i === 0 ? 'positive' : i === 1 ? 'negative' : 'text', value: t.text,
   }));
+
+  // 连线型工作流的文本源节点也要展示出来，否则用户在设置页看不到提示词到底写在哪
+  const chains = textChains(wf);
+  const { slots } = collectTextSlots(wf, chains);
+  const seen = new Set(found.map((f) => `${f.node}::${f.input}`));
+  for (const s of slots) {
+    const id = `${s.node}::${s.input}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    found.push({
+      node: s.node, classType: s.classType, input: s.input, value: s.value,
+      title: s.title, score: s.base,
+      role: s.system ? 'systemPrompt（不会覆盖）'
+        : s.negative ? 'negative'
+          : s.inPositive ? 'positive' : 'text',
+    });
+  }
   return found;
 }
 
@@ -85,14 +226,16 @@ function resolveVars(vars) {
   const cfg = vars.cfg || {};
   const prompt = String(vars.prompt ?? '');
   const negativePrompt = String(vars.negative ?? cfg.negativePrompt ?? '');
+  const seed = seedValue(String(vars.seed ?? ''));
   // prompt_json：JSON 字符串内部安全形态（转义引号/换行），供 timeline_data 这类 JSON 字符串字段使用
   const jsonInner = (s) => JSON.stringify(s).slice(1, -1);
+  const prefix = String(vars.filenamePrefix || 'lingximanju');
   return {
     prompt,
     prompt_json: jsonInner(prompt),
     negative_prompt: negativePrompt,
     negative_json: jsonInner(negativePrompt),
-    seed: seedValue(String(vars.seed ?? '')),
+    seed,
     width: Number(cfg.width) || 864,
     height: Number(cfg.height) || 480,
     fps: Number(cfg.fps) || 24,
@@ -101,7 +244,8 @@ function resolveVars(vars) {
     duration: Number(vars.duration) || Math.round((Number(vars.frames || cfg.frames) / (Number(cfg.fps) || 24)) * 100) / 100 || 5,
     steps: Number(cfg.steps) || 25,
     cfg: Number(cfg.cfg) || 1.0,
-    filename_prefix: String(vars.filenamePrefix || 'lingximanju'),
+    // 每次运行用唯一前缀，避免自定义输出节点复用同名文件导致拿到上一次的图
+    filename_prefix: `${prefix}_${seed}`,
     image: String(vars.imageName || 'lingximanju_reference.png'),
     title: String(vars.title || ''),
     shot_no: String(vars.shotNo || ''),
@@ -110,7 +254,22 @@ function resolveVars(vars) {
 }
 
 /**
- * 把变量注入 workflow。返回 { prompt, applied, uploadSlots, outputNodes }
+ * 归一化参考图入参：imageRefs 数组（多图，逐 LoadImage 插槽对应）
+ * 或 imageBuffer/imageName（单图，向后兼容，应用到全部插槽）。最多取 8 张。
+ */
+function normalizeRefs(vars = {}) {
+  const list = Array.isArray(vars.imageRefs) ? vars.imageRefs : [];
+  const out = list
+    .filter((r) => r && r.buffer)
+    .map((r) => ({ buffer: r.buffer, name: String(r.name || 'reference.png') }));
+  if (!out.length && vars.imageBuffer) {
+    out.push({ buffer: vars.imageBuffer, name: String(vars.imageName || 'reference.png') });
+  }
+  return out.slice(0, 8);
+}
+
+/**
+ * 把变量注入 workflow。返回 { prompt, applied, uploadSlots, outputNodes, values, promptInjection }
  * 不修改传入的 workflow 对象。
  */
 export function injectWorkflow(workflow, vars = {}, bindings = []) {
@@ -120,24 +279,43 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
   const uploadSlots = [];
   const outputNodes = [];
   const touched = new Set(); // 已被占位符/显式绑定处理过的 node::input
+  const plan = { positive: null, negative: null, warnings: [] };
 
   const replace = (str) => String(str).replace(PLACEHOLDER_RE, (_, key) => {
     const val = values[key];
     return val === undefined ? `{{${key}}}` : String(val);
   });
+  const slotInfo = (node, input, strategy, text) => ({
+    node: String(node), input: String(input),
+    classType: wf[node]?.class_type || '', title: nodeTitle(wf[node]),
+    strategy, preview: clip(text),
+  });
 
-  // 1) 占位符：任何字符串输入（以及 link 之外的字符串）都支持
+  // 0) 显式绑定优先级最高：绑定里写了 {{prompt}} 就认定用户已指定注入位置，不再自动注入
+  for (const b of bindings || []) {
+    const keys = placeholderKeys(b.value);
+    const id = String(b.node ?? '').trim();
+    const key = String(b.input ?? '').trim();
+    if (!id || !key || !wf[id]) continue;
+    if (keys.includes('prompt')) plan.positive = slotInfo(id, key, 'binding', values.prompt);
+    if (keys.some((k) => /^negative/.test(k))) plan.negative = slotInfo(id, key, 'binding', values.negative_prompt);
+  }
+
+  // 1) 占位符：任何字符串输入都支持
   for (const [id, node] of Object.entries(wf)) {
     if (String(id).startsWith('_')) continue;
     for (const [key, val] of Object.entries(node.inputs)) {
-      if (typeof val === 'string' && PLACEHOLDER_RE.test(val)) {
-        PLACEHOLDER_RE.lastIndex = 0;
-        const next = replace(val);
-        PLACEHOLDER_RE.lastIndex = 0;
-        if (next !== val) {
-          node.inputs[key] = next;
-          applied.push({ node: id, input: key, value: next, by: 'placeholder' });
-          touched.add(`${id}::${key}`);
+      if (typeof val !== 'string') continue;
+      const keys = placeholderKeys(val);
+      if (!keys.length) continue;
+      const next = replace(val);
+      if (next !== val) {
+        node.inputs[key] = next;
+        applied.push({ node: id, input: key, value: next, by: 'placeholder' });
+        touched.add(`${id}::${key}`);
+        if (keys.includes('prompt') && !plan.positive) plan.positive = slotInfo(id, key, 'placeholder', values.prompt);
+        if (keys.some((k) => /^negative/.test(k)) && !plan.negative) {
+          plan.negative = slotInfo(id, key, 'placeholder', values.negative_prompt);
         }
       }
     }
@@ -151,15 +329,12 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
     applied.push({ node: id, input: key, value, by: `auto:${role}` });
     touched.add(`${id}::${key}`);
   };
-  const textNodes = Object.entries(wf)
-    .filter(([id, n]) => !String(id).startsWith('_') && /CLIPTextEncode/i.test(n.class_type) && typeof n.inputs.text === 'string')
-    .sort((a, b) => String(a[0]).localeCompare(String(b[0]), 'en', { numeric: true }));
 
   for (const [id, node] of Object.entries(wf)) {
     if (String(id).startsWith('_')) continue;
     for (const [key, val] of Object.entries(node.inputs)) {
       if (touched.has(`${id}::${key}`)) continue;
-      if (/^(seed|noise_seed|rand_seed)$/i.test(key)) auto(id, node, key, values.seed, 'seed');
+      if (SEED_KEY_RE.test(key)) auto(id, node, key, values.seed, 'seed');
       else if (key === 'width' && Number.isFinite(Number(val))) auto(id, node, key, values.width, 'width');
       else if (key === 'height' && Number.isFinite(Number(val))) auto(id, node, key, values.height, 'height');
       else if (/^(num_frames|frame_count|total_frames)$/i.test(key) && Number.isFinite(Number(val))) auto(id, node, key, values.frames, 'frames');
@@ -174,11 +349,61 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
       outputNodes.push({ node: id, classType: node.class_type });
     }
   }
-  // 文本节点：第一个为正向、第二个为负向（若原文本自带占位符则已被 touched 跳过）
-  if (textNodes[0]) auto(textNodes[0][0], textNodes[0][1], 'text', values.prompt, 'positive');
-  if (textNodes[1] && values.negative_prompt) auto(textNodes[1][0], textNodes[1][1], 'text', values.negative_prompt, 'negative');
 
-  // 3) 显式绑定优先级最高
+  // 3) 提示词注入：沿图回溯找真正的文本源节点，保证每个镜头的提示词都能写进去
+  const chains = textChains(wf);
+  const analysis = collectTextSlots(wf, chains);
+  const hasClips = chains.clipNodes.length > 0;
+
+  const ranked = (role) => analysis.slots
+    .filter((s) => !s.system
+      && !touched.has(`${s.node}::${s.input}`)
+      && (!hasClips || (role === 'positive' ? analysis.positiveReach : analysis.negativeReach).has(s.node))
+      && (role === 'positive' ? !s.negative : true))
+    .map((s) => ({ slot: s, score: slotScore(s, role, hasClips) }))
+    .sort((a, b) => b.score - a.score);
+
+  const injectRole = (role, text) => {
+    if (plan[role] || !text) return;   // 已由绑定/占位符处理，或本次没有该提示词
+    const list = ranked(role);
+    const clips = [...(role === 'positive' ? chains.positiveClips : chains.negativeClips)];
+    const targets = clips.length ? clips : [null];
+    const chosen = [];
+    const overrides = [];
+    for (const c of targets) {
+      const reach = c ? upstreamNodes(wf, [c]) : null;
+      const hit = list.find(({ slot }) => !reach || reach.has(slot.node));
+      if (hit) {
+        const s = hit.slot;
+        if (!chosen.some((x) => x.node === s.node && x.input === s.input)) chosen.push(s);
+      } else if (c) {
+        overrides.push(c);   // 该 CLIP 节点上游没有可写文本 → 直接把 text 从连线改成字面量
+      }
+    }
+    for (const s of chosen) {
+      auto(s.node, wf[s.node], s.input, text, role);
+      const strategy = /CLIPTextEncode/i.test(s.classType) && s.input === 'text' ? 'clipText' : 'primitive';
+      plan[role] = slotInfo(s.node, s.input, strategy, text);
+    }
+    for (const c of overrides) {
+      if (!wf[c]) continue;
+      wf[c].inputs.text = text;
+      applied.push({ node: c, input: 'text', value: text, by: `auto:${role}:overrideLink` });
+      touched.add(`${c}::text`);
+      plan[role] = slotInfo(c, 'text', 'overrideLink', text);
+    }
+    if (role === 'positive' && !plan.positive) {
+      plan.warnings.push('未找到提示词注入点：本次出图会沿用工作流里写死的提示词，所有镜头可能得到同一画面。请在提示词节点写 {{prompt}}，或用「提示词注入自检」查看后添加显式绑定。');
+    }
+    if (plan[role]?.strategy === 'overrideLink') {
+      plan.warnings.push(`工作流没有可写入的文本源节点，已直接覆盖 ${plan[role].node}.text（会绕过工作流内的提示词润色链路）。`);
+    }
+  };
+
+  injectRole('positive', values.prompt);
+  injectRole('negative', values.negative_prompt);
+
+  // 4) 显式绑定最后落盘，确保覆盖自动注入
   for (const b of bindings || []) {
     const id = String(b.node ?? '').trim();
     const key = String(b.input ?? '').trim();
@@ -186,8 +411,27 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
     wf[id].inputs[key] = replace(String(b.value ?? ''));
     applied.push({ node: id, input: key, value: wf[id].inputs[key], by: 'binding' });
   }
+  if (!values.prompt) plan.warnings.push('本次调用没有传入提示词（prompt 为空），跳过正向提示词注入。');
+  plan.ok = Boolean(plan.positive);
 
-  return { prompt: wf, applied, uploadSlots, outputNodes, values };
+  return { prompt: wf, applied, uploadSlots, outputNodes, values, promptInjection: plan };
+}
+
+/**
+ * 不连接 ComfyUI 的干跑自检：返回提示词会被写到哪个节点、用什么策略、以及告警。
+ * 供 /api/comfyui/analyze 与设置页「提示词注入自检」使用。
+ */
+export function describeWorkflow(workflow, vars = {}, bindings = []) {
+  const samplePrompt = String(vars.prompt || '【自检示例】雨夜霓虹街头，少女撑伞回望，电影感中景');
+  const built = injectWorkflow(workflow, { ...vars, prompt: samplePrompt }, bindings);
+  return {
+    ok: Boolean(built.promptInjection.positive),
+    positive: built.promptInjection.positive,
+    negative: built.promptInjection.negative,
+    warnings: built.promptInjection.warnings,
+    samplePrompt,
+    applied: built.applied.filter((a) => /positive|negative|placeholder|binding/.test(a.by)),
+  };
 }
 
 async function requestJSON(url, options = {}) {
@@ -288,30 +532,61 @@ async function downloadOutput(config, file, signal) {
 
 /**
  * 完整执行一次 API 格式工作流。
- * @returns {Promise<{assets:Array, primary:Object|null, promptId:string, applied:Array, durationMs:number}>}
+ * vars.imageRefs：[{buffer,name}]，多张参考图按 LoadImage 插槽顺序一一对应；
+ * vars.imageBuffer/imageName：单张参考图（应用到全部插槽，向后兼容）。
+ * @returns {Promise<{assets:Array, primary:Object|null, promptId:string, applied:Array,
+ *   promptInjection:Object, durationMs:number}>}
  */
 export async function runWorkflow(config, workflow, vars = {}, opts = {}) {
   const { signal, log = () => {}, bindings = [] } = opts;
   const built = injectWorkflow(workflow, vars, bindings);
   const prompt = built.prompt;
+  const plan = built.promptInjection;
 
-  // 参考图：优先用调用方给的 buffer，否则按帧信息生成一张合法 PNG 占位
+  if (plan.positive) {
+    log('info', `提示词 → ${plan.positive.node}.${plan.positive.input}` +
+      `${plan.positive.title ? `「${plan.positive.title}」` : ''} · ${plan.positive.strategy} · "${clip(plan.positive.preview, 60)}"`);
+  }
+  for (const w of plan.warnings) log('warn', w);
+
+  // 参考图：多参考图按 LoadImage 插槽顺序一一对应；单图沿用旧行为（应用到全部插槽，
+  // 兼容首尾帧同图的视频工作流）；没有参考图时按帧信息生成一张合法 PNG 占位
+  const refs = normalizeRefs(vars);
+  if (refs.length && !built.uploadSlots.length) {
+    log('warn', `提供了 ${refs.length} 张参考图，但工作流没有 LoadImage 参考图插槽，参考图未被使用`);
+  }
   if (built.uploadSlots.length) {
-    let buffer = vars.imageBuffer;
-    let name = vars.imageName || 'reference.png';
-    if (!buffer) {
-      buffer = placeholderFrame({ seed: vars.seed, shotNo: vars.shotNo, style: vars.style, kind: 'reference' });
-      name = 'lingximanju_reference.png';
+    const uploads = [];
+    for (const ref of refs) {
+      let name = ref.name || 'reference.png';
+      if (!IMAGE_EXTS.test(name)) name = `${name.replace(/\.[^.]+$/, '')}.png`;
+      uploads.push(await uploadImage(config, ref.buffer, name, signal));
     }
-    if (!IMAGE_EXTS.test(name)) name = `${name.replace(/\.[^.]+$/, '')}.png`;
-    const uploaded = await uploadImage(config, buffer, name, signal);
-    for (const slot of built.uploadSlots) {
-      if (!prompt[slot.node]) continue;
-      const rel = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
+    if (!uploads.length) {
+      const buffer = placeholderFrame({ seed: vars.seed, shotNo: vars.shotNo, style: vars.style, kind: 'reference' });
+      uploads.push(await uploadImage(config, buffer, 'lingximanju_reference.png', signal));
+    } else if (uploads.length > 1) {
+      if (uploads.length > built.uploadSlots.length) {
+        log('warn', `参考图 ${uploads.length} 张多于工作流的 ${built.uploadSlots.length} 个 LoadImage 插槽，多余的参考图未被使用`);
+      } else if (uploads.length < built.uploadSlots.length) {
+        log('warn', `参考图 ${uploads.length} 张少于工作流的 ${built.uploadSlots.length} 个 LoadImage 插槽，剩余插槽用占位图填充`);
+        while (uploads.length < built.uploadSlots.length) {
+          const buffer = placeholderFrame({ seed: `${vars.seed}-pad-${uploads.length}`, shotNo: vars.shotNo, style: vars.style, kind: 'reference' });
+          uploads.push(await uploadImage(config, buffer, `lingximanju_reference_${uploads.length}.png`, signal));
+        }
+      }
+    }
+    built.uploadSlots.forEach((slot, i) => {
+      if (!prompt[slot.node]) return;
+      const u = uploads.length === 1 ? uploads[0] : uploads[i];
+      if (!u) return;
+      const rel = u.subfolder ? `${u.subfolder}/${u.name}` : u.name;
       prompt[slot.node].inputs[slot.input] = rel;
       built.applied.push({ node: slot.node, input: slot.input, value: rel, by: 'auto:uploadImage' });
-    }
-    log('info', `参考图已上传至 ComfyUI input：${uploaded.name}`);
+    });
+    log('info', uploads.length === 1
+      ? `参考图已上传至 ComfyUI input：${uploads[0].name}`
+      : `参考图 ${uploads.length} 张已按 LoadImage 插槽顺序上传：${uploads.map((u) => u.name).join('、')}`);
   }
 
   const t0 = Date.now();
@@ -352,7 +627,7 @@ export async function runWorkflow(config, workflow, vars = {}, opts = {}) {
   if (!assets.length) throw new Error('所有产物下载失败');
   const primary = assets.find((a) => a.kind === 'video') || assets.find((a) => a.kind === 'image') || assets[0];
   log('info', `ComfyUI 完成 · ${assets.length} 个产物 · ${Date.now() - t0}ms`);
-  return { assets, primary, promptId, applied: built.applied, durationMs: Date.now() - t0 };
+  return { assets, primary, promptId, applied: built.applied, promptInjection: plan, durationMs: Date.now() - t0 };
 }
 
 /**

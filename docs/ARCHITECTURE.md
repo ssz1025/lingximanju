@@ -67,7 +67,7 @@
 │  events        事件总线 + SSE 订阅管理                          │
 │  store         JSON 持久化、原子写入、撤销无关的服务端快照         │
 │  providers     LLM / Image / Video / Judge 四类能力适配器         │
-│  comfyui       API 工作流解析、参数注入、提交、轮询、产物下载       │
+│  comfyui       API 工作流解析、沿图提示词注入 / 参数注入、提交、轮询│
 │  comfy-config  全局 ComfyUI 连接 / 工作流 / 产物配置                │
 │  raster / zip  自研 PNG 编码器与 ZIP 写入器                        │
 │  film          ffmpeg 片段拼接 → 成片 MP4                          │
@@ -299,7 +299,8 @@ providers.judge({ candidates, criteria })         -> { index, scores, reason }
 
 ```
 image()/video()  ──► injectWorkflow(workflow, vars, bindings)
-                       │  占位符 → 自动识别 → 显式绑定
+                       │  显式绑定 > {{占位符}} > 沿图自动识别
+                       │  （KSampler → CLIPTextEncode → 上游文本源节点）
                        ▼
              有 LoadImage 节点？──是──► POST /upload/image（multipart）
                        │                  返回 name → 写回 LoadImage.image
@@ -321,13 +322,15 @@ image()/video()  ──► injectWorkflow(workflow, vars, bindings)
 
 | 变量 | 来源 | 注入目标 |
 |---|---|---|
-| `prompt` / `negative_prompt` | 镜头规格、运动描述、全局负向词 | `{{}}` 或第 1/2 个 `CLIPTextEncode.text` |
-| `seed` | 节点 ID + 候选序号 + 时间，逐次唯一 | `seed` / `noise_seed` / `rand_seed` |
+| `prompt` / `negative_prompt` | 镜头规格、运动描述、全局负向词 | `{{}}` / 显式绑定 / `CLIPTextEncode.text` / **沿正、负向连线回溯到的字符串源节点**（`PrimitiveStringMultiline.value`、`StringConcatenate.string_*` 等）；系统提示词、LoRA 触发词与负向链路会被排除 |
+| `seed` | 节点 ID + 候选序号 + 时间，逐次唯一 | `seed` / `noise_seed` / `rand_seed` / `sampling_mode.seed` |
 | `width` / `height` / `fps` / `frames` | `comfyui.json` 与镜头时长 × fps | 同名输入、`num_frames` / `frame_count` / `length` |
-| `filename_prefix` | `lingximanju_<kind>_<shotNo>` | 输出节点前缀，便于在 ComfyUI output 里归档 |
+| `filename_prefix` | `lingximanju_<kind>_<shotNo>_<seed>` | 输出节点前缀，逐次唯一，避免同名文件被复用 |
 | 首帧 / 角色参考 | 画布 `/assets/*` | `LoadImage.image`；SVG 由 `raster.mjs` 渲染为合法 PNG 后上传 |
 
 顶层 `_comment` 等元数据键在解析时剔除，避免被当成节点提交。
+
+**提示词沿图回溯（修复「所有镜头都是同一张图」）**：Krea2 / Qwen-Image 等现代工作流把提示词写在 `PrimitiveStringMultiline` 上，经 `StringConcatenate` / `TextGenerate` 润色 / `ComfySwitchNode` 才连到 `CLIPTextEncode.text`。若只扫描「`CLIPTextEncode.text` 是字符串」的节点，注入列表里一个提示词都没有，每次都提交工作流里写死的那句话，画面只有随机种子带来的细微差别。`injectWorkflow()` 现在以 `KSampler.positive / negative` 反查 CLIP 节点，再沿输入连线 BFS 回溯（自动防环），对可达的字符串输入按节点标题 / 类型 / 长度 / 链路极性打分，选出最佳的用户提示词槽位；完全找不到文本源时兜底把 `CLIPTextEncode.text` 从连线改为字面量（会绕过润色链路并告警）。返回的 `promptInjection` 记录注入节点、策略与告警，运行日志与设置页「提示词注入自检」（`POST /api/comfyui/inject-check`，纯本地干跑）都可见，避免再次静默退化。
 
 ### 12.4 双产物数据流
 
@@ -414,7 +417,8 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | 编排 | `src/core/orchestrator.mjs` | `runProject(id, { scope })` 按节点类型白名单分阶段调度；不传 `scope` 时行为不变 |
 | 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；`rag` 用整本原著分块建库并落盘；`decomposer` 按事件 `processChain` 逐条检索并把 FRAGMENT 片段下发到 event / scene / shots；`generate('context')` 走本地 BM25 确定性检索 |
 | API | `src/api/routes.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover` 与 `POST /api/projects/:id/cover/generate`；工作流库 `/api/comfyui/library` |
-| 前端 | `public/wizard.js` | 三阶段新建向导 + 创建后的六步任务引导卡 |
+| 前端 | `public/wizard.js` | 极简新建向导：只有项目名称必填 + 可选一句话构想 |
+| 前端 | `public/project-view.js` | 项目工作台（进入创作项目后的默认全屏页）：左侧路线图 / 故事来源 / 资源，右侧项目信息（AI 补全）+ 步骤操作台 + 分集；顶栏 `V` 与画布视图互切 |
 | 前端 | `public/project-manager.js` | 侧栏项目列表（最近 / 更多、筛选、封面缩略图与名称封面兜底）、六步任务面板、画布步骤条、四 Tab 管理面板、`openCoverDialog()` 封面设置弹窗 |
 | 前端 | `public/app.js` | 状态同步、步骤执行、SSE `project:meta`、顶栏进度与快捷键 |
 | 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板；项目卡片缩略图 / 名称封面 / 封面弹窗样式；沿用现有 CSS 变量兼容深浅主题 |
@@ -510,7 +514,7 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | `npm test` → **112 项全部通过**（`novel` 16 / `project-steps` 32 / `novel-project` 13 / `knowledge` 11 / `comfy-lib` 8 / `comfy-lib-api` 5 / `graph` 6 / `store` 4 / `assets` 8 / `orchestrator` 4 / `providers` 5），零依赖、毫秒级 |
+| 单元测试 | `npm test` → **171 项全部通过**（`novel` 17 / `project-steps` 38 / `novel-project` 13 / `knowledge` 13 / `comfy-lib` 8 / `comfy-lib-api` 5 / **`comfy-prompt` 8** / **`cover` 12** / `asset-routes` 8 / `characters` 12 / `graph` 6 / `store` 4 / `assets` 8 / `orchestrator` 8 / `providers` 11），零依赖、毫秒级 |
 | 后端 HTTP 闭环 | 新建创作项目 → 第 ③ 步 → 全部执行：`6/6` 步、42 节点 / 64 连线（2 集）、6 镜头、8 条 anchor、14 条 ref、0 失败，导演包 25 文件 CRC 全通过 |
 | 上传内容生效 | 剧本场景来自原著章节（「第一章 没有署名的信」/「第四章 回到码头」），角色抽取为沈砚 / 林夏等原著人物 |
 | 项目管理 | 重命名 / 收藏 / 标签 / 备注 / 归档 / 交付设置 / 复制 / 快照 / 恢复 / 删除全部通过，原有 4 个示例项目未受影响 |

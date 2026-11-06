@@ -17,6 +17,10 @@ export async function handleProjects(req, res, url) {
 
   if (pathname === '/api/projects' && method === 'POST') {
     const body = await readBody(req);
+    // 新逻辑：创作项目只要求「项目名称」必填，小说 / 分集 / 风格全部进项目后逐步补充或 AI 生成
+    if ((body.kind === 'novel' || body.novel) && !String(body.name || '').trim()) {
+      return json(res, { error: '项目名称不能为空：先给项目起个名字，其他信息可以之后逐步补充' }, 400), true;
+    }
     let project;
     try {
       // kind='novel' → 新建「创作项目」：带 text 时创建即完成 ①②；
@@ -24,6 +28,7 @@ export async function handleProjects(req, res, url) {
       project = (body.kind === 'novel' || body.novel)
         ? buildNovelProject({
           text: body.text || body.novel, filename: body.filename, name: body.name,
+          idea: body.idea,
           split: body.split, deliverables: body.deliverables,
           style: body.style, aspect: body.aspect,
         }).project
