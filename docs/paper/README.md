@@ -31,6 +31,7 @@
 |---|---|
 | 只是想改个 UI、修个 bug | 不必读论文，直接看根目录 [`README.md`](../../README.md) 与 [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | 要改智能体 / 流水线 / 调度 | 导读 §0–§3 → 全文 §2.1–§2.3 → [`docs/AGENTS.md`](../AGENTS.md) §2 智能体清单 → 本文 §4 对照表 |
+| 要改创作项目的六步任务 / 默认值 | [`docs/THEORY.md`](../THEORY.md) §3–§5 → [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) §14 → `src/core/project-steps.mjs` 的 `STEPS` |
 | 要复现或质疑实验结论（k 值、耗时、成本、指标） | 导读 §4/§7 → 全文 §3.2–§3.7、附录 A.5 → `vimax_paper_figures/` 内对应图表 |
 | 核对英文原始措辞、公式、表头、引用出处 | `ViMax_原文_EN.md`（检索定位）→ `ViMax_原文_官方HTML版.html`（带图阅读）→ `ViMax_原文_arXiv2606.07649v2.pdf`（权威定稿） |
 
@@ -69,8 +70,10 @@
 | 依赖图并行调度 | 2.3.1 末 / 3.5 | `src/core/graph.mjs`（`topoLayers`）、`src/core/orchestrator.mjs` | Kahn 拓扑分层、同层并发、取消、失败隔离、断点续跑、单节点重跑 |
 | 成片与交付 | —（论文未展开） | `src/core/film.mjs`、`src/core/director-pack.mjs` | ffmpeg 拼接 MP4 + `*.mmxpack.zip` 导演包，属本项目扩展 |
 | **论文之外** | — | `public/canvas.js`、`public/nodes.js`、`src/agents/canvas-agent.mjs`、`src/api/routes.mjs` | 无限画布引擎、节点/连线体系、画布 Agent、REST + SSE，均为本项目原创，论文中无对应物 |
+| **创作项目扩展层** | — | `src/core/novel.mjs`、`src/core/project-steps.mjs`、`src/pipelines/novel-project.mjs`、`public/wizard.js`、`public/project-manager.js` | 长篇小说→分集、六步任务状态机、项目管理、导演包交接格式；**不是论文机制**，详见 [`../THEORY.md`](../THEORY.md) §4 |
 
 **实验数字定位**：端到端 405 s / 17.5 美元（§3.5、§3.7）、GC 0.5272 → 0.5571（§3.2）、NF 3.52/5（§3.3）、消融与 k 值（§3.4、§3.7）。改 `k`、`concurrency` 等默认值前建议先对照这些结论。
+**六步任务与公式的逐条映射**见 [`../THEORY.md`](../THEORY.md) §3（后端 `STEPS[].scope` → 节点类型 → 函数），默认值的消融依据见该文 §5。
 
 ---
 

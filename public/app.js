@@ -829,6 +829,8 @@ async function boot() {
   initSSE();
   UI.appendChat('assistant', '你好，我是画布协作者。我可以读整张图、解释依赖、检查一致性、整理布局，也能直接给场景补镜头链。试试下面的快捷指令吧。');
   setTimeout(() => canvas.fitView(), 200);
+  // 门户卡片 / 书签可用 ?new=1 直达新建创作项目向导
+  if (new URLSearchParams(window.location.search).get('new') === '1') setTimeout(() => openWizard(), 320);
 }
 
 boot().catch((e) => {

@@ -390,3 +390,131 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | 视图 | `fitView()` 最小缩放从 0.2 放宽到 0.1；`loadProject` 尊重项目存档视口，不再无条件 fit-all；`applyTransform()` 检测「有节点但一个都不可见」并在画布中央给出可点击的回到内容按钮 |
 
 验证：完成示例重排后边界 60–3328 × 60–1160，默认视口一屏可见 39/40 节点，⤢ 适应视图 40/40；新跑一条流水线生成的 40 节点 y 范围由 60–5130 收敛到 60–820。
+
+---
+
+## 14. 创作项目管理层（小说分集 → 视频 / 导演包）
+
+> 新增于 2026-11-06。目标是把「上传小说 → 分集 → 成片视频 / 导演包」变成 **lingximanju 内部的一类创作项目**，而不是另起一个应用；**无限画布引擎 `public/canvas.js` 未改动**，所有新节点仍画在同一张图上。
+> 理论依据逐条见 [`THEORY.md`](THEORY.md)。
+
+### 14.1 分层与文件职责
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 纯逻辑 | `src/core/novel.mjs` | 解析小说（书名 / 章节 / 段落 / 字数）、三种分集策略、角色频次抽取、轻量预览与输入校验；无 DOM、无副作用 |
+| 纯逻辑 | `src/core/project-steps.mjs` | `STEPS` 六步定义（含 `scope` 与论文依据）、`management` 元数据、步骤状态机、管理动作、统计与索引 |
+| 构建 | `src/pipelines/novel-project.mjs` | `buildNovelProject()` 复用 `buildTemplate('novel2video')` 的完整 DAG，插入 `episode` 节点并注入原著 / 分集 / 交付设置；`refreshEpisodes()` 重算第 ② 步 |
+| 持久化 | `src/core/store.mjs` | 项目索引字段（`projectIndex`）、快照写入 / 列举 / 读取（`data/snapshots/<id>/<ts>.json`） |
+| 编排 | `src/core/orchestrator.mjs` | `runProject(id, { scope })` 按节点类型白名单分阶段调度；不传 `scope` 时行为不变 |
+| 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；RAG 用 `originalCorpus`（整本原著）建索引 |
+| API | `src/api/routes.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()` |
+| 前端 | `public/wizard.js` | 三阶段新建向导 + 创建后的六步任务引导卡 |
+| 前端 | `public/project-manager.js` | 侧栏项目列表（搜索 / 筛选 / 排序 / 菜单）、六步任务面板、画布步骤条、四 Tab 管理面板 |
+| 前端 | `public/app.js` | 状态同步、步骤执行、SSE `project:meta`、顶栏进度与快捷键 |
+| 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板；沿用现有 CSS 变量兼容深浅主题 |
+| 节点 | `public/nodes.js` | 新增 `episode` 类型（`▥` 分集，紫色，无默认智能体） |
+| 测试 | `tests/novel.test.mjs` | 解析 / 分集策略 / 校验 / 角色抽取 / 预览不泄漏全文（16 项） |
+| 测试 | `tests/project-steps.test.mjs` | 六步定义与论文映射 / 步骤状态机 / 管理动作 / 统计与索引（23 项） |
+| 测试 | `tests/novel-project.test.mjs` | 项目骨架构建 / 分集节点对齐 / 连线完整性 / 刷新分集同步（11 项） |
+| 门户 | `../server.py`、`../lingximanju.html` | 工作区门户新增 `lingximanju` 项目项与详情页，支持一键启停 |
+
+### 14.2 数据契约：`project.management`
+
+标准项目通过 `ensureManagement()` 惰性补齐（`kind:'standard'`，`steps: []`），保证收藏 / 归档 / 快照对所有项目可用；创作项目结构如下（写入 `data/projects/<id>.json`）：
+
+```jsonc
+{
+  "schema": 1, "kind": "novel", "title": "雨夜来信 · 示例",
+  "status": "draft | running | done | error",
+  "favorite": false, "archived": false, "tags": [], "note": "",
+  "createdAt": 0, "updatedAt": 0, "version": 1,
+  "deliverables": { "video": true, "pack": true },      // → settings.comfy.outputMode
+  "split": { "strategy": "chapter|fixed|scene", "targetChars": 1200, "maxEpisodes": 4 },
+  "source": { "filename": "", "title": "", "totalChars": 0, "chapterCount": 0, "uploadedAt": 0, "text": "原著全文" },
+  "episodes": [{ "no": 1, "title": "", "chars": 0, "summary": "", "hook": "", "sourceTitles": [] }],
+  "steps": [{ "id": "script", "no": 3, "status": "pending|running|done|error", "startedAt": 0, "finishedAt": 0, "durationMs": 0, "note": "", "runs": 0 }],
+  "currentStep": 3,
+  "history": [{ "id": "", "at": 0, "action": "", "detail": "" }],
+  "theory": { "paper": "ViMax · arXiv:2606.07649v2", "doc": "docs/THEORY.md", "defaults": { "k": 2 } }
+}
+```
+
+原著全文只存 `management.source.text`（画布节点仅存摘要），`rag.data.originalCorpus` 取前 12000 字用于建索引；分集节点用 `ref` 边把梗概传给 `script`，不参与 DAG 执行分层。
+
+### 14.3 六步状态机与分阶段执行
+
+```
+① upload    [auto·done] ─ 创建向导完成
+② episodes  [auto·done] ─ 服务端解析分集；可由管理面板按新参数重算
+③ script    scope=['script']                          式(1)
+④ context   scope=['rag','character','plan','event','scene','shot']   式(5)(6)
+⑤ storyboard scope=['keyframe','review','video','transition','camera'] 式(2)(3)(4)(7)(8)
+⑥ deliver   scope=['final'] + 交付物兜底（缺导演包则补生成）
+```
+
+- `POST /api/projects/:id/step` 支持 `{ stepId }` 单步、`{ all:true }` 连续执行、`{ action:'reset', stepId? }` 重置状态；已完成步骤在 `all` 模式下跳过。
+- `executeSteps()` 每步 `startStep → runProject(scope) → finishStep`，每步前后 `saveProject` 并 `broadcastMeta()`；失败步骤标 `error` 并中断后续步骤，界面提供重试。
+- 第 ⑥ 步在 `deliverables.pack` 为真且 `final.data.directorPack` 缺失时主动调用 `exportDirectorPack()`，保证「只导出导演包」与「两者都要」都能交付。
+- `runProject` 的 `scope` 只影响目标集合与动态展开节点的加入，不改 DAG 拓扑、join 汇聚、取消与断点续跑逻辑。
+
+### 14.4 REST / SSE 补充
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/novel/sample` | 向导「载入示例小说」（`examples/sample-novel.txt`） |
+| POST | `/api/novel/preview` | 实时分集预览，不落盘 |
+| GET | `/api/bootstrap` | 额外返回 `steps: STEPS`、`stats`（全部 / 创作 / 完成 / 进行中 / 归档 / 收藏）与扩展后的项目索引 |
+| POST | `/api/projects` | `kind:'novel'` 时走 `buildNovelProject()`；否则保持原模板创建 |
+| GET / POST | `/api/projects/:id/manage` | 读取管理详情 / 执行 `rename · favorite · archive · tags · note · deliverables · split · reset-steps` |
+| POST | `/api/projects/:id/duplicate` | 深拷贝副本（重置运行态、保留产物引用） |
+| GET / POST | `/api/projects/:id/snapshots` | 列举 / 创建快照 |
+| POST | `/api/projects/:id/restore` | 恢复快照（恢复前自动为当前状态留安全点） |
+| POST | `/api/projects/:id/step` | 六步执行 / 重置 |
+
+SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`。前端 `handleEvent` 用它刷新步骤面板、画布步骤条、顶栏胶囊与侧栏项目列表；`state.stats`（全局）与 `state.projectStats`（单项目）严格分离。
+
+### 14.5 视觉规范（明确的四态提示）
+
+| 状态 | 颜色 | 表现 |
+|---|---|---|
+| 待执行 | 灰 | 灰边卡片、空心编号、进度条空 |
+| 进行中 | 橙 + 呼吸光晕 | `spGlow` 动画、状态胶囊脉冲、画布节点原有 `status-running` 光晕、连线流光 |
+| 已完成 | 绿 ✓ | 编号变 ✓、耗时徽标、进度条填充、侧栏「全完成」 |
+| 失败 | 红 | 红边、失败原因、`重试本步` 按钮，可重置 |
+
+统一提示面：向导三阶段指示、创建后的六步任务引导卡、检查器「任务步骤」Tab（`x/6` + 进度条 + 四色图例 + 每步检查清单 + 论文依据卡）、顶栏状态胶囊与 2px 进度条、画布上方六步导航条（点击定位相关节点）、Toast、运行日志、侧栏项目卡进度条。
+
+### 14.6 画布保留约束
+
+- `public/canvas.js` 一行未改：平移 / 指针缩放 / 拖拽 / 框选 / 端口连线 / 小地图 / 适应视图 / 自动布局 / 撤销重做 / 视口外回到内容全部保留。
+- 创作项目初始图 = 原 `novel2video` DAG（8 节点）+ 每集一个 `episode` 节点；后续智能体动态展开的节点照旧画在同一画布。
+- 画布顶部在创作项目下由步骤导航条占据，`canvas-hint` 自动隐藏，避免两层提示重叠；`[hidden]` 兜底规则已覆盖新增组件。
+- 「查看画布节点」按步骤 `scope` 选中并聚焦对应节点；「⤢ 适应视图」「⌗ 布局」「F」「L」仍可随时使用。
+
+### 14.7 验证结论（2026-11-06）
+
+| 项目 | 结果 |
+|---|---|
+| 单元测试 | `npm test` → **50 项全部通过**（`tests/novel.test.mjs` 16 / `tests/project-steps.test.mjs` 23 / `tests/novel-project.test.mjs` 11），零依赖、毫秒级 |
+| 后端 HTTP 闭环 | 新建创作项目 → 第 ③ 步 → 全部执行：`6/6` 步、42 节点 / 64 连线（2 集）、6 镜头、8 条 anchor、14 条 ref、0 失败，导演包 25 文件 CRC 全通过 |
+| 上传内容生效 | 剧本场景来自原著章节（「第一章 没有署名的信」/「第四章 回到码头」），角色抽取为沈砚 / 林夏等原著人物 |
+| 项目管理 | 重命名 / 收藏 / 标签 / 备注 / 归档 / 交付设置 / 复制 / 快照 / 恢复 / 删除全部通过，原有 4 个示例项目未受影响 |
+| 前端运行时 | jsdom + 原生 ESM 真实服务验证：向导三阶段、实时分集预览、创建后六步引导、步骤面板四态、`2/6 → 3/6 → 6/6`、管理面板四 Tab、侧栏筛选与更多菜单，**0 运行时错误** |
+| 工作区门户 | `server.py` 新增 `lingximanju` 项目项，门户卡片与 `lingximanju.html` 详情页已接入；实测一键启动（`api_up: true`）→ 应用 200 → 一键停止（端口释放）全链路通过，四个门户页面均 200 |
+| 修复的真实缺陷 | ① 步骤请求体未按 `api()` 约定包装导致 GET 404；② 管理面板误用全局统计、`project:meta` 覆盖侧栏统计；③ 顶栏进度与步骤面板状态刷新时机不同步；④ **「按字数」分集双重切分**：先按目标字数切块又以同一阈值二次聚合，实测 400 字目标产出 794 字/集，已改为 fixed 策略直接成集（实测 399/393）；⑤ 门户启动提示文案对单进程项目错误复用了 DramaClaw 的端口描述；⑥ 门户停止兜底只覆盖 DramaClaw 启动脚本，已按项目配置 `stop_pattern` |
+
+### 14.8 自动化测试分层
+
+单元测试只覆盖**纯逻辑层**（无 DOM、无副作用），与浏览器运行时验证互补：
+
+| 层 | 位置 | 覆盖 |
+|---|---|---|
+| 纯逻辑单测 | `tests/*.test.mjs`（`node --test`） | 小说解析 / 分集策略 / 六步状态机 / 管理动作 / 项目骨架构建 |
+| 接口闭环 | 真实 HTTP（临时端口） | 创建 → 分步 → 全量执行 → 管理 → 快照 → 复制 → 导演包下载 → 清理 |
+| 前端运行时 | jsdom + 原生 ESM 转译 | 向导 / 步骤面板 / 管理面板 / 侧栏筛选 / 零运行时错误断言 |
+| 产物有效性 | Python `zipfile.testzip()` | 导演包逐条 CRC 校验 |
+
+分集策略的参数边界是**实现约定而非随意取值**：`targetChars` 被钳制在 `[300, 8000]`、`maxEpisodes` 钳制在 `[1, 12]`，避免切出过碎或过粗的集；单元测试以此为基准断言。
+
+

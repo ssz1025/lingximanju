@@ -9,11 +9,12 @@
     "start": "node server.mjs",
     "dev": "node server.mjs",
     "electron": "electron .",
-    "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux",
-    "check": "node --check server.mjs && node --check src/api/routes.mjs && node --check src/core/orchestrator.mjs && node --check electron/main.cjs"
+    "dist": "electron-builder --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
+    "check": "node --check server.mjs && node --check src/api/routes.mjs && node --check src/core/orchestrator.mjs && node --check electron/main.cjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "engines": { "node": ">=18" },
   "devDependencies": {
@@ -44,5 +45,6 @@
       "category": "Graphics"
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "ssz1025"
 }

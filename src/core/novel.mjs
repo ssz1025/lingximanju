@@ -92,14 +92,20 @@ export function splitEpisodes(novel, opts = {}) {
   }
   if (!units.length) units = [{ title: '正文', text: novel.text || '（空文本）' }];
 
+  // 「按字数」策略的单元已按目标字数切好，直接成集；
+  // 章节 / 段落策略则按目标字数把若干单元聚成一集。
   const groups = [];
-  let buf = [];
-  let chars = 0;
-  for (const u of units) {
-    buf.push(u); chars += clean(u.text).length;
-    if (chars >= target && groups.length < max - 1) { groups.push(buf); buf = []; chars = 0; }
+  if (strategy === 'fixed') {
+    for (const u of units) groups.push([u]);
+  } else {
+    let buf = [];
+    let chars = 0;
+    for (const u of units) {
+      buf.push(u); chars += clean(u.text).length;
+      if (chars >= target && groups.length < max - 1) { groups.push(buf); buf = []; chars = 0; }
+    }
+    if (buf.length) groups.push(buf);
   }
-  if (buf.length) groups.push(buf);
   if (groups.length > max) {
     const tail = groups.slice(max - 1).flat();
     groups.length = max - 1;
