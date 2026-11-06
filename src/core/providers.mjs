@@ -6,6 +6,7 @@ import { uid, writeAsset, readAsset } from './store.mjs';
 import { hash, storyboardSVG, characterSVG, transitionSVG, posterSVG } from './artwork.mjs';
 import { parseWorkflow, runWorkflow } from './comfyui.mjs';
 import { placeholderFrame } from './raster.mjs';
+import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './knowledge.mjs';
 
 const SCHEMAS = {
   screenplay: '剧本：{title, genre, logline, style, characters:[{name,role,appearance}], scenes:[{id,location,time,summary,script:[字符串]}]}',
@@ -284,6 +285,25 @@ export function createProviders(settings = {}, log = () => {}) {
     return { buffer: buf, name, converted: false };
   }
 
+  /** 论文式(6)：原著分块 → BM25 召回 → 归一化重排 → 相关片段 */
+  function localContext(vars = {}) {
+    const corpus = String(vars.corpus || '');
+    const query = String(vars.query || '');
+    const chunks = chunkNovel(corpus);
+    const kb = new KnowledgeBase(chunks);
+    const hits = retrieveRelevantChunks(kb, [query], { topK: 6, threshold: 0 });
+    return {
+      query,
+      passages: hits.slice(0, 3).map((h) => h.text),
+      notes: [
+        '角色动机：不要在后续镜头中改变既定立场',
+        '空间状态：保持上一场景的道具位置与光照方向',
+        '主题线索：呼应开篇出现的意象',
+      ],
+      chunkCount: chunks.length,
+    };
+  }
+
   async function callLLM(system, user, signal) {
     const base = String(settings.baseUrl).replace(/\/+$/, '');
     const url = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
@@ -303,9 +323,12 @@ export function createProviders(settings = {}, log = () => {}) {
   }
 
   async function generate(intent, vars = {}, signal) {
+    // 式(6) 检索是确定性算法，不经过 LLM：既避免长篇原著撑爆上下文，也保证 Mock/真实模型行为一致
+    if (intent === 'context') return localContext(vars);
     if (mode === 'openai') {
       try {
-        const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。`;
+        const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。` +
+          (vars.fragments ? '输入中的 fragments 是原著检索片段（FRAGMENT 标签），镜头/场景描述必须与其人物、道具、环境、光线保持一致，不要引入矛盾设定。' : '');
         const user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(vars, null, 2)}`;
         const out = await callLLM(system, user, signal);
         return mergeDefaults(intent, out, vars);

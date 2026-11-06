@@ -403,20 +403,23 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | 层 | 文件 | 职责 |
 |---|---|---|
 | 纯逻辑 | `src/core/novel.mjs` | 解析小说（书名 / 章节 / 段落 / 字数）、三种分集策略、角色频次抽取、轻量预览与输入校验；无 DOM、无副作用 |
-| 纯逻辑 | `src/core/project-steps.mjs` | `STEPS` 六步定义（含 `scope` 与论文依据）、`management` 元数据、步骤状态机、管理动作、统计与索引 |
+| 纯逻辑 | `src/core/project-steps.mjs` | `STEPS` 六步定义（含 `scope` 与论文依据）、`management` 元数据（含 `cover`）、步骤状态机、管理动作、统计与索引 |
+| 纯逻辑 | `src/core/knowledge.mjs` | 式(6) 本地知识库：`chunkNovel(512,128)` 分块、BM25 `KnowledgeBase`、`retrieveRelevantChunks()` 归一化重排 / 0.7 阈值 / `processChain` 分数累加、磁盘缓存、`formatFragments()` FRAGMENT 标签 |
 | 构建 | `src/pipelines/novel-project.mjs` | `buildNovelProject()` 复用 `buildTemplate('novel2video')` 的完整 DAG，插入 `episode` 节点并注入原著 / 分集 / 交付设置；`refreshEpisodes()` 重算第 ② 步 |
 | 持久化 | `src/core/store.mjs` | 项目索引字段（`projectIndex`）、快照写入 / 列举 / 读取（`data/snapshots/<id>/<ts>.json`） |
 | 编排 | `src/core/orchestrator.mjs` | `runProject(id, { scope })` 按节点类型白名单分阶段调度；不传 `scope` 时行为不变 |
-| 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；RAG 用 `originalCorpus`（整本原著）建索引 |
-| API | `src/api/routes.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()` |
+| 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；`rag` 用整本原著分块建库并落盘；`decomposer` 按事件 `processChain` 逐条检索并把 FRAGMENT 片段下发到 event / scene / shots；`generate('context')` 走本地 BM25 确定性检索 |
+| API | `src/api/routes.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover` 与 `POST /api/projects/:id/cover/generate`；工作流库 `/api/comfyui/library` |
 | 前端 | `public/wizard.js` | 三阶段新建向导 + 创建后的六步任务引导卡 |
-| 前端 | `public/project-manager.js` | 侧栏项目列表（搜索 / 筛选 / 排序 / 菜单）、六步任务面板、画布步骤条、四 Tab 管理面板 |
+| 前端 | `public/project-manager.js` | 侧栏项目列表（最近 / 更多、筛选、封面缩略图与名称封面兜底）、六步任务面板、画布步骤条、四 Tab 管理面板、`openCoverDialog()` 封面设置弹窗 |
 | 前端 | `public/app.js` | 状态同步、步骤执行、SSE `project:meta`、顶栏进度与快捷键 |
-| 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板；沿用现有 CSS 变量兼容深浅主题 |
+| 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板；项目卡片缩略图 / 名称封面 / 封面弹窗样式；沿用现有 CSS 变量兼容深浅主题 |
 | 节点 | `public/nodes.js` | 新增 `episode` 类型（`▥` 分集，紫色，无默认智能体） |
 | 测试 | `tests/novel.test.mjs` | 解析 / 分集策略 / 校验 / 角色抽取 / 预览不泄漏全文（16 项） |
-| 测试 | `tests/project-steps.test.mjs` | 六步定义与论文映射 / 步骤状态机 / 管理动作 / 统计与索引（23 项） |
+| 测试 | `tests/project-steps.test.mjs` | 六步定义与论文映射 / 步骤状态机 / 管理动作（含 `cover`）/ 统计与索引（27 项） |
 | 测试 | `tests/novel-project.test.mjs` | 项目骨架构建 / 分集节点对齐 / 连线完整性 / 刷新分集同步（11 项） |
+| 测试 | `tests/knowledge.test.mjs` | 式(6)：512/128 分块与重叠、BM25 召回、`processChain` 阈值聚合与分数累加、单命中保底、缓存往返、FRAGMENT 标签（11 项） |
+| 测试 | `tests/comfy-lib*.test.mjs` | 工作流库数据模型、批量导入去重、REST 切换 / 重命名 / 删除 / 批量真实试跑（13 项） |
 | 门户 | `../server.py`、`../lingximanju.html` | 工作区门户新增 `lingximanju` 项目项与详情页，支持一键启停 |
 
 ### 14.2 数据契约：`project.management`
@@ -436,11 +439,13 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
   "steps": [{ "id": "script", "no": 3, "status": "pending|running|done|error", "startedAt": 0, "finishedAt": 0, "durationMs": 0, "note": "", "runs": 0 }],
   "currentStep": 3,
   "history": [{ "id": "", "at": 0, "action": "", "detail": "" }],
-  "theory": { "paper": "ViMax · arXiv:2606.07649v2", "doc": "docs/THEORY.md", "defaults": { "k": 2 } }
+  "theory": { "paper": "ViMax · arXiv:2606.07649v2", "doc": "docs/THEORY.md", "defaults": { "k": 2 } },
+  "cover": { "url": "", "source": "name|upload|comfyui", "prompt": "", "updatedAt": 0 }
 }
 ```
 
-原著全文只存 `management.source.text`（画布节点仅存摘要），`rag.data.originalCorpus` 取前 12000 字用于建索引；分集节点用 `ref` 边把梗概传给 `script`，不参与 DAG 执行分层。
+- 原著全文只存 `management.source.text`（画布节点仅存摘要）。`rag` 节点用 `originalCorpus` 调 `chunkNovel(512,128)` 分块，缓存在 `data/knowledge/<projectId>.json`；分集节点用 `ref` 边把梗概传给 `script`，不参与 DAG 执行分层。
+- `cover` 由 `ensureManagement()` 为老项目惰性补齐；`projectIndex()` 同步下发到侧栏索引。`source:'name'` 表示使用项目名称封面（前端按项目名哈希生成稳定渐变色块 + 首字），`url` 非空时指向 `/assets/cover_*.png` 静态资源。
 
 ### 14.3 六步状态机与分阶段执行
 
@@ -471,6 +476,11 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | GET / POST | `/api/projects/:id/snapshots` | 列举 / 创建快照 |
 | POST | `/api/projects/:id/restore` | 恢复快照（恢复前自动为当前状态留安全点） |
 | POST | `/api/projects/:id/step` | 六步执行 / 重置 |
+| POST | `/api/projects/:id/cover` | 上传本地封面（`{ dataUrl }` base64，校验格式 + 文件头 + 大小），写入 `data/assets` |
+| DELETE | `/api/projects/:id/cover` | 清除封面 → 回退「项目名称封面」 |
+| POST | `/api/projects/:id/cover/generate` | 用已配置的 ComfyUI 出图工作流生成封面，返回 `cover / url / durationMs` |
+| POST / PUT | `/api/comfyui/library` | 批量导入工作流库 / 切换选中项 |
+| DELETE | `/api/comfyui/library/:kind/:id` | 删除工作流库条目 |
 
 SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`。前端 `handleEvent` 用它刷新步骤面板、画布步骤条、顶栏胶囊与侧栏项目列表；`state.stats`（全局）与 `state.projectStats`（单项目）严格分离。
 
@@ -496,11 +506,13 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 
 | 项目 | 结果 |
 |---|---|
-| 单元测试 | `npm test` → **50 项全部通过**（`tests/novel.test.mjs` 16 / `tests/project-steps.test.mjs` 23 / `tests/novel-project.test.mjs` 11），零依赖、毫秒级 |
+| 单元测试 | `npm test` → **92 项全部通过**（`novel` 16 / `project-steps` 27 / `novel-project` 11 / `knowledge` 11 / `comfy-lib` 8 / `comfy-lib-api` 5 / `graph` 6 / `store` 4 / `orchestrator` 4），零依赖、毫秒级 |
 | 后端 HTTP 闭环 | 新建创作项目 → 第 ③ 步 → 全部执行：`6/6` 步、42 节点 / 64 连线（2 集）、6 镜头、8 条 anchor、14 条 ref、0 失败，导演包 25 文件 CRC 全通过 |
 | 上传内容生效 | 剧本场景来自原著章节（「第一章 没有署名的信」/「第四章 回到码头」），角色抽取为沈砚 / 林夏等原著人物 |
 | 项目管理 | 重命名 / 收藏 / 标签 / 备注 / 归档 / 交付设置 / 复制 / 快照 / 恢复 / 删除全部通过，原有 4 个示例项目未受影响 |
 | 前端运行时 | jsdom + 原生 ESM 真实服务验证：向导三阶段、实时分集预览、创建后六步引导、步骤面板四态、`2/6 → 3/6 → 6/6`、管理面板四 Tab、侧栏筛选与更多菜单，**0 运行时错误** |
+| 知识库（式 6）HTTP 闭环 | 新建创作项目 → 第 ③④ 步：`rag` 节点 `knowledgeId / cacheFile / chunkCount=2`；`event` / `scene` 节点均带 `relevantChunks` 与 `<FRAGMENT_i>` 片段；`plan` 节点 `knowledgeChunks=2 / fragmentsPerEvent=[2]`；`data/knowledge/<id>.json` 落盘，15/15 检查通过 |
+| 项目封面 | jsdom 36/36（名称封面 / 图片封面 / 齿轮菜单 / 弹窗三操作 / 管理面板入口）；HTTP 14/14（上传合法 PNG → 静态资源字节一致 → bootstrap 索引同步 → 三种非法输入 400 → DELETE 回退名称封面）；ComfyUI 真实生成 200 / 42.4s / 1032×1832 PNG |
 | 工作区门户 | `server.py` 新增 `lingximanju` 项目项，门户卡片与 `lingximanju.html` 详情页已接入；实测一键启动（`api_up: true`）→ 应用 200 → 一键停止（端口释放）全链路通过，四个门户页面均 200 |
 | 修复的真实缺陷 | ① 步骤请求体未按 `api()` 约定包装导致 GET 404；② 管理面板误用全局统计、`project:meta` 覆盖侧栏统计；③ 顶栏进度与步骤面板状态刷新时机不同步；④ **「按字数」分集双重切分**：先按目标字数切块又以同一阈值二次聚合，实测 400 字目标产出 794 字/集，已改为 fixed 策略直接成集（实测 399/393）；⑤ 门户启动提示文案对单进程项目错误复用了 DramaClaw 的端口描述；⑥ 门户停止兜底只覆盖 DramaClaw 启动脚本，已按项目配置 `stop_pattern` |
 
@@ -510,11 +522,50 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 
 | 层 | 位置 | 覆盖 |
 |---|---|---|
-| 纯逻辑单测 | `tests/*.test.mjs`（`node --test`） | 小说解析 / 分集策略 / 六步状态机 / 管理动作 / 项目骨架构建 |
-| 接口闭环 | 真实 HTTP（临时端口） | 创建 → 分步 → 全量执行 → 管理 → 快照 → 复制 → 导演包下载 → 清理 |
-| 前端运行时 | jsdom + 原生 ESM 转译 | 向导 / 步骤面板 / 管理面板 / 侧栏筛选 / 零运行时错误断言 |
+| 纯逻辑单测 | `tests/*.test.mjs`（`node --test`） | 小说解析 / 分集策略 / 六步状态机 / 管理动作 / 项目骨架构建 / 知识库检索 / 工作流库 |
+| 接口闭环 | 真实 HTTP（临时端口） | 创建 → 分步 → 全量执行 → 管理 → 快照 → 复制 → 导演包下载 → 封面上传 / 生成 / 重置 → 清理 |
+| 前端运行时 | jsdom + 原生 ESM 转译 | 向导 / 步骤面板 / 管理面板 / 侧栏筛选 / 封面缩略图与弹窗 / 零运行时错误断言 |
 | 产物有效性 | Python `zipfile.testzip()` | 导演包逐条 CRC 校验 |
 
 分集策略的参数边界是**实现约定而非随意取值**：`targetChars` 被钳制在 `[300, 8000]`、`maxEpisodes` 钳制在 `[1, 12]`，避免切出过碎或过粗的集；单元测试以此为基准断言。
+
+### 14.9 式(6) 知识库与检索链
+
+参考 `ViMax/pipelines/novel2movie_pipeline.py`（FAISS + `BAAI/bge-reranker-v2-m3`）补齐论文式(6) 的完整链路，实现为纯 JS / 零外部依赖：
+
+```
+management.source.text (原著全文)
+  └─ rag agent
+       ├─ chunkNovel(512,128) → data/knowledge/<projectId>.json
+       ├─ new KnowledgeBase(chunks)  // df / avgLen / BM25(K1=1.5, B=0.75)
+       ├─ retrieveRelevantChunks(概览 query, topK=6, threshold=0)
+       └─ ctx.patch → knowledgeId / cacheFile / chunkCount / passages
+  └─ decomposer agent
+       ├─ loadKnowledgeCache(knowledgeId)（缺失时用 originalCorpus 兜底重建）
+       ├─ 对每个 event.processChain 逐条：
+       │    retrieveRelevantChunks(kb, chain, {topK:10, threshold:0.7})
+       │    → BM25 宽召回 → min-max 归一化重排 → 0.7 过滤 → 同块分数累加
+       ├─ 命中为空 → 用「事件标题 + 梗概」threshold:0 兜底召回
+       └─ event / scene 节点写入 relevantChunks + formatFragments(..., 4)
+            → shots 生成时把 fragments 传给 providers.generate('shots')
+```
+
+- `src/core/providers.mjs` 的 `generate('context')` 短路为本地 BM25 检索，不再把整本原著塞给 LLM；LLM 的 system prompt 增加「必须与 FRAGMENT 片段的人物 / 道具 / 环境 / 光线一致」的约束。
+- `normalizeScores()` 对「单命中 / 全部同分」的边界置 1，避免 0.7 阈值把唯一召回误杀。
+- 与 ViMax 的差异（FAISS 向量召回 + 外部 bge reranker vs BM25 + 归一化重排）见 [`THEORY.md`](THEORY.md) §5.1：**方法层对齐，实现技术不同**，保证零 Key / Mock 模式也能跑通式(6)。
+
+### 14.10 项目封面（三种来源）
+
+`management.cover = { url, source: 'name'|'upload'|'comfyui', prompt, updatedAt }`，由 `projectIndex()` 下发到侧栏卡片。
+
+| 来源 | 入口 | 实现 |
+|---|---|---|
+| 项目名称封面（默认） | 无封面 / `DELETE /api/projects/:id/cover` | `public/project-manager.js · nameCoverHTML()` 按项目名字符和取 `hue % 360`，生成稳定渐变色块 + 首字，无需任何资源 |
+| 本地上传 | 卡片齿轮「设置项目封面」→「⇧ 上传本地图片」，或管理面板「概览」→「设置项目封面」 | 前端 `FileReader.readAsDataURL()` → `POST /api/projects/:id/cover { dataUrl }` → 后端正则校验 `png/jpeg/webp/gif`、base64 解码、文件头魔数校验、≤6 MB → `writeAssetBinary()` 写入 `data/assets` |
+| ComfyUI 生成 | 弹窗「✦ 用 ComfyUI 生成封面」 | `buildCoverPrompt()` 用片名 + 剧本梗概 + 首集摘要 + 可选画面要求拼提示词；复用 `imageWorkflow` 走 `parseWorkflow() → runWorkflow()`，产物 URL 写入 `cover.url` |
+
+- 三个入口统一走 `applyManageAction(project, 'cover', value)` → `saveProject()` → `broadcastMeta()` → SSE `state`，并写入 `management.history`。
+- 前端 `openCoverDialog()` 同时兼容「列表索引对象（顶层 `cover`）」与「完整项目对象（`management.cover`）」两种数据源；成功后 `onChanged()` 触发项目列表与统计刷新。
+- 卡片缩略图 46×62，`✦ AI` / `⇧ 上传` 角标区分来源；弹窗预览 3:4，生成期间显示忙碌遮罩并禁用关闭，避免重复提交。
 
 

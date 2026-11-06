@@ -1,0 +1,150 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "sage_attention": "auto",
+      "allow_compile": false
+    }
+  },
+  "3": {
+    "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ]
+    }
+  },
+  "4": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "5": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "lingximanju_reference.png"
+    }
+  },
+  "8": {
+    "class_type": "MiniMaxH3DirectorGroupImageToVideo",
+    "inputs": {
+      "first_frame": [
+        "7",
+        0
+      ],
+      "prompt": "{{prompt}}",
+      "duration_sec": "{{duration}}"
+    }
+  },
+  "9": {
+    "class_type": "MiniMaxH3DirectorGroupsCombine",
+    "inputs": {
+      "groups.group_0": [
+        "8",
+        0
+      ]
+    }
+  },
+  "10": {
+    "class_type": "MiniMaxH3Director",
+    "inputs": {
+      "model": [
+        "3",
+        0
+      ],
+      "video_vae": [
+        "5",
+        0
+      ],
+      "audio_vae": [
+        "6",
+        0
+      ],
+      "clip": [
+        "4",
+        0
+      ],
+      "i2v_groups": [
+        "9",
+        0
+      ],
+      "task_type": "i2v — 图生视频(Image to Video)",
+      "global_prompt": "{{prompt}}",
+      "bd_grp_sample": "采样设置",
+      "cfg": 1,
+      "seed": 12345,
+      "frame_rate": "{{fps}}",
+      "width": 864,
+      "height": 480,
+      "ref_max_size": 256,
+      "total_frames": 124,
+      "timeline_data": "{\"version\": 5, \"editMode\": \"segment\", \"timelineMode\": \"i2v\", \"totalFrames\": {{frames}}, \"frameRate\": {{fps}}, \"width\": {{width}}, \"height\": {{height}}, \"refMaxSize\": 256, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"1:1 (Square)\", \"megapixels\": 0.07, \"multiple\": 32, \"longEdge\": 256, \"width\": {{width}}, \"height\": {{height}}, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"generate\", \"continuityEnabled\": false, \"continuityOverlapFrames\": 9}, \"videoClips\": [], \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": {{frames}}, \"deletedSourceRanges\": []}, \"global\": {\"taskType\": \"i2v — 图生视频(Image to Video)\", \"prompt\": \"{{prompt_json}}\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"{{image}}\"}, \"refAudios\": []}, \"segments\": [{\"id\": \"shot0\", \"start\": 0, \"length\": {{frames}}, \"frameCount\": {{frames}}, \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"isStartFrame\": true, \"isEndFrame\": false, \"genImage\": {\"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}}, \"endImage\": null, \"taskType\": \"\", \"refs\": []}], \"shots\": [{\"id\": \"shot0\", \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"startImage\": {\"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}}, \"endImage\": null}], \"runSelectEnabled\": false, \"runSelection\": [], \"gen\": {\"defaultFrameCount\": {{frames}}}, \"liveTaePreview\": true, \"keyframes\": [{\"id\": \"shot0_s\", \"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}, \"start\": 0, \"length\": {{frames}}, \"frameCount\": {{frames}}, \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": {{duration}}}",
+      "bd_grp_advanced": "高级采样",
+      "steps": 8,
+      "sampler": "res_multistep",
+      "scheduler": "simple",
+      "shift_video": 12,
+      "shift_audio": 3,
+      "bd_grp_perf": "性能",
+      "clear_vram_between_segments": true,
+      "export_source_images": false
+    }
+  },
+  "11": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "10",
+        0
+      ],
+      "audio": [
+        "10",
+        1
+      ],
+      "fps": [
+        "10",
+        2
+      ],
+      "bit_depth": 8
+    }
+  },
+  "12": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "11",
+        0
+      ],
+      "filename_prefix": "{{filename_prefix}}",
+      "format": "auto",
+      "codec": "auto"
+    }
+  }
+}

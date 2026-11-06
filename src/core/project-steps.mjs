@@ -110,6 +110,9 @@ export function createManagement(opts = {}) {
     title: opts.title || '未命名项目',
     status: kind === 'novel' ? 'draft' : 'standard',
     favorite: false, archived: false, tags: [], note: '',
+    // 封面：空 url + source:'name' 时前端渲染「项目名称封面」；
+    // source:'upload' / 'comfyui' 时 url 指向 /assets/ 下的图片
+    cover: { url: '', source: 'name', updatedAt: now(), prompt: '' },
     createdAt: now(), updatedAt: now(), version: 1,
     history: [{ id: uid(), at: now(), action: 'create', detail: kind === 'novel' ? '新建创作项目（小说分集）' : '标准流水线项目' }],
   };
@@ -146,6 +149,8 @@ export function ensureManagement(project) {
   if (!project.management || project.management.schema !== 1) {
     project.management = createManagement({ kind: 'standard', title: project.name || '未命名项目' });
   }
+  // 老项目惰性补封面字段（升级兼容）
+  if (!project.management.cover) project.management.cover = { url: '', source: 'name', updatedAt: Date.now(), prompt: '' };
   return project.management;
 }
 
@@ -268,6 +273,20 @@ export function applyManageAction(project, action, value) {
     case 'reset-steps':
       resetAllSteps(m);
       return { ok: true, message: '六步任务状态已重置' };
+    case 'cover': {
+      const source = ['upload', 'comfyui'].includes(value?.source) ? value.source : 'name';
+      const url = source === 'name' ? '' : String(value?.url || '').slice(0, 300);
+      if (source !== 'name' && !url) return { ok: false, message: '封面图片地址不能为空' };
+      m.cover = {
+        url, source,
+        prompt: String(value?.prompt || '').slice(0, 500),
+        updatedAt: Date.now(),
+      };
+      logHistory(m, 'cover', source === 'name' ? '恢复为项目名称封面'
+        : source === 'upload' ? '上传了项目封面图片' : '用 ComfyUI 生成了项目封面');
+      return { ok: true, message: source === 'name' ? '已恢复为项目名称封面'
+        : source === 'upload' ? '项目封面已上传' : '项目封面已生成', cover: m.cover };
+    }
     default:
       return { ok: false, message: `未知管理动作：${action}` };
   }
@@ -313,6 +332,7 @@ export function projectIndex(p) {
     tags: m.tags || [], episodeCount: (m.episodes || []).length,
     stepDone: prog.done, stepTotal: prog.total, progress: prog.percent,
     deliverables: m.deliverables || { video: true, pack: true },
+    cover: m.cover || { url: '', source: 'name', updatedAt: 0, prompt: '' },
     hasPack: !!(p.nodes || []).find((n) => n.type === 'final')?.data?.directorPack?.file,
   };
 }

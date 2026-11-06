@@ -1,6 +1,8 @@
 // 叙事组 / 资产组 / 镜头规划智能体
 import { defineAgent } from '../core/agent.mjs';
 import { hash } from '../core/artwork.mjs';
+import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
+  saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
 
 const textOf = (v) => String(v || '').trim();
 const brief = (s, n = 46) => (String(s || '').length > n ? `${String(s).slice(0, n)}…` : String(s || ''));
@@ -37,7 +39,7 @@ defineAgent({
 
 defineAgent({
   id: 'rag', label: 'RAG 上下文智能体', group: '叙事', icon: '⌕', color: '#22d3ee',
-  description: '索引原著并按节点描述检索，补全分解时丢失的全局信息（论文式 6）',
+  description: '原著 512/128 分块建索引 → 按事件 processChain 逐条检索 → 相关片段随分解链下发（论文式 6）',
   async run(ctx) {
     const script = findScript(ctx);
     // 式(6)：创作项目用「整本原著」建索引，而不是只看已压缩的剧本，避免分解丢失伏笔
@@ -46,14 +48,21 @@ defineAgent({
       ? [script.logline, ...script.scenes.map((s) => `${s.location}：${s.summary}`), ...script.characters.map((c) => `${c.name}：${c.appearance}`)].join('。')
       : textOf(ctx.node.data.corpus));
     ctx.progress(0.35);
+    // 对齐 ViMax：RecursiveCharacterTextSplitter(512,128) 分块 → FAISS 索引落盘（本仓库用 BM25）
+    const chunks = chunkNovel(corpus);
+    const cacheFile = saveKnowledgeCache(ctx.project.id, chunks);
+    const kb = new KnowledgeBase(chunks);
+    // 概览检索：以节点标题 + 剧本梗概为 query，命中片段写入节点供面板展示
+    const overview = retrieveRelevantChunks(kb, [`${ctx.node.title} ${script?.logline || ''}`], { topK: 6, threshold: 0 });
     const context = await ctx.providers.generate('context', { corpus, query: ctx.node.title }, ctx.signal);
     ctx.progress(0.9);
     ctx.patch({
       context, corpus: brief(corpus, 300), script,
-      indexSize: corpus.length, passages: context.passages?.length || 0,
-      summary: `索引 ${corpus.length} 字 · 命中 ${context.passages?.length || 0} 段上下文`,
+      knowledgeId: ctx.project.id, cacheFile, chunkCount: chunks.length,
+      indexSize: corpus.length, passages: overview.length,
+      summary: `${chunks.length} 个知识块（512/128）· 命中 ${overview.length} 段上下文`,
     });
-    ctx.log('think', `建立原文索引，检索到 ${context.passages?.length || 0} 段相关上下文，将随局部规划下发`);
+    ctx.log('think', `原著已切成 ${chunks.length} 块并建立索引；按事件 processChain 逐条检索相关片段，随局部规划下发`);
   },
 });
 
@@ -71,38 +80,66 @@ defineAgent({
     ctx.log('think', `拆解为 ${events.length} 个事件，按 processChain 保持因果顺序`);
     ctx.progress(0.55);
 
+    // 式(6)：按事件 processChain 的每一条做检索（ViMax retrieve_relevant_chunks 的语义）
+    // 未建索引时从 RAG 节点的原著全文兜底重建，保证单独运行分解节点也有上下文
+    const ragNode = ctx.upstream.find((n) => n.data?.knowledgeId);
+    let chunks = ragNode ? loadKnowledgeCache(ragNode.data.knowledgeId) : [];
+    if (!chunks.length) {
+      const fallback = textOf(ctx.node.data.originalCorpus) || textOf(ctx.node.data.corpus) || textOf(context?.corpus);
+      chunks = chunkNovel(fallback);
+      if (chunks.length) saveKnowledgeCache(ctx.project.id, chunks);
+    }
+    const kb = new KnowledgeBase(chunks);
+    const perEventFragments = events.map((event) => {
+      const chain = (event.processChain || []).filter(Boolean);
+      const hits = kb ? retrieveRelevantChunks(kb, chain, { topK: 10, threshold: 0.7 }) : [];
+      // 一条都没命中时退化为「标题 + 梗概」宽召回，保证每个事件至少带原文上下文
+      if (!hits.length && chunks.length) {
+        return retrieveRelevantChunks(kb, [`${event.title || ''} ${event.summary || ''}`], { topK: 3, threshold: 0 });
+      }
+      return hits;
+    });
+    if (chunks.length) ctx.log('info', `知识库 ${chunks.length} 块 · 逐事件检索命中 ${perEventFragments.map((f) => f.length).join('/')} 段`);
+
     const created = [];
     events.forEach((event, i) => {
+      const relevantChunks = perEventFragments[i];
+      const fragments = formatFragments(relevantChunks, 4);
       const eventNode = ctx.addNodeAndEdge({
         type: 'event', agent: null, status: 'done',
         title: event.title || `事件 ${i + 1}`,
-        data: { event, context, script, depth: 1, summary: brief(event.summary, 40) },
+        data: { event, context, script, relevantChunks, fragments, depth: 1, summary: brief(event.summary, 40) },
       }, ctx.node.id, 'flow');
       const sceneSpec = (event.scenes && event.scenes[0]) || { title: event.title, location: '内景', time: '夜', summary: event.summary };
       const sceneNode = ctx.addNodeAndEdge({
         type: 'scene', agent: 'storyboard',
         title: `场景 ${i + 1} · ${sceneSpec.location || sceneSpec.title}`,
-        data: { scene: sceneSpec, script, context, index: i, shotsPerScene, depth: 2,
+        data: { scene: sceneSpec, script, context, relevantChunks, fragments, index: i, shotsPerScene, depth: 2,
           summary: brief(sceneSpec.summary, 40) },
       }, eventNode.id, 'flow');
       created.push(eventNode.id, sceneNode.id);
     });
 
-    // 预生成镜头概要，供机位依赖图与一致性报告使用
+    // 预生成镜头概要，供机位依赖图与一致性报告使用；片段随 shots 提示词下发（式 6）
     const shotPlan = [];
     for (let i = 0; i < events.length; i++) {
       const sceneSpec = (events[i].scenes && events[i].scenes[0]) || {};
-      const shots = await ctx.providers.generate('shots', { scene: sceneSpec, count: shotsPerScene, idea: script.logline }, ctx.signal);
-      shotPlan.push({ scene: i + 1, location: sceneSpec.location, shots: shots.shots || [] });
+      const shots = await ctx.providers.generate('shots', {
+        scene: sceneSpec, count: shotsPerScene, idea: script.logline,
+        fragments: formatFragments(perEventFragments[i], 4),
+      }, ctx.signal);
+      shotPlan.push({ scene: i + 1, location: sceneSpec.location, shots: shots.shots || [],
+        fragmentsUsed: (perEventFragments[i] || []).length });
     }
     ctx.progress(0.95);
     ctx.patch({
       events, shotPlan, context, script,
+      knowledgeChunks: chunks.length, fragmentsPerEvent: perEventFragments.map((f) => f.length),
       hierarchy: ['事件', '场景', '镜头'], eventCount: events.length,
       sceneCount: events.length, plannedShots: shotPlan.reduce((a, s) => a + s.shots.length, 0),
       spawned: created, summary: `${events.length} 事件 → ${events.length} 场景 → ${shotPlan.reduce((a, s) => a + s.shots.length, 0)} 镜头`,
     });
-    ctx.log('info', `画布已展开 ${created.length} 个规划节点；RAG 上下文随节点下发`);
+    ctx.log('info', `画布已展开 ${created.length} 个规划节点；事件专属原文片段（FRAGMENT）已随节点下发`);
   },
 });
 
@@ -136,7 +173,10 @@ defineAgent({
     const scene = d.scene || { location: '场景', summary: '' };
     const count = Math.max(2, Math.min(5, Number(d.shotsPerScene) || 3));
     ctx.progress(0.2);
-    const res = await ctx.providers.generate('shots', { scene, count, idea: d.script?.logline }, ctx.signal);
+    const res = await ctx.providers.generate('shots', {
+      scene, count, idea: d.script?.logline,
+      fragments: d.fragments || formatFragments(d.relevantChunks, 4),
+    }, ctx.signal);
     const shots = res.shots || [];
     const charNode = ctx.project.nodes.find((n) => n.type === 'character');
     const cameraNode = ctx.project.nodes.find((n) => n.type === 'camera');

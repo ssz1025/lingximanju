@@ -272,3 +272,63 @@ test('管理历史有上限，不会无限膨胀', () => {
   for (let i = 0; i < 200; i++) applyManageAction(p, 'note', `备注 ${i}`);
   assert.ok(p.management.history.length <= 60, `历史长度 ${p.management.history.length} 应被限制在 60 内`);
 });
+
+/* ---------------------------------------------------------------- 项目封面管理动作 */
+test('createManagement 初始化名称封面，ensureManagement 兼容老项目', () => {
+  const p = makeProject();
+  assert.deepEqual(p.management.cover.source, 'name');
+  assert.equal(p.management.cover.url, '');
+  const old = { id: 'old', name: '老项目', nodes: [], edges: [], management: createManagement({}) };
+  delete old.management.cover;
+  const m = ensureManagement(old);
+  assert.equal(m.cover.source, 'name');
+  assert.equal(m.cover.url, '');
+});
+
+test('applyManageAction cover：上传 / ComfyUI 生成 / 恢复名称封面', () => {
+  const p = makeProject();
+  let out = applyManageAction(p, 'cover', { url: '/assets/a.png', source: 'upload', prompt: '' });
+  assert.equal(out.ok, true);
+  assert.equal(p.management.cover.source, 'upload');
+  assert.equal(p.management.cover.url, '/assets/a.png');
+  assert.ok(out.cover.updatedAt > 0);
+
+  out = applyManageAction(p, 'cover', { url: '/assets/b.png', source: 'comfyui', prompt: '雨夜霓虹' });
+  assert.equal(out.ok, true);
+  assert.equal(p.management.cover.source, 'comfyui');
+  assert.equal(p.management.cover.prompt, '雨夜霓虹');
+
+  out = applyManageAction(p, 'cover', { source: 'name' });
+  assert.equal(out.ok, true);
+  assert.equal(p.management.cover.source, 'name');
+  assert.equal(p.management.cover.url, '', '恢复名称封面必须清空 url');
+
+  // 非法来源按名称封面兜底；非名称来源缺 url 被拒绝
+  out = applyManageAction(p, 'cover', { url: '/assets/c.png', source: 'unknown' });
+  assert.equal(out.ok, true);
+  assert.equal(p.management.cover.source, 'name');
+  out = applyManageAction(p, 'cover', { source: 'upload' });
+  assert.equal(out.ok, false);
+  assert.match(out.message, /不能为空/);
+
+  assert.ok(p.management.history.filter((h) => h.action === 'cover').length >= 3);
+});
+
+test('applyManageAction cover：url / prompt 长度钳制', () => {
+  const p = makeProject();
+  applyManageAction(p, 'cover', { url: '/assets/' + 'x'.repeat(500), source: 'upload', prompt: 'p'.repeat(800) });
+  assert.equal(p.management.cover.url.length, 300);
+  assert.equal(p.management.cover.prompt.length, 500);
+});
+
+test('projectIndex 下发 cover 字段（供侧栏卡片渲染）', () => {
+  const p = makeProject();
+  const idx = projectIndex(p);
+  assert.ok('cover' in idx);
+  assert.equal(idx.cover.source, 'name');
+  applyManageAction(p, 'cover', { url: '/assets/x.png', source: 'comfyui', prompt: '海报' });
+  const idx2 = projectIndex(p);
+  assert.equal(idx2.cover.source, 'comfyui');
+  assert.equal(idx2.cover.url, '/assets/x.png');
+  assert.equal(idx2.cover.prompt, '海报');
+});

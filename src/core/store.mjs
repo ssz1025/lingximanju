@@ -30,18 +30,26 @@ export function uid(prefix = 'id') {
 const fileOf = (id) => path.join(PROJECT_DIR, `${String(id).replace(/[^a-zA-Z0-9_-]/g, '')}.json`);
 
 export function listProjects() {
+  // 解析缓存：项目 JSON 可内嵌整本小说，每次列表全量重解析会阻塞事件循环。
+  // 以 (mtimeMs, size) 为凭据复用轻量索引，文件一变即失效；save/delete 另行主动失效。
   return fs.readdirSync(PROJECT_DIR)
     .filter((f) => f.endsWith('.json'))
     .map((f) => {
       try {
-        const p = JSON.parse(fs.readFileSync(path.join(PROJECT_DIR, f), 'utf8'));
-        // 索引字段由项目管理层统一推导：状态、进度、收藏、归档、标签、交付物
-        return projectIndex(p);
-      } catch { return null; }
+        const file = path.join(PROJECT_DIR, f);
+        const st = fs.statSync(file);
+        const key = `${st.mtimeMs}:${st.size}`;
+        const hit = indexCache.get(f);
+        if (hit && hit.key === key) return hit.index;
+        const index = projectIndex(JSON.parse(fs.readFileSync(file, 'utf8')));
+        indexCache.set(f, { key, index });
+        return index;
+      } catch { indexCache.delete(f); return null; }
     })
     .filter(Boolean)
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
+const indexCache = new Map();
 
 export function loadProject(id) {
   const file = fileOf(id);
@@ -55,12 +63,14 @@ export function saveProject(project) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(project, null, 2), 'utf8');
   fs.renameSync(tmp, file);
+  indexCache.delete(path.basename(file));   // 主动失效，不依赖 mtime 恰好变化
   return project;
 }
 
 export function deleteProject(id) {
   const file = fileOf(id);
   if (fs.existsSync(file)) fs.unlinkSync(file);
+  indexCache.delete(path.basename(file));
 }
 
 export function writeAsset(name, content) {
@@ -90,15 +100,28 @@ export function readAsset(name) {
 
 /* ---------------- 项目快照：手动版本点，可随时恢复 ---------------- */
 const snapshotDirOf = (id) => path.join(SNAPSHOT_DIR, String(id).replace(/[^a-zA-Z0-9_-]/g, ''));
+const SNAPSHOT_KEEP = 20;   // 与 listSnapshots 展示上限一致：每份都是项目全量副本，必须封顶
 
 export function writeSnapshot(project) {
   const dir = snapshotDirOf(project.id);
   fs.mkdirSync(dir, { recursive: true });
-  const at = Date.now();
+  let at = Date.now();
+  while (fs.existsSync(path.join(dir, `${at}.json`))) at += 1;   // 同毫秒连拍不互相覆盖
   const file = path.join(dir, `${at}.json`);
   const body = JSON.stringify(project, null, 2);
   fs.writeFileSync(file, body, 'utf8');
+  pruneSnapshots(dir);
   return { at, size: Buffer.byteLength(body), nodeCount: (project.nodes || []).length, name: project.name };
+}
+
+/** 超出保留上限的最旧快照直接删除，防止磁盘无限膨胀 */
+function pruneSnapshots(dir) {
+  const files = fs.readdirSync(dir)
+    .filter((f) => /^\d+\.json$/.test(f))
+    .sort((a, b) => Number(a.slice(0, -5)) - Number(b.slice(0, -5)));
+  for (const f of files.slice(0, Math.max(0, files.length - SNAPSHOT_KEEP))) {
+    try { fs.unlinkSync(path.join(dir, f)); } catch { /* ignore */ }
+  }
 }
 
 export function listSnapshots(id) {
@@ -114,7 +137,7 @@ export function listSnapshots(id) {
     })
     .filter(Boolean)
     .sort((a, b) => b.at - a.at)
-    .slice(0, 20);
+    .slice(0, SNAPSHOT_KEEP);
 }
 
 export function readSnapshot(id, at) {

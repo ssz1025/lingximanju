@@ -375,7 +375,7 @@ function updateRunUI() {
 function projectListCtx() {
   return {
     projects: state.projects, currentId: state.project?.id, stats: state.stats,
-    toast: UI.toast,
+    comfy: state.comfy, toast: UI.toast,
     onOpen: (id) => loadProject(id),
     onChanged: () => onProjectsChanged(),
   };
@@ -545,7 +545,7 @@ async function openManagePanel() {
     if (d.management) state.project.management = d.management;
   } catch { /* 后端不可达时退回缓存的统计 */ }
   PM.openProjectManager({
-    project: state.project, stats: state.projectStats,
+    project: state.project, stats: state.projectStats, comfy: state.comfy,
     progress: { label: `${v.done}/${v.total}`, percent: v.percent },
     toast: UI.toast,
     onChanged: (deleted) => onProjectsChanged(deleted),

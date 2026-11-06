@@ -25,24 +25,53 @@ async function api(path, body, method) {
 }
 
 const STATUS_TEXT = {
-  draft: '草稿 · 待执行', running: '进行中', done: '已完成', error: '失败 · 可重试',
-  standard: '标准流水线', pending: '待执行',
+  draft: '待执行', running: '进行中', done: '已完成', error: '失败',
+  standard: '标准', pending: '待执行',
 };
-const filter = { query: '', view: 'all', sort: 'updated' };
+const filter = { mode: 'recent', query: '', view: 'all', sort: 'updated' };
 export const getFilter = () => ({ ...filter });
 export function setFilter(patch = {}) { Object.assign(filter, patch); }
 
-/* ------------------------------------------------------------------ 侧栏项目列表 */
+const RECENT_MAX = 5;
+/* 项目配置按钮：齿轮图标，16px 线条在 30px 按钮里清晰可辨 */
+const GEAR_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+
+/* ------------------------------------------------------------------ 项目封面渲染（模块级共用：卡片 / 设置弹窗 / 管理面板概览）
+ * 无封面时的「项目名称封面」：按名称散列取色，稳定且可辨识。 */
+function nameCoverHTML(p) {
+  const name = String(p.name || '未命名项目');
+  const first = Array.from(name)[0] || '项';
+  const hue = Array.from(name).reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
+  return `<span class="pm-thumb-name" style="--pm-hue:${hue}"><b>${esc(first)}</b><small>${esc(cut(name, 5))}</small></span>`;
+}
+/** 取项目封面：兼容列表索引（顶层 cover）与完整项目（management.cover）两种数据源 */
+function readCover(p) {
+  return p?.cover || p?.management?.cover || { url: '', source: 'name', prompt: '', updatedAt: 0 };
+}
+/** 卡片/概览用的封面缩略图；asButton=false 时渲染为不可点击的纯展示块 */
+function coverThumbHTML(p, asButton = true) {
+  const cover = readCover(p);
+  const url = cover.url;
+  const badge = url ? `<span class="pm-thumb-badge">${cover.source === 'comfyui' ? '✦ AI' : '⇧ 上传'}</span>` : '';
+  const inner = url ? `<img src="${esc(url)}" alt="" loading="lazy">` : nameCoverHTML(p);
+  if (!asButton) return `<div class="pm-thumb is-static ${url ? 'has-img' : 'is-name'}">${inner}${badge}</div>`;
+  return `<button class="pm-thumb ${url ? 'has-img' : 'is-name'}" data-open="${esc(p.id)}" title="打开「${esc(p.name)}」" aria-label="打开项目">${inner}${badge}</button>`;
+}
+
+/* ------------------------------------------------------------------ 侧栏项目列表：最近项目 + 更多 */
 export function renderProjectList(host, ctx = {}) {
   if (!host) return;
-  const stats = ctx.stats || {};
+  const all = ctx.projects || [];
+  const total = all.length;
+  const moreMode = filter.mode === 'all';
   host.innerHTML = `
-    <div class="pm-stats">
-      <span><b>${stats.total || 0}</b> 全部</span>
-      <span><b>${stats.novels || 0}</b> 创作</span>
-      <span class="ok"><b>${stats.done || 0}</b> 完成</span>
-      <span class="warn"><b>${stats.running || 0}</b> 进行中</span>
+    <div class="pm-head">
+      <strong class="pm-head-title">${moreMode ? '全部项目' : '最近项目'}</strong>
+      ${moreMode
+        ? `<button class="pm-browse" id="pm-back" title="返回最近项目">← 最近项目</button>`
+        : `<button class="pm-browse" id="pm-browse" title="搜索、筛选与排序全部项目">更多 <span class="pm-count">${total}</span> ›</button>`}
     </div>
+    ${moreMode ? `
     <div class="pm-tools">
       <input id="pm-search" class="pm-search" type="search" placeholder="搜索项目 / 标签…" value="${esc(filter.query)}" aria-label="搜索项目">
       <select id="pm-sort" class="pm-sort" aria-label="排序">
@@ -52,13 +81,23 @@ export function renderProjectList(host, ctx = {}) {
         <option value="created" ${filter.sort === 'created' ? 'selected' : ''}>创建时间</option>
       </select>
     </div>
-    <div class="pm-filters" id="pm-filters"></div>
-    <div class="pm-legend"><span class="lg pending">● 待执行</span><span class="lg running">● 进行中</span><span class="lg done">● 已完成</span><span class="lg error">● 失败</span></div>
+    <div class="pm-filters" id="pm-filters"></div>` : ''}
     <div id="pm-list" class="pm-list"></div>`;
 
-  const search = $('pm-search');
-  search.addEventListener('input', (e) => { filter.query = e.target.value; renderItems(); });
-  $('pm-sort').addEventListener('change', (e) => { filter.sort = e.target.value; renderItems(); });
+  $('pm-browse')?.addEventListener('click', () => {
+    filter.mode = 'all';
+    renderProjectList(host, ctx);
+  });
+  $('pm-back')?.addEventListener('click', () => {
+    filter.mode = 'recent'; filter.query = ''; filter.view = 'all';
+    renderProjectList(host, ctx);
+  });
+  if (moreMode) {
+    $('pm-search').addEventListener('input', (e) => { filter.query = e.target.value; renderItems(); });
+    $('pm-sort').addEventListener('change', (e) => { filter.sort = e.target.value; renderItems(); });
+    renderFilters();
+  }
+  renderItems();
 
   function renderFilters() {
     const views = [['all', '全部'], ['novel', '创作项目'], ['running', '进行中'], ['done', '已完成'], ['favorite', '★ 收藏'], ['archived', '已归档']];
@@ -70,7 +109,7 @@ export function renderProjectList(host, ctx = {}) {
 
   function visible() {
     const q = filter.query.trim().toLowerCase();
-    let list = (ctx.projects || []).filter((p) => {
+    let list = all.filter((p) => {
       if (filter.view === 'all' && p.archived) return false;
       if (filter.view === 'archived' && !p.archived) return false;
       if (filter.view === 'novel' && p.kind !== 'novel') return false;
@@ -89,41 +128,63 @@ export function renderProjectList(host, ctx = {}) {
     return list.sort(cmp);
   }
 
+  /** 最近项目：按更新时间取前 N 个，保证当前打开的项目可见 */
+  function recent() {
+    const live = all.filter((p) => !p.archived);
+    const top = [...live].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, RECENT_MAX);
+    const cur = live.find((p) => p.id === ctx.currentId);
+    if (cur && !top.some((p) => p.id === cur.id)) top.unshift(cur);
+    return top;
+  }
+
+  function cardHTML(p) {
+    const isNovel = p.kind === 'novel';
+    const pct = isNovel ? (p.progress || 0) : (p.nodeCount ? Math.round(p.doneCount / p.nodeCount * 100) : 0);
+    const meta = isNovel
+      ? `${p.episodeCount || 0} 集 · 任务 ${p.stepDone ?? 0}/${p.stepTotal ?? 6}`
+      : `${p.nodeCount || 0} 节点 · ${p.doneCount || 0} 已完成`;
+    return `<div class="pm-item ${p.id === ctx.currentId ? 'active' : ''} ${p.archived ? 'is-archived' : ''}" data-id="${esc(p.id)}">
+      ${coverThumbHTML(p)}
+      <div class="pm-card-main">
+      <div class="pm-item-top">
+        <button class="pm-open" data-open="${esc(p.id)}">
+          <span class="pm-name">${p.favorite ? '<span class="pm-star">★</span>' : ''}${esc(p.name)}</span>
+        </button>
+        <button class="pm-more" data-more="${esc(p.id)}" title="项目配置与管理操作" aria-label="项目配置">${GEAR_SVG}</button>
+      </div>
+      <div class="pm-item-meta">
+        <span class="pm-status st-${esc(p.status)}"><i></i>${esc(STATUS_TEXT[p.status] || p.status)}</span>
+        ${isNovel ? '<span class="pm-kind">小说分集</span>' : ''}
+        <span class="pm-sub">${esc(meta)}</span>
+      </div>
+      <div class="pm-bar"><span class="pm-bar-track"><i class="st-${esc(p.status)}" style="width:${pct}%"></i></span><em class="st-${esc(p.status)}">${pct}%</em></div>
+      ${(p.tags || []).length ? `<div class="pm-tags">${p.tags.slice(0, 3).map((t) => `<span>${esc(t)}</span>`).join('')}</div>` : ''}
+      </div>
+      <div class="pm-menu" data-menu="${esc(p.id)}" hidden>
+        <button data-op="cover">🖼 设置项目封面</button>
+        <button data-op="favorite">${p.favorite ? '☆ 取消收藏' : '★ 加入收藏'}</button>
+        <button data-op="rename">✎ 重命名</button>
+        <button data-op="tags">🏷 编辑标签</button>
+        <button data-op="duplicate">⧉ 复制项目</button>
+        <button data-op="export">⇩ 导出 JSON</button>
+        <button data-op="archive">${p.archived ? '↩ 取消归档' : '▣ 归档'}</button>
+        <div class="pm-menu-sep"></div>
+        <button data-op="delete" class="danger">✕ 删除项目</button>
+      </div>
+    </div>`;
+  }
+
   function renderItems() {
     const box = $('pm-list');
     if (!box) return;
-    const list = visible();
+    const list = moreMode ? visible() : recent();
     if (!list.length) {
-      box.innerHTML = `<div class="pm-empty">没有匹配的项目<br><small>试试切换筛选，或点上方「＋ 新建创作项目」</small></div>`;
+      box.innerHTML = moreMode
+        ? `<div class="pm-empty">没有匹配的项目<br><small>试试切换筛选，或点上方「＋ 新建创作项目」</small></div>`
+        : `<div class="pm-empty">还没有项目<br><small>点上方「＋ 新建创作项目」开始创作</small></div>`;
       return;
     }
-    box.innerHTML = list.map((p) => {
-      const isNovel = p.kind === 'novel';
-      const pct = isNovel ? (p.progress || 0) : (p.nodeCount ? Math.round(p.doneCount / p.nodeCount * 100) : 0);
-      const sub = isNovel
-        ? `${p.episodeCount} 集 · 步骤 ${p.stepDone}/${p.stepTotal} · ${p.nodeCount} 节点`
-        : `${p.nodeCount} 节点 · ${p.doneCount} 已完成`;
-      return `<div class="pm-item ${p.id === ctx.currentId ? 'active' : ''} ${p.archived ? 'is-archived' : ''}" data-id="${esc(p.id)}">
-        <span class="pm-dot st-${esc(p.status)}"></span>
-        <span class="pm-main" data-open="${esc(p.id)}">
-          <span class="pm-name">${p.favorite ? '<span class="pm-star">★</span>' : ''}${esc(p.name)}${isNovel ? '<span class="pm-kind">小说分集</span>' : ''}</span>
-          <span class="pm-sub">${esc(sub)}</span>
-          <span class="pm-bar"><i class="st-${esc(p.status)}" style="width:${pct}%"></i></span>
-          ${(p.tags || []).length ? `<span class="pm-tags">${p.tags.slice(0, 3).map((t) => `<span>${esc(t)}</span>`).join('')}</span>` : ''}
-        </span>
-        <button class="pm-more" data-more="${esc(p.id)}" title="更多管理操作">⋯</button>
-        <div class="pm-menu" data-menu="${esc(p.id)}" hidden>
-          <button data-op="favorite">${p.favorite ? '☆ 取消收藏' : '★ 加入收藏'}</button>
-          <button data-op="rename">✎ 重命名</button>
-          <button data-op="tags">🏷 编辑标签</button>
-          <button data-op="duplicate">⧉ 复制项目</button>
-          <button data-op="export">⇩ 导出 JSON</button>
-          <button data-op="archive">${p.archived ? '↩ 取消归档' : '▣ 归档'}</button>
-          <div class="pm-menu-sep"></div>
-          <button data-op="delete" class="danger">✕ 删除项目</button>
-        </div>
-      </div>`;
-    }).join('');
+    box.innerHTML = list.map(cardHTML).join('');
 
     box.querySelectorAll('[data-open]').forEach((el) => el.addEventListener('click', (e) => {
       if (e.target.closest('[data-more]') || e.target.closest('[data-menu]')) return;
@@ -160,6 +221,9 @@ export function renderProjectList(host, ctx = {}) {
         if (!window.confirm(`确定删除「${p?.name || id}」？此操作不可撤销。`)) return;
         await api(`/api/projects/${id}`, undefined, 'DELETE');
         toast('项目已删除', 'ok');
+      } else if (op === 'cover') {
+        openCoverDialog({ project: p, toast, onChanged: ctx.onChanged, comfy: ctx.comfy });
+        return;
       } else if (op === 'rename') {
         const name = window.prompt('项目名称', p?.name || '');
         if (!name || !name.trim()) return;
@@ -186,8 +250,124 @@ export function renderProjectList(host, ctx = {}) {
       await ctx.onChanged?.();
     } catch (err) { toast(err.message, 'err'); }
   }
+}
 
-  renderFilters(); renderItems();
+/* ------------------------------------------------------------------ 项目封面设置弹窗
+ * 三种来源：ComfyUI 出图生成 / 本地上传 / 清除后回退「项目名称封面」。
+ * 卡片缩略图与这里共用同一套 nameCoverHTML 渲染，视觉一致。
+ * ---------------------------------------------------------------- */
+export function openCoverDialog(ctx = {}) {
+  const p = ctx.project;
+  if (!p) return;
+  const root = $('modal-root') || document.body;
+  const toast = ctx.toast || (() => {});
+  let cover = { ...readCover(p) };
+  let busy = false;
+  let message = '';
+  /** 同步到列表索引与完整项目两处，避免弹窗关闭后卡片短暂回退 */
+  const applyCover = (next) => {
+    cover = { ...next };
+    p.cover = cover;
+    if (p.management) p.management.cover = cover;
+  };
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  const close = () => { if (!busy) backdrop.remove(); };
+  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+
+  const sourceLabel = () => cover.source === 'comfyui' ? '✦ ComfyUI 生成'
+    : cover.source === 'upload' ? '⇧ 本地上传' : '项目名称封面（默认）';
+
+  function render() {
+    const preview = cover.url
+      ? `<img src="${esc(cover.url)}?t=${encodeURIComponent(String(cover.updatedAt || ''))}" alt="项目封面">`
+      : nameCoverHTML({ name: p.name });
+    backdrop.innerHTML = `<div class="modal cover-modal" role="dialog" aria-label="项目封面设置">
+      <div class="pmm-head"><div><h2>🖼 项目封面</h2><div class="sub">${esc(p.name)} · ${esc(sourceLabel())}</div></div>
+        <button class="icon-btn" data-act="close" ${busy ? 'disabled' : ''} aria-label="关闭">✕</button></div>
+      <div class="cover-body">
+        <div class="cover-preview">${preview}
+          ${busy ? '<div class="cover-busy"><span class="cover-spinner"></span><b>ComfyUI 正在生成封面</b><small>约 1–2 分钟，请勿关闭窗口</small></div>' : ''}
+        </div>
+        <div class="cover-side">
+          <p class="cover-tip">未设置封面时，项目卡片会自动使用<b>项目名称封面</b>（按名称生成的渐变色块）。<br>
+            生成封面会调用已配置的 ComfyUI 出图工作流；上传支持 PNG / JPEG / WebP / GIF，单张不超过 4 MB。</p>
+          <label class="field"><span>补充画面要求（可选）</span>
+            <input id="cover-prompt" placeholder="如：雨夜霓虹、水墨风、暖色调电影海报…" value="${esc(cover.prompt || '')}"></label>
+          <div class="cover-actions">
+            <button class="btn primary" data-act="generate" ${busy ? 'disabled' : ''}>✦ 用 ComfyUI 生成封面</button>
+            <button class="btn" data-act="upload" ${busy ? 'disabled' : ''}>⇧ 上传本地图片</button>
+            <button class="btn" data-act="reset" ${busy || !cover.url ? 'disabled' : ''}>↺ 使用项目名称封面</button>
+          </div>
+          ${message ? `<div class="cover-status ${message.startsWith('✗') ? 'err' : ''}">${esc(message)}</div>` : ''}
+          <div class="cover-note">${ctx.comfy?.imageWorkflow ? '✓ 已检测到 ComfyUI 出图工作流' : '⚠ 未检测到 ComfyUI 出图工作流，生成前请先在设置中导入'}</div>
+          <input type="file" id="cover-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        </div>
+      </div>
+      <div class="modal-actions"><button class="btn" data-act="close" ${busy ? 'disabled' : ''}>关闭</button></div>
+    </div>`;
+
+    backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
+    const promptInput = $('cover-prompt');
+
+    backdrop.querySelector('[data-act="generate"]')?.addEventListener('click', async () => {
+      if (busy) return;
+      const prompt = promptInput?.value || '';
+      busy = true; message = ''; render();
+      try {
+        const d = await api(`/api/projects/${p.id}/cover/generate`, { prompt });
+        applyCover(d.cover);
+        const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
+        message = `✓ 封面已由 ComfyUI 生成${secs}`;
+        toast('项目封面已生成', 'ok');
+        await ctx.onChanged?.();
+      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
+      busy = false; render();
+    });
+
+    const fileInput = $('cover-file');
+    backdrop.querySelector('[data-act="upload"]')?.addEventListener('click', () => fileInput?.click());
+    fileInput?.addEventListener('change', async () => {
+      if (busy) return;
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) { message = '✗ 仅支持 PNG / JPEG / WebP / GIF 图片'; render(); return; }
+      if (file.size > 4 * 1024 * 1024) { message = '✗ 图片超过 4 MB，请压缩后再上传'; render(); return; }
+      busy = true; message = '正在上传封面…'; render();
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error('读取图片失败'));
+          reader.readAsDataURL(file);
+        });
+        const d = await api(`/api/projects/${p.id}/cover`, { dataUrl });
+        applyCover(d.cover);
+        message = '✓ 封面图片已上传';
+        toast('项目封面已上传', 'ok');
+        await ctx.onChanged?.();
+      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
+      busy = false; render();
+      fileInput.value = '';
+    });
+
+    backdrop.querySelector('[data-act="reset"]')?.addEventListener('click', async () => {
+      if (busy || !cover.url) return;
+      busy = true; message = ''; render();
+      try {
+        const d = await api(`/api/projects/${p.id}/cover`, undefined, 'DELETE');
+        applyCover(d.cover);
+        message = '✓ 已恢复为项目名称封面';
+        toast(message, 'ok');
+        await ctx.onChanged?.();
+      } catch (err) { message = `✗ ${err.message}`; toast(err.message, 'err'); }
+      busy = false; render();
+    });
+  }
+
+  root.appendChild(backdrop);
+  render();
+  return { close };
 }
 
 /* ------------------------------------------------------------------ 六步任务面板 */
@@ -344,6 +524,9 @@ export function openProjectManager(ctx = {}) {
   }
 
   function renderOverview(body, m, s, prog) {
+    const cover = readCover(ctx.project);
+    const coverLabel = cover.source === 'comfyui' ? '✦ ComfyUI 生成封面'
+      : cover.source === 'upload' ? '⇧ 本地上传封面' : '项目名称封面（默认）';
     body.innerHTML = `
       <div class="pmm-grid">
         <div class="pmm-stat"><b>${s.nodeCount || 0}</b><span>画布节点</span></div>
@@ -352,6 +535,15 @@ export function openProjectManager(ctx = {}) {
         <div class="pmm-stat"><b>${s.anchorCount || 0}</b><span>视觉锚点</span></div>
         <div class="pmm-stat"><b>${m.episodes?.length || 0}</b><span>分集</span></div>
         <div class="pmm-stat"><b>${prog.percent || 0}%</b><span>六步进度</span></div>
+      </div>
+      <div class="cf-section"><h4>项目封面</h4>
+        <div class="cover-mgr">
+          ${coverThumbHTML(ctx.project, false)}
+          <div class="cover-mgr-info">
+            <div class="cf-note" style="margin:0 0 8px">当前：<b>${esc(coverLabel)}</b><br>未设置封面时，项目卡片会自动使用项目名称封面；可用 ComfyUI 生成或上传本地图片。</div>
+            <button class="btn primary" data-act="set-cover">🖼 设置项目封面</button>
+          </div>
+        </div>
       </div>
       <div class="cf-section"><h4>基本信息</h4>
         <div class="modal-grid">
@@ -380,6 +572,9 @@ export function openProjectManager(ctx = {}) {
       await manage('tags', $('pmm-tags').value, false);
       await manage('note', $('pmm-note').value, false);
       toast('基本信息已保存', 'ok');
+    });
+    body.querySelector('[data-act="set-cover"]').addEventListener('click', () => {
+      openCoverDialog({ project: ctx.project, toast, comfy: ctx.comfy, onChanged: ctx.onChanged });
     });
     body.querySelector('[data-act="favorite"]').addEventListener('click', () => manage('favorite'));
     body.querySelector('[data-act="archive"]').addEventListener('click', () => manage('archive'));

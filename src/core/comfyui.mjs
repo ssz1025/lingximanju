@@ -83,19 +83,26 @@ function seedValue(seedText = '') {
 
 function resolveVars(vars) {
   const cfg = vars.cfg || {};
+  const prompt = String(vars.prompt ?? '');
+  const negativePrompt = String(vars.negative ?? cfg.negativePrompt ?? '');
+  // prompt_json：JSON 字符串内部安全形态（转义引号/换行），供 timeline_data 这类 JSON 字符串字段使用
+  const jsonInner = (s) => JSON.stringify(s).slice(1, -1);
   return {
-    prompt: String(vars.prompt ?? ''),
-    negative_prompt: String(vars.negative ?? cfg.negativePrompt ?? ''),
+    prompt,
+    prompt_json: jsonInner(prompt),
+    negative_prompt: negativePrompt,
+    negative_json: jsonInner(negativePrompt),
     seed: seedValue(String(vars.seed ?? '')),
     width: Number(cfg.width) || 864,
     height: Number(cfg.height) || 480,
     fps: Number(cfg.fps) || 24,
     frames: Number(vars.frames || cfg.frames) || 124,
-    duration: Number(vars.duration) || 5,
+    // duration 未显式给出时由 frames/fps 推导，保证 timeline 时长与帧数自洽
+    duration: Number(vars.duration) || Math.round((Number(vars.frames || cfg.frames) / (Number(cfg.fps) || 24)) * 100) / 100 || 5,
     steps: Number(cfg.steps) || 25,
     cfg: Number(cfg.cfg) || 1.0,
     filename_prefix: String(vars.filenamePrefix || 'lingximanju'),
-    image: String(vars.imageName || ''),
+    image: String(vars.imageName || 'lingximanju_reference.png'),
     title: String(vars.title || ''),
     shot_no: String(vars.shotNo || ''),
     motion: String(vars.motion || ''),
