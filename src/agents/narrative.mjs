@@ -16,7 +16,14 @@ defineAgent({
   async run(ctx) {
     const idea = textOf(ctx.node.data.text) || textOf(ctx.inputs.find((i) => i.text)?.text) || '一位侦探在雨夜收到一封没有署名的信';
     ctx.progress(0.2);
-    const script = await ctx.providers.generate('screenplay', { idea, style: ctx.settings.style }, ctx.signal);
+    // 创作项目：小说标题 / 分集梗概 / 原著角色随输入下发，保证剧本来自用户上传的内容
+    const script = await ctx.providers.generate('screenplay', {
+      idea, style: ctx.settings.style,
+      title: ctx.node.data.novelTitle || undefined,
+      episodes: ctx.node.data.novelEpisodes || undefined,
+      characters: ctx.node.data.characters || undefined,
+      novelExcerpt: ctx.node.data.novelExcerpt || undefined,
+    }, ctx.signal);
     ctx.log('think', `识别到 ${script.characters.length} 位角色、${script.scenes.length} 个场景，正在统一剧本格式`);
     ctx.progress(0.8);
     ctx.setTitle(`剧本 · ${script.title}`);
@@ -33,14 +40,16 @@ defineAgent({
   description: '索引原著并按节点描述检索，补全分解时丢失的全局信息（论文式 6）',
   async run(ctx) {
     const script = findScript(ctx);
-    const corpus = script
+    // 式(6)：创作项目用「整本原著」建索引，而不是只看已压缩的剧本，避免分解丢失伏笔
+    const original = textOf(ctx.node.data.originalCorpus);
+    const corpus = original || (script
       ? [script.logline, ...script.scenes.map((s) => `${s.location}：${s.summary}`), ...script.characters.map((c) => `${c.name}：${c.appearance}`)].join('。')
-      : textOf(ctx.node.data.corpus);
+      : textOf(ctx.node.data.corpus));
     ctx.progress(0.35);
     const context = await ctx.providers.generate('context', { corpus, query: ctx.node.title }, ctx.signal);
     ctx.progress(0.9);
     ctx.patch({
-      context, corpus, script,
+      context, corpus: brief(corpus, 300), script,
       indexSize: corpus.length, passages: context.passages?.length || 0,
       summary: `索引 ${corpus.length} 字 · 命中 ${context.passages?.length || 0} 段上下文`,
     });

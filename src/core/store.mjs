@@ -1,7 +1,8 @@
-// 本地 JSON 持久化：原子写入、轻量索引、资产落盘
+// 本地 JSON 持久化：原子写入、轻量索引、资产落盘、项目快照
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { projectIndex } from './project-steps.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 // 数据目录解析优先级：
@@ -13,8 +14,10 @@ export const DATA_DIR = process.env.LINGXIMANJU_DATA_DIR
 export const PROJECT_DIR = path.join(DATA_DIR, 'projects');
 export const ASSET_DIR = path.join(DATA_DIR, 'assets');
 export const PUBLIC_DIR = path.join(ROOT, 'public');
+export const EXAMPLES_DIR = path.join(ROOT, 'examples');
+export const SNAPSHOT_DIR = path.join(DATA_DIR, 'snapshots');
 
-for (const dir of [DATA_DIR, PROJECT_DIR, ASSET_DIR]) {
+for (const dir of [DATA_DIR, PROJECT_DIR, ASSET_DIR, SNAPSHOT_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -32,11 +35,8 @@ export function listProjects() {
     .map((f) => {
       try {
         const p = JSON.parse(fs.readFileSync(path.join(PROJECT_DIR, f), 'utf8'));
-        return {
-          id: p.id, name: p.name, mode: p.mode, updatedAt: p.updatedAt,
-          nodeCount: (p.nodes || []).length,
-          doneCount: (p.nodes || []).filter((n) => n.status === 'done').length,
-        };
+        // 索引字段由项目管理层统一推导：状态、进度、收藏、归档、标签、交付物
+        return projectIndex(p);
       } catch { return null; }
     })
     .filter(Boolean)
@@ -86,4 +86,39 @@ export function readAsset(name) {
   const safe = String(name).replace(/[^a-zA-Z0-9_.-]/g, '');
   const file = path.join(ASSET_DIR, safe);
   return fs.existsSync(file) ? fs.readFileSync(file) : null;
+}
+
+/* ---------------- 项目快照：手动版本点，可随时恢复 ---------------- */
+const snapshotDirOf = (id) => path.join(SNAPSHOT_DIR, String(id).replace(/[^a-zA-Z0-9_-]/g, ''));
+
+export function writeSnapshot(project) {
+  const dir = snapshotDirOf(project.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const at = Date.now();
+  const file = path.join(dir, `${at}.json`);
+  const body = JSON.stringify(project, null, 2);
+  fs.writeFileSync(file, body, 'utf8');
+  return { at, size: Buffer.byteLength(body), nodeCount: (project.nodes || []).length, name: project.name };
+}
+
+export function listSnapshots(id) {
+  const dir = snapshotDirOf(id);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((f) => /^\d+\.json$/.test(f))
+    .map((f) => {
+      try {
+        const p = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+        return { at: Number(f.replace('.json', '')), size: fs.statSync(path.join(dir, f)).size,
+          name: p.name, nodeCount: (p.nodes || []).length };
+      } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 20);
+}
+
+export function readSnapshot(id, at) {
+  const file = path.join(snapshotDirOf(id), `${Number(at)}.json`);
+  if (!fs.existsSync(file)) return null;
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }

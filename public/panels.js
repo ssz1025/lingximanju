@@ -304,8 +304,11 @@ export function openHelp() {
     ['Ctrl/Cmd + Z', '撤销'], ['Ctrl/Cmd + Shift + Z', '重做'], ['Ctrl/Cmd + D', '复制选中节点'],
     ['Delete / Backspace', '删除选中节点'], ['Ctrl/Cmd + A', '全选'], ['F', '适应视图'],
     ['L', '自动布局'], ['R', '运行完整流水线'], ['Esc', '取消选择 / 关闭弹窗'],
+    ['N', '新建创作项目（上传小说 → 分集 → 视频 / 导演包）'],
+    ['S', '执行创作项目的下一步任务'], ['P', '打开项目管理面板（分集 / 产物 / 快照）'],
+    ['右侧「任务步骤」Tab', '六步执行清单、四态视觉提示与对应的论文公式'],
   ];
-  showModal({ title: '快捷键与交互', sub: '无限画布的核心操作；更多能力在右侧「Agent 对话」面板里用自然语言驱动。',
+  showModal({ title: '快捷键与交互', sub: '无限画布完整保留；创作项目在「任务步骤」Tab 逐步执行，画布节点随每一步生长。',
     body: `<div class="help-grid">${rows.map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('')}</div>`,
     actions: [{ label: '知道了', primary: true }] });
 }

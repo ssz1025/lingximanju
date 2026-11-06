@@ -95,6 +95,31 @@ function mockGenerate(intent, vars = {}) {
   const seed = hash(idea + intent);
   switch (intent) {
     case 'screenplay': {
+      // 创作项目（上传小说）：把分集梗概与结尾钩子归一为统一格式剧本（ViMax 式 1）
+      if (Array.isArray(vars.episodes) && vars.episodes.length) {
+        const clip = (v, n) => { const t = String(v ?? '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
+        const chars = (Array.isArray(vars.characters) && vars.characters.length ? vars.characters : theme.chars)
+          .slice(0, 4).map((c, i) => ({ name: c.name, role: c.role || (i === 0 ? '主角' : '配角'), appearance: c.appearance || '造型待定' }));
+        return {
+          title: vars.title || shortTitle(idea) || '未命名小说',
+          genre: `小说改编 / ${theme.genre}`,
+          logline: clip(vars.episodes[0]?.summary || idea, 60),
+          style: vars.style || theme.styleHint,
+          characters: chars,
+          episodeCount: vars.episodes.length,
+          scenes: vars.episodes.slice(0, 3).map((e, i) => ({
+            id: `sc_ep${e.no || i + 1}`,
+            location: clip(e.sourceTitles?.[0] || e.title || `第 ${i + 1} 集`, 24),
+            time: i === 0 ? '开篇' : '接续',
+            summary: clip(e.summary, 50),
+            script: [
+              `【第 ${e.no || i + 1} 集 · ${clip(e.sourceTitles?.[0] || e.title, 20)}】`,
+              clip(i === 0 ? (vars.novelExcerpt || e.summary) : e.summary, 90),
+              `结尾钩子：${clip(e.hook, 42)}`,
+            ],
+          })),
+        };
+      }
       const title = vars.title || (theme.key === 'noir' ? '雨夜来信' : theme.key === 'scifi' ? '坐标之外' : theme.key === 'youth' ? '夏末纸条' : shortTitle(idea) || '无名短片');
       return {
         title,

@@ -18,7 +18,7 @@
 
     <div class="side-scroll">
       <section class="side-section">
-        <div class="section-head"><span>项目</span><div style="display:flex;gap:5px"><button id="btn-import" class="mini-btn" title="导入项目 JSON">⇧ 导入</button><button id="btn-new-project" class="mini-btn" title="新建项目">＋ 新建</button></div></div>
+        <div class="section-head"><span>项目管理</span><div style="display:flex;gap:5px"><button id="btn-import" class="mini-btn" title="导入项目 JSON">⇧ 导入</button><button id="btn-new-project" class="mini-btn accent-mini" title="新建小说分集创作项目 (N)">＋ 新建创作项目</button></div></div>
         <div id="project-list" class="project-list"></div>
       </section>
 
@@ -51,9 +51,12 @@
           <input id="project-name" spellcheck="false" aria-label="项目名称">
           <span id="project-mode" class="mode-chip"></span>
         </div>
+        <div id="step-chip" class="step-chip" hidden><span class="sc-dot"></span><span id="step-chip-text">0/6</span></div>
       </div>
       <div class="tb-center"><div id="run-status" class="run-status"><span class="rs-dot"></span><span id="run-status-text">就绪</span></div></div>
       <div class="tb-right">
+        <button id="btn-step-run" class="btn primary" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
+        <button id="btn-project-manage" class="btn" title="项目管理：分集 / 产物 / 快照 / 标签">▦ 项目管理</button>
         <button id="btn-arrange" class="btn" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
         <button id="btn-fit" class="btn" title="适应视图 (F)">⤢ 适应</button>
         <button id="btn-run" class="btn primary" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
@@ -65,6 +68,7 @@
         <button id="btn-theme" class="icon-btn" title="切换主题">☀</button>
         <button id="btn-help" class="icon-btn" title="快捷键帮助">?</button>
       </div>
+      <div id="top-progress" class="top-progress" hidden><i></i></div>
     </header>
 
     <div id="workspace">
@@ -94,16 +98,19 @@
         </div>
 
         <div id="minimap" class="minimap"><canvas id="minimap-canvas" width="220" height="140"></canvas><span class="minimap-label">导航图</span></div>
-        <div id="canvas-hint" class="canvas-hint">空格 + 拖拽平移 · 滚轮缩放 · 从右侧端口拖出连线，松手选下一个节点 · 右键节点更多操作</div>
+        <div id="canvas-hint" class="canvas-hint">空格 + 拖拽平移 · 滚轮缩放 · 端口拖出连线 · 右键节点更多操作</div>
+        <div id="canvas-stepbar" class="canvas-stepbar" hidden></div>
       </div>
 
       <aside id="inspector">
         <div class="insp-tabs">
           <button class="insp-tab active" data-tab="props">节点属性</button>
+          <button class="insp-tab" data-tab="steps">任务步骤</button>
           <button class="insp-tab" data-tab="agent">Agent 对话</button>
           <button id="btn-insp-toggle" class="icon-btn" title="收起面板">›</button>
         </div>
         <div id="insp-props" class="insp-body"></div>
+        <div id="insp-steps" class="insp-body" hidden></div>
         <div id="insp-agent" class="insp-body" hidden>
           <div class="agent-intro">画布协作者能读到整张图：节点、连线、状态与产物。用 <code>@节点ID</code> 指向具体节点。</div>
           <div id="chat-log" class="chat-log"></div>

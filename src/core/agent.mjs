@@ -6,7 +6,7 @@ const registry = new Map();
 
 /** 节点类型 → 默认智能体（用户手动拖入的节点也能运行） */
 export const TYPE_AGENT = {
-  idea: 'screenwriter', script: 'decomposer', plan: 'decomposer', rag: 'rag',
+  idea: 'screenwriter', episode: null, script: 'decomposer', plan: 'decomposer', rag: 'rag',
   event: 'rag', scene: 'storyboard', storyboard: 'storyboard', shot: 'keyframe',
   character: 'character', camera: 'camera-graph', keyframe: 'keyframe',
   review: 'review', video: 'video', transition: 'transition', final: 'composer', note: null,

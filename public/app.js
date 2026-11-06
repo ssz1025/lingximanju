@@ -3,11 +3,14 @@ import { CanvasController } from './canvas.js';
 import { NODE_TYPES, PALETTE_ORDER, typeOf, STATUS_LABEL } from './nodes.js';
 import * as UI from './panels.js';
 import { openLinkPicker, closeLinkPicker, isLinkPickerOpen } from './link-picker.js';
+import { openCreationWizard } from './wizard.js';
+import * as PM from './project-manager.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
   project: null, projects: [], templates: [], agents: [], selected: [],
   running: false, logs: [], movedByUser: false, nodeCountBeforeRun: 0,
+  steps: [], stats: {}, projectStats: {}, stepBusy: false,
 };
 let saveTimer = null;
 let renderScheduled = false;
@@ -219,6 +222,15 @@ function handleEvent(e) {
   const p = state.project;
   if (!p || (e.projectId && e.projectId !== p.id)) return;
 
+  // 项目管理层广播：六步状态、统计与进度，驱动步骤面板 / 侧栏 / 顶栏同步刷新
+  if (e.type === 'project:meta') {
+    p.management = e.management;
+    // e.stats 是「单个项目」的统计；state.stats 是侧栏用的「全部项目」统计，二者不能混用
+    if (e.stats) state.projectStats = e.stats;
+    renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
+    return;
+  }
+
   switch (e.type) {
     case 'run:start':
       state.running = true; state.nodeCountBeforeRun = p.nodes.length;
@@ -274,6 +286,7 @@ function handleEvent(e) {
       if (e.reason === 'arrange') UI.toast('画布已按依赖拓扑整理', 'ok');
       if (['storyboard'].includes(e.reason)) UI.toast('Agent 已在画布上生成镜头链', 'ok');
       renderInspector(); updateStats(); updateHeader();
+      renderStepPanel(); renderCanvasStepBar();
       break;
     }
     case 'run:done':
@@ -302,9 +315,24 @@ async function syncProject() {
   state.project = fresh;
   canvas.setProject(fresh, { keepViewport: true });
   updateStats(); renderInspector(); updateHeader();
+  // 任何项目刷新都同步步骤面板，避免顶栏进度与六步卡状态出现短暂不一致
+  renderStepPanel(); renderCanvasStepBar();
 }
 
 /* ---------------- 渲染 ---------------- */
+function stepVisual() {
+  const m = state.project?.management;
+  const steps = m?.steps || [];
+  const total = state.steps.length || 6;
+  const done = steps.filter((s) => s.status === 'done').length;
+  const running = steps.some((s) => s.status === 'running');
+  const failed = steps.some((s) => s.status === 'error');
+  const current = steps.find((s) => s.status === 'running') || steps.find((s) => s.status === 'pending');
+  const overall = failed ? 'error' : running ? 'running' : (m?.kind === 'novel' && done === total) ? 'done' : 'draft';
+  return { isNovel: m?.kind === 'novel', steps, total, done, running, failed, current, overall,
+    percent: total ? Math.round(done / total * 100) : 0 };
+}
+
 function updateHeader() {
   const p = state.project;
   if (!p) return;
@@ -313,6 +341,22 @@ function updateHeader() {
   const c = state.comfy || {};
   const backend = c.imageWorkflow || c.videoWorkflow ? '本地 ComfyUI' : 'Mock 自绘';
   $('stat-provider').textContent = `${p.settings?.provider === 'openai' ? 'openai' : 'mock'} + ${backend}`;
+
+  // 明确的视觉提示：状态胶囊 + 顶部进度条 + 下一步按钮 + 画布步骤导航条
+  const v = stepVisual();
+  const chip = $('step-chip');
+  chip.hidden = !v.isNovel;
+  chip.className = `step-chip st-${v.overall}`;
+  $('step-chip-text').textContent = v.isNovel
+    ? `${v.done}/${v.total} 步 · ${v.failed ? '失败可重试' : v.running ? '执行中' : v.overall === 'done' ? '全部完成' : '待执行'}`
+    : '';
+  const bar = $('top-progress');
+  bar.hidden = !v.isNovel;
+  const fill = bar.querySelector('i');
+  if (fill) fill.style.width = `${v.percent}%`;
+  $('btn-step-run').hidden = !v.isNovel || v.overall === 'done' || state.stepBusy;
+  $('btn-step-run').textContent = state.stepBusy ? '执行中…' : `▶ 第 ${v.current?.no || v.total} 步`;
+  $('canvas-hint').hidden = v.isNovel; // 步骤条占据画布顶部，避免两层提示重叠
 }
 function updateStats() {
   const p = state.project;
@@ -328,28 +372,37 @@ function updateRunUI() {
   $('run-status-text').textContent = state.running ? '智能体运行中…' : '就绪';
 }
 
-function renderSidebar() {
-  $('project-list').innerHTML = state.projects.map((p) => `
-    <div class="project-item ${p.id === state.project?.id ? 'active' : ''}" data-id="${p.id}">
-      <span class="pi-icon">◈</span>
-      <span class="pi-main"><span class="pi-name">${escapeHTML(p.name)}${p.nodeCount > 0 && p.doneCount === p.nodeCount ? '<span class="pi-tag">全完成</span>' : ''}</span>
-      <span class="pi-sub">${p.nodeCount} 节点 · ${p.doneCount} 已完成</span></span>
-      <button class="pi-del" data-del="${p.id}" title="删除项目">×</button>
-    </div>`).join('');
-  $('project-list').querySelectorAll('.project-item').forEach((el) => {
-    el.addEventListener('click', (e) => {
-      if (e.target.dataset.del) {
-        e.stopPropagation();
-        if (!window.confirm('确定删除这个项目？此操作不可撤销。')) return;
-        api(`/api/projects/${e.target.dataset.del}`, { method: 'DELETE' }).then(() => {
-          UI.toast('项目已删除');
-          refreshProjects().then(() => state.projects[0] && loadProject(state.projects[0].id));
-        });
-        return;
-      }
-      loadProject(el.dataset.id);
-    });
+function projectListCtx() {
+  return {
+    projects: state.projects, currentId: state.project?.id, stats: state.stats,
+    toast: UI.toast,
+    onOpen: (id) => loadProject(id),
+    onChanged: () => onProjectsChanged(),
+  };
+}
+function renderProjectListOnly() { PM.renderProjectList($('project-list'), projectListCtx()); }
+
+/** 六步任务面板 / 画布步骤条：两者的点击都回到同一套业务动作 */
+function stepPanelCtx() {
+  return {
+    project: state.project, steps: state.steps, busy: state.stepBusy,
+    onRunStep: (id, all) => runStep(id, all),
+    onReset: (id) => resetSteps(id),
+    onFocus: (id) => focusStepNodes(id),
+    onManage: () => openManagePanel(),
+    onCreate: () => openWizard(),
+  };
+}
+function renderStepPanel() { PM.renderStepPanel($('insp-steps'), stepPanelCtx()); }
+function renderCanvasStepBar() {
+  PM.renderCanvasStepBar($('canvas-stepbar'), {
+    project: state.project, steps: state.steps,
+    onJump: (id) => { PM.setExpandedStep(id); switchInspector('steps'); renderStepPanel(); focusStepNodes(id); },
   });
+}
+
+function renderSidebar() {
+  renderProjectListOnly();
 
   $('template-list').innerHTML = state.templates.map((t) => `
     <div class="template-item" data-id="${t.id}">
@@ -393,6 +446,8 @@ async function refreshProjects() {
   const data = await api('/api/bootstrap');
   state.projects = data.projects; state.templates = data.templates; state.agents = data.agents;
   state.comfy = data.comfy || state.comfy;
+  if (data.steps) state.steps = data.steps;
+  if (data.stats) state.stats = data.stats;
   renderSidebar();
   return data;
 }
@@ -402,6 +457,7 @@ async function loadProject(id) {
   const savedViewport = p.viewport && Number.isFinite(p.viewport.zoom) && p.viewport.zoom > 0;
   canvas.setProject(p);
   updateHeader(); updateStats(); updateRunUI(); renderSidebar(); renderInspector();
+  renderStepPanel(); renderCanvasStepBar();
   // 有保存过的视口就尊重它：大图强行 fit-all 会把节点缩到几十像素，看起来像空画布。
   // 需要看全图时用画布右下角的「⤢ 适应视图」，节点全在视口外时也会自动出现回到内容按钮。
   if (!savedViewport) setTimeout(() => canvas.fitView(), 60);
@@ -410,6 +466,111 @@ async function loadProject(id) {
     UI.toast(`已载入 ${p.nodes.length} 节点的完成示例 · 滚轮放大看细节，⤢ 查看全图`, 'ok');
   }
 }
+/* ---------------- 创作项目管理：向导 / 六步执行 / 管理面板 ---------------- */
+function openWizard() {
+  openCreationWizard({
+    steps: state.steps, toast: UI.toast,
+    onCreated: async (project) => {
+      await refreshProjects();
+      await loadProject(project.id);
+      switchInspector('steps');
+    },
+    onStart: (stepId) => { switchInspector('steps'); runStep(stepId, false); },
+    onOpenPanel: () => switchInspector('steps'),
+  });
+}
+
+async function runStep(stepId, all = false) {
+  const p = state.project;
+  if (!p || state.stepBusy) return;
+  if (p.management?.kind !== 'novel') { UI.toast('这是标准流水线项目，请用「运行完整流水线」', 'err'); return; }
+  state.stepBusy = true;
+  PM.setExpandedStep(all ? null : (stepId || null));
+  renderStepPanel(); updateHeader();
+  const label = all ? '全部执行' : `第 ${state.steps.find((s) => s.id === stepId)?.no || ''} 步`;
+  UI.toast(`${label}开始 · 画布节点会随智能体执行实时生长`, 'ok');
+  try {
+    const out = await api(`/api/projects/${p.id}/step`, {
+      method: 'POST', body: JSON.stringify({ stepId: stepId || undefined, all }),
+    });
+    if (!out.ok) throw new Error(out.error || '执行失败');
+    state.project.management = out.management;
+    if (out.stats) state.projectStats = out.stats;
+    const failed = (out.executed || []).filter((x) => x.status === 'error');
+    UI.toast(failed.length ? `${label}中断：${failed[0].note}` : `${label}完成 · ${out.progress.label} 步`, failed.length ? 'err' : 'ok');
+    await syncProject();
+    await refreshProjects();
+  } catch (e) {
+    UI.toast(`${label}失败：${e.message}`, 'err');
+  } finally {
+    state.stepBusy = false;
+    renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
+  }
+}
+
+async function resetSteps(stepId) {
+  const p = state.project;
+  if (!p?.management || state.stepBusy) return;
+  try {
+    const out = await api(`/api/projects/${p.id}/step`, {
+      method: 'POST', body: JSON.stringify({ action: 'reset', stepId: stepId || undefined }),
+    });
+    p.management = out.management;
+    renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
+    UI.toast(stepId ? '该步骤已重置，可重新执行' : '六步任务状态已全部重置', 'ok');
+  } catch (e) { UI.toast(e.message, 'err'); }
+}
+
+function focusStepNodes(stepId) {
+  const def = state.steps.find((s) => s.id === stepId);
+  if (!def || !state.project) return;
+  const types = new Set(def.scope || []);
+  let nodes = def.auto
+    ? state.project.nodes.filter((n) => n.type === 'episode')
+    : state.project.nodes.filter((n) => types.has(n.type));
+  if (!nodes.length) nodes = state.project.nodes.filter((n) => n.type === 'idea' || n.type === 'note');
+  const ids = nodes.slice(0, 8).map((n) => n.id);
+  canvas.select(ids);
+  if (ids[0]) canvas.focusNode(ids[0]);
+  UI.toast(`已定位「${def.title}」相关 ${nodes.length} 个画布节点`, 'ok');
+}
+
+async function openManagePanel() {
+  if (!state.project) return;
+  const v = stepVisual();
+  // 打开时拉取当前项目的真实统计（节点 / 产物 / 运行记录），不用侧栏的全局统计
+  try {
+    const d = await api(`/api/projects/${state.project.id}/manage`);
+    if (d.stats) state.projectStats = d.stats;
+    if (d.management) state.project.management = d.management;
+  } catch { /* 后端不可达时退回缓存的统计 */ }
+  PM.openProjectManager({
+    project: state.project, stats: state.projectStats,
+    progress: { label: `${v.done}/${v.total}`, percent: v.percent },
+    toast: UI.toast,
+    onChanged: (deleted) => onProjectsChanged(deleted),
+    onRunStep: (id) => runStep(id, false),
+    onDownload: (kind) => {
+      if (kind === 'pack') return exportPack(false);
+      const final = state.project.nodes.find((n) => n.type === 'final');
+      if (!final?.data?.film?.file) return UI.toast('尚未生成成片 MP4：接入 ComfyUI 视频工作流后由 ffmpeg 拼接', 'err');
+      window.location.href = `/api/projects/${state.project.id}/film`;
+    },
+  });
+}
+
+async function onProjectsChanged(deleted = false) {
+  const data = await refreshProjects();
+  const exists = state.project && data.projects.some((p) => p.id === state.project.id);
+  if (deleted || !exists) {
+    if (data.projects[0]) await loadProject(data.projects[0].id);
+    else { state.project = null; renderStepPanel(); renderCanvasStepBar(); }
+  } else {
+    await loadProject(state.project.id);
+    renderStepPanel(); renderCanvasStepBar(); updateHeader();
+  }
+}
+
 async function applyTemplate(id) {
   if (!state.project) return;
   if (!window.confirm('应用模板会替换当前画布上的所有节点，确定继续？（当前项目会被覆盖）')) return;
@@ -512,7 +673,9 @@ function openContextMenu(id, x, y) {
 function switchInspector(tab) {
   document.querySelectorAll('.insp-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('insp-props').hidden = tab !== 'props';
+  $('insp-steps').hidden = tab !== 'steps';
   $('insp-agent').hidden = tab !== 'agent';
+  if (tab === 'steps') renderStepPanel();
   if (tab === 'agent') $('chat-input')?.focus();
 }
 async function sendChat(text) {
@@ -527,14 +690,9 @@ async function sendChat(text) {
 
 /* ---------------- 事件绑定 ---------------- */
 function bindUI() {
-  $('btn-new-project').addEventListener('click', () => UI.openNewProject(state.templates, async (payload) => {
-    try {
-      const p = await api('/api/projects', { method: 'POST', body: JSON.stringify(payload) });
-      await refreshProjects();
-      await loadProject(p.id);
-      UI.toast('项目已创建，点击「运行完整流水线」开始', 'ok');
-    } catch (e) { UI.toast(e.message, 'err'); }
-  }));
+  $('btn-new-project').addEventListener('click', () => openWizard());
+  $('btn-project-manage').addEventListener('click', () => openManagePanel());
+  $('btn-step-run').addEventListener('click', () => runStep(null, false));
   $('btn-import').addEventListener('click', () => {
     const input = document.createElement('input');
     input.type = 'file'; input.accept = 'application/json,.json';
@@ -641,6 +799,9 @@ function bindUI() {
     if (e.key.toLowerCase() === 'f') { canvas.fitView(); return; }
     if (e.key.toLowerCase() === 'l') { arrange(); return; }
     if (e.key.toLowerCase() === 'r') { run(); return; }
+    if (e.key.toLowerCase() === 'n') { openWizard(); return; }
+    if (e.key.toLowerCase() === 'p') { openManagePanel(); return; }
+    if (e.key.toLowerCase() === 's') { runStep(null, false); return; }
     if (e.key === '?' ) { UI.openHelp(); return; }
     if (e.key === '+' || e.key === '=') { canvas.setZoom(canvas.vp.zoom * 1.2); return; }
     if (e.key === '-') { canvas.setZoom(canvas.vp.zoom / 1.2); return; }
@@ -661,8 +822,10 @@ async function boot() {
   const data = await api('/api/bootstrap');
   state.projects = data.projects; state.templates = data.templates; state.agents = data.agents;
   state.comfy = data.comfy || state.comfy;
+  state.steps = data.steps || []; state.stats = data.stats || {};
   renderSidebar();
   if (data.recent) await loadProject(data.recent);
+  renderStepPanel(); renderCanvasStepBar();
   initSSE();
   UI.appendChat('assistant', '你好，我是画布协作者。我可以读整张图、解释依赖、检查一致性、整理布局，也能直接给场景补镜头链。试试下面的快捷指令吧。');
   setTimeout(() => canvas.fitView(), 200);

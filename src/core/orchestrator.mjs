@@ -18,12 +18,19 @@ export function stopProject(projectId) {
   return true;
 }
 
-function computeTargets(project, nodeId) {
+/**
+ * 计算本次运行的目标节点。
+ * scope（可选）是「创作项目六步任务」传入的节点类型白名单：只调度该步对应的节点，
+ * 动态展开出的其它阶段节点留给后续步骤。不传 scope 时保持原来的「跑完整流水线」行为。
+ */
+function computeTargets(project, nodeId, scope) {
   const { edges, nodes } = project;
   if (nodeId) return descendants(edges, nodeId);
-  const roots = nodes.filter((n) => n.status === 'idle' || n.status === 'error').map((n) => n.id);
+  const types = new Set(scope || []);
+  const inScope = (id) => !types.size || types.has(nodes.find((n) => n.id === id)?.type);
+  const roots = nodes.filter((n) => (n.status === 'idle' || n.status === 'error') && inScope(n.id)).map((n) => n.id);
   const set = new Set();
-  for (const id of roots) for (const d of descendants(edges, id)) set.add(d);
+  for (const id of roots) for (const d of descendants(edges, id)) if (inScope(d)) set.add(d);
   return set;
 }
 
@@ -51,6 +58,8 @@ export async function runProject(projectId, opts = {}) {
     comfy: { ...loadComfyConfig(), ...(project.settings?.comfy || {}) },
   };
   const concurrency = Math.max(1, Math.min(8, Number(settings.concurrency) || 3));
+  const scopeTypes = new Set(opts.scope || []);
+  const inScope = (id) => !scopeTypes.size || scopeTypes.has(project.nodes.find((n) => n.id === id)?.type);
   const providers = createProviders(settings, (level, message) =>
     emit('log', { projectId, runId, level, message }));
 
@@ -71,7 +80,7 @@ export async function runProject(projectId, opts = {}) {
   let outcome = 'done';
 
   try {
-    const targets = computeTargets(project, opts.nodeId);
+    const targets = computeTargets(project, opts.nodeId, opts.scope);
     if (!targets.size) {
       emit('log', { projectId, runId, level: 'info', message: '没有待执行节点（全部已完成），如需重算请右键节点选择「从此处重跑」。' });
     } else {
@@ -133,7 +142,7 @@ export async function runProject(projectId, opts = {}) {
         for (const id of runState.pending) {
           if (!targets.has(id) && !waiting.has(id)) {
             const n = project.nodes.find((x) => x.id === id);
-            if (n && (n.status === 'idle' || n.status === 'queued')) targets.add(id);
+            if (n && (n.status === 'idle' || n.status === 'queued') && inScope(id)) targets.add(id);
           }
         }
         runState.pending.clear();
