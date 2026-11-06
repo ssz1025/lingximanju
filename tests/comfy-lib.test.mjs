@@ -150,3 +150,51 @@ test('comfySummary：两库概览含 lastTest，不回传 workflow 本体，原�
   assert.equal(s.videoWorkflowLib.length, 0);
   assert.deepEqual(s.imageWorkflow, { name: 'A', nodes: 1 }, '原单槽位概览保留');
 });
+
+test('addLibraryItems：合法入库、非法进 failed 不阻断（纯计算不落盘）', () => {
+  reset();
+  const cfg = loadComfyConfig();
+  const r = addLibraryItems(cfg, 'image', [
+    { name: '好工作流', workflow: WF_A },
+    { name: '坏JSON', workflow: '{oops' },
+    { name: '界面格式', workflow: { nodes: [], links: [] } },
+    { name: '空对象', workflow: {} },
+  ]);
+  assert.equal(r.added.length, 1, '合法项正常入库');
+  assert.equal(r.failed.length, 3, '非法项各自计失败，不阻断');
+  assert.equal(r.added[0].name, '好工作流');
+  assert.equal(r.added[0].nodes, 1);
+  assert.ok(r.added[0].id);
+  assert.match(r.failed[0].error, /不是合法 JSON/);
+  assert.match(r.failed[1].error, /导出\(API\)/, '界面格式给出导出(API)提示');
+  assert.match(r.failed[2].error, /没有任何节点/);
+  assert.equal(r.lib.length, 1);
+  assert.equal(r.lib[0].lastTest, null);
+  assert.ok(r.lib[0].createdAt);
+  assert.equal(fs.existsSync(FILE), false, '纯计算不写盘');
+});
+
+test('addLibraryItems：同名同内容跳过报「已存在」、同名不同内容自动 (2) 后缀', () => {
+  reset();
+  writeCfg({ imageWorkflowLib: [{ id: 'a', name: '海报', workflow: WF_A, createdAt: 1, lastTest: null }] });
+  const cfg = loadComfyConfig();
+
+  const dup = addLibraryItems(cfg, 'image', [{ name: '海报', workflow: WF_A }]);
+  assert.equal(dup.added.length, 0);
+  assert.match(dup.failed[0].error, /已存在/);
+  assert.equal(dup.lib.length, 1);
+
+  const second = addLibraryItems(cfg, 'image', [{ name: '海报', workflow: WF_B }]);
+  assert.equal(second.added.length, 1);
+  assert.equal(second.added[0].name, '海报 (2)');
+  assert.equal(second.lib.length, 2);
+
+  // 带后缀的名字再导入同内容 → 同样按「已存在」跳过
+  const dup2 = addLibraryItems({ ...cfg, imageWorkflowLib: second.lib }, 'image', [{ name: '海报 (2)', workflow: WF_B }]);
+  assert.equal(dup2.added.length, 0);
+  assert.match(dup2.failed[0].error, /已存在/);
+
+  // 再来一个同名「海报」但内容不同 → 自动顺延到 (3)
+  const third = addLibraryItems({ ...cfg, imageWorkflowLib: second.lib }, 'image', [{ name: '海报', workflow: { '9': { class_type: 'PreviewImage', inputs: {} } } }]);
+  assert.equal(third.added[0].name, '海报 (3)');
+});

@@ -2,7 +2,8 @@
 // 项目 settings 只保留「产物模式」这类与创作相关的开关，连接与 workflow 模板全局复用。
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './store.mjs';
+import { DATA_DIR, uid } from './store.mjs';
+import { parseWorkflow } from './comfyui.mjs';
 
 const FILE = path.join(DATA_DIR, 'comfyui.json');
 
@@ -156,4 +157,42 @@ export function comfySummary(cfg = loadComfyConfig()) {
     imageWorkflowLib: libOverview(cfg.imageWorkflowLib),
     videoWorkflowLib: libOverview(cfg.videoWorkflowLib),
   };
+}
+
+/**
+ * 批量导入工作流到库（纯计算，不落盘）。
+ * 逐项 parseWorkflow 校验：非法项进 failed 不阻断合法项；
+ * 同名同内容 → 跳过报「已存在」；同名不同内容 → 名称自动加 (2) 后缀。
+ * @returns {{added: Array<{id,name,nodes}>, failed: Array<{name,error}>, lib: Array}}
+ */
+export function addLibraryItems(cfg, kind, items) {
+  const libKey = (kind === 'video' ? 'video' : 'image') + 'WorkflowLib';
+  const lib = (Array.isArray(cfg[libKey]) ? cfg[libKey] : []).slice();
+  const added = [];
+  const failed = [];
+  for (const item of items || []) {
+    const name = String(item?.name || '').trim() || '未命名工作流';
+    let wf;
+    try {
+      wf = parseWorkflow(item?.workflow, name);
+    } catch (err) {
+      failed.push({ name, error: err.message });
+      continue;
+    }
+    const content = JSON.stringify(wf);
+    if (lib.some((e) => e.name === name && JSON.stringify(e.workflow) === content)) {
+      failed.push({ name, error: '已存在（同名同内容），已跳过' });
+      continue;
+    }
+    let finalName = name;
+    if (lib.some((e) => e.name === name)) {
+      let n = 2;
+      while (lib.some((e) => e.name === `${name} (${n})`)) n += 1;
+      finalName = `${name} (${n})`;
+    }
+    const entry = { id: uid('wf'), name: finalName, workflow: wf, createdAt: Date.now(), lastTest: null };
+    lib.push(entry);
+    added.push({ id: entry.id, name: finalName, nodes: Object.keys(wf).length });
+  }
+  return { added, failed, lib };
 }
