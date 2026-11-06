@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { listProjects, loadProject, saveProject, deleteProject, uid, readAsset,
-  writeSnapshot, listSnapshots, readSnapshot, EXAMPLES_DIR } from '../core/store.mjs';
+  writeAssetBinary, writeSnapshot, listSnapshots, readSnapshot, EXAMPLES_DIR } from '../core/store.mjs';
 import { emit, subscribe } from '../core/events.mjs';
 import { autoLayout, validate } from '../core/graph.mjs';
 import { runProject, stopProject, isRunning } from '../core/orchestrator.mjs';
@@ -13,7 +13,7 @@ import { STEPS, STEP_BY_ID, ensureManagement, stepProgress, startStep, finishSte
   resetStep, resetAllSteps, applyManageAction, projectStats, projectIndex } from '../core/project-steps.mjs';
 import { listAgents } from '../agents/index.mjs';
 import { chatWithCanvas } from '../agents/canvas-agent.mjs';
-import { loadComfyConfig, saveComfyConfig, comfySummary } from '../core/comfy-config.mjs';
+import { loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems } from '../core/comfy-config.mjs';
 import { parseWorkflow, analyzeWorkflow, testConnection, runWorkflow } from '../core/comfyui.mjs';
 import { exportDirectorPack } from '../core/director-pack.mjs';
 import '../agents/index.mjs';
@@ -64,7 +64,28 @@ const MATCH = {
   projectAction: /^\/api\/projects\/([^/]+)\/(template|run|stop|chat|arrange|export)$/,
   manageAction: /^\/api\/projects\/([^/]+)\/(manage|duplicate|snapshots|restore|step)$/,
   deliverable: /^\/api\/projects\/([^/]+)\/(director-pack|film)$/,
+  cover: /^\/api\/projects\/([^/]+)\/cover$/,
+  coverGenerate: /^\/api\/projects\/([^/]+)\/cover\/generate$/,
+  libItem: /^\/api\/comfyui\/library\/(image|video)\/([^/]+)$/,
 };
+
+/** 封面生成提示词：片名 + 原著/剧本梗概 + 电影海报视觉要求（中文提示词可直接喂 SDXL） */
+function buildCoverPrompt(project, m, custom = '') {
+  const name = String(project.name || m.title || '未命名影片').slice(0, 40);
+  const idea = (project.nodes || []).find((n) => n.type === 'idea');
+  const script = (project.nodes || []).find((n) => n.type === 'script');
+  const gist = [
+    script?.data?.script?.logline || script?.data?.logline || '',
+    (m.episodes || [])[0]?.summary || '',
+    String(idea?.data?.text || '').replace(/\s+/g, ' ').slice(0, 90),
+    String(m.source?.text || '').replace(/\s+/g, ' ').slice(0, 90),
+  ].filter(Boolean).join('，').slice(0, 180);
+  const base = `电影海报风格的项目封面插画，片名《${name}》，${gist || '一部富有戏剧张力的故事'}，` +
+    `cinematic movie poster, dramatic cinematic lighting, rich atmosphere, centered composition, ` +
+    `highly detailed, film grain, no text, no watermark, no lettering`;
+  const extra = String(custom || '').trim().slice(0, 400);
+  return extra ? `电影海报风格的项目封面插画，片名《${name}》，${extra}，cinematic movie poster, dramatic lighting, no text, no watermark` : base;
+}
 
 /** 项目管理状态广播：步骤面板、侧栏进度、顶栏状态胶囊都靠这个事件对齐 */
 function broadcastMeta(project) {
@@ -218,6 +239,52 @@ export async function handleApi(req, res, url) {
     }), true;
   }
 
+  // ---------- 工作流库：批量导入 / 切换选中 / 重命名 / 删除 ----------
+  if (pathname === '/api/comfyui/library' && method === 'POST') {
+    const body = await readBody(req);
+    const kind = body.kind === 'video' ? 'video' : 'image';
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (!items.length) return json(res, { error: '没有可导入的工作流' }, 400), true;
+    const { added, failed, lib } = addLibraryItems(loadComfyConfig(), kind, items);
+    if (added.length) saveComfyConfig({ [`${kind}WorkflowLib`]: lib });
+    const config = loadComfyConfig();
+    return json(res, { added, failed, config, summary: comfySummary(config) }), true;
+  }
+  if (pathname === '/api/comfyui/library' && method === 'PUT') {
+    const body = await readBody(req);
+    const kind = body.kind === 'video' ? 'video' : 'image';
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const cfg0 = loadComfyConfig();
+    if (name) {
+      // 重命名：只改名称不改选中；改的是选中项时把 activeId 放进补丁触发镜像名同步
+      const libKey = `${kind}WorkflowLib`;
+      const lib = cfg0[libKey] || [];
+      const target = lib.find((e) => e.id === body.id);
+      if (!target) return json(res, { error: '库项不存在' }, 404), true;
+      const patch = { [libKey]: lib.map((e) => (e.id === target.id ? { ...e, name } : e)) };
+      if (cfg0[`${kind}ActiveId`] === target.id) patch[`${kind}ActiveId`] = target.id;
+      const config = saveComfyConfig(patch);
+      return json(res, { ok: true, config, summary: comfySummary(config) }), true;
+    }
+    // 切换选中（id 不在库中由 saveComfyConfig 视为清空）
+    const config = saveComfyConfig({ [`${kind}ActiveId`]: typeof body.id === 'string' ? body.id : null });
+    return json(res, { ok: true, config, summary: comfySummary(config) }), true;
+  }
+  const libHit = pathname.match(MATCH.libItem);
+  if (libHit && method === 'DELETE') {
+    const kind = libHit[1];
+    const id = decodeURIComponent(libHit[2]);
+    const cfg = loadComfyConfig();
+    const libKey = `${kind}WorkflowLib`;
+    const before = Array.isArray(cfg[libKey]) ? cfg[libKey] : [];
+    const lib = before.filter((e) => e.id !== id);
+    if (lib.length === before.length) return json(res, { error: '库项不存在' }, 404), true;
+    const patch = { [libKey]: lib };
+    if (cfg[`${kind}ActiveId`] === id) patch[`${kind}ActiveId`] = null;   // 删选中项 → activeId/镜像一起清空
+    const config = saveComfyConfig(patch);
+    return json(res, { ok: true, config, summary: comfySummary(config) }), true;
+  }
+
   if (pathname === '/api/bootstrap' && method === 'GET') {
     let projects = listProjects();
     if (!projects.length) {
@@ -357,6 +424,76 @@ export async function handleApi(req, res, url) {
       const body = await readBody(req);
       const result = await executeSteps(loadProject(id), body);
       return json(res, result, result.ok ? 200 : 400), true;
+    }
+  }
+
+  // ---------- 项目封面：上传 / ComfyUI 生成 / 恢复名称封面 ----------
+  const coverMatch = pathname.match(MATCH.cover);
+  const coverGenMatch = pathname.match(MATCH.coverGenerate);
+  if (coverMatch || coverGenMatch) {
+    const id = (coverMatch || coverGenMatch)[1];
+    const project = loadProject(id);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    const m = ensureManagement(project);
+    const commitCover = (value) => {
+      const out = applyManageAction(project, 'cover', value);
+      if (!out.ok) return out;
+      saveProject(project);
+      broadcastMeta(project);
+      emit('state', { projectId: id, project, reason: 'cover' });
+      return out;
+    };
+
+    // ComfyUI 出图生成封面（约 1–2 分钟，需已配置 imageWorkflow）
+    if (coverGenMatch && method === 'POST') {
+      const config = loadComfyConfig();
+      if (!config.enabled || !config.imageWorkflow) {
+        return json(res, { error: '尚未配置 ComfyUI 出图工作流，请先在设置中导入「导出(API)」工作流' }, 400), true;
+      }
+      const body = await readBody(req);
+      const wf = parseWorkflow(config.imageWorkflow, '出图工作流');
+      const prompt = buildCoverPrompt(project, m, body.prompt);
+      try {
+        const result = await runWorkflow(config, wf, {
+          prompt, negative: config.negativePrompt,
+          filenamePrefix: `cover_${id}`, cfg: config,
+        }, { log: (level, msg) => emit('log', { projectId: id, level, message: `封面生成 · ${msg}` }) });
+        const url = result.primary?.url;
+        if (!url) return json(res, { error: 'ComfyUI 未返回封面图片' }, 502), true;
+        const out = commitCover({ url, source: 'comfyui', prompt });
+        if (!out.ok) return json(res, out, 400), true;
+        return json(res, { ok: true, cover: m.cover, url, prompt,
+          promptId: result.promptId, durationMs: result.durationMs, message: out.message }), true;
+      } catch (err) {
+        return json(res, { error: `封面生成失败：${err.message}` }, 502), true;
+      }
+    }
+
+    // 本地上传（dataURL base64），存入 /assets/ 供静态服务直接访问
+    if (coverMatch && method === 'POST') {
+      const body = await readBody(req);
+      const match = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(String(body.dataUrl || '').trim());
+      if (!match) return json(res, { error: '仅支持 PNG / JPEG / WebP / GIF 图片' }, 400), true;
+      const buf = Buffer.from(match[2], 'base64');
+      if (!buf.length || buf.length > 6 * 1024 * 1024) return json(res, { error: '图片大小需在 1B–6MB 之间' }, 400), true;
+      const head = buf.subarray(0, 8).toString('hex');
+      const valid = match[1] === 'png' ? head.startsWith('89504e47')
+        : match[1] === 'jpeg' ? head.startsWith('ffd8ff')
+        : match[1] === 'webp' ? head.startsWith('52494646')
+        : /^47494638/.test(head);
+      if (!valid) return json(res, { error: '图片内容与声明格式不符' }, 400), true;
+      const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+      const url = writeAssetBinary(`cover_${id}_${Date.now().toString(36)}.${ext}`, buf);
+      const out = commitCover({ url, source: 'upload' });
+      if (!out.ok) return json(res, out, 400), true;
+      return json(res, { ok: true, cover: m.cover, url, message: out.message }), true;
+    }
+
+    // 清除封面 → 回退「项目名称封面」
+    if (coverMatch && method === 'DELETE') {
+      const out = commitCover({ source: 'name' });
+      if (!out.ok) return json(res, out, 400), true;
+      return json(res, { ok: true, cover: m.cover, message: out.message }), true;
     }
   }
 
