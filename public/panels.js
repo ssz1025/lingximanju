@@ -55,7 +55,6 @@ export async function openSettings(project, onSave) {
     cfg = (await r.json()).config || {};
   } catch { /* 后端不可达时仍允许编辑模型设置 */ }
 
-  const wfText = (wf) => (wf ? JSON.stringify(wf, null, 2) : '');
   const num = (v, d) => `<input id="cf-${v}" type="number" value="${esc(cfg[v] ?? d)}">`;
   const body = `
     <div class="settings-tabs">
@@ -93,20 +92,15 @@ export async function openSettings(project, onSave) {
       </div>
 
       <div class="cf-section">
-        <h4>API 格式工作流</h4>
+        <h4>出图工作流库（关键帧 / 角色 / 转场 / 海报）</h4>
         <div class="cf-note">${esc(WF_HELP).replace(/\n/g, '<br>')}</div>
-        <div class="field" style="margin-top:9px"><label>出图工作流（关键帧 / 角色 / 转场 / 海报）</label>
-          <div class="cf-row"><input id="cf-img-name" value="${esc(cfg.imageWorkflowName || '')}" placeholder="未导入（使用 Mock 自绘）" readonly>
-            <button class="btn" id="cf-file-image" type="button">⇧ 导入 JSON</button>
-            <button class="btn" id="cf-analyze-image" type="button">⌗ 分析</button></div>
-          <textarea id="cf-wf-image" rows="5" class="cf-code" placeholder='{"3":{"class_type":"KSampler","inputs":{...}}}'>${esc(wfText(cfg.imageWorkflow))}</textarea>
-        </div>
-        <div class="field"><label>视频工作流（图生视频 / 首尾帧 / 导演台）</label>
-          <div class="cf-row"><input id="cf-video-name" value="${esc(cfg.videoWorkflowName || '')}" placeholder="未导入（使用帧序列预览）" readonly>
-            <button class="btn" id="cf-file-video" type="button">⇧ 导入 JSON</button>
-            <button class="btn" id="cf-analyze-video" type="button">⌗ 分析</button></div>
-          <textarea id="cf-wf-video" rows="5" class="cf-code" placeholder='{"1":{"class_type":"VHS_VideoCombine","inputs":{...}}}'>${esc(wfText(cfg.videoWorkflow))}</textarea>
-        </div>
+        <div class="wf-lib" id="cf-lib-image"></div>
+      </div>
+
+      <div class="cf-section">
+        <h4>视频工作流库（图生视频 / 首尾帧 / 导演台）</h4>
+        <div class="cf-note">选中项即当前生效的工作流，切换即时生效；无选中时该环节使用 Mock 自绘。测试 = 提交本地 ComfyUI 真实串行试跑一次。</div>
+        <div class="wf-lib" id="cf-lib-video"></div>
       </div>
 
       <div class="cf-section">
@@ -167,24 +161,11 @@ export async function openSettings(project, onSave) {
       { label: '保存设置', primary: true, onClick: async (root) => {
         const q = (id) => root.querySelector(`#${id}`);
         const box = q('cf-result');
-        const parseWF = (text, label) => {
-          const t = String(text || '').trim();
-          if (!t) return null;
-          let obj;
-          try { obj = JSON.parse(t); } catch { throw new Error(`${label} 不是合法 JSON`); }
-          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error(`${label} 必须是 JSON 对象`);
-          if (Array.isArray(obj.nodes) || Array.isArray(obj.links)) throw new Error(`${label} 是界面保存格式，请在 ComfyUI 选择「导出(API)」`);
-          return obj;
-        };
         try {
           const patch = {
             enabled: q('cf-enabled').checked,
             strict: q('cf-strict').checked,
             baseUrl: q('cf-base').value.trim(),
-            imageWorkflow: parseWF(q('cf-wf-image').value, '出图工作流'),
-            videoWorkflow: parseWF(q('cf-wf-video').value, '视频工作流'),
-            imageWorkflowName: q('cf-img-name').value,
-            videoWorkflowName: q('cf-video-name').value,
             width: Number(q('cf-width').value) || 864,
             height: Number(q('cf-height').value) || 480,
             fps: Number(q('cf-fps').value) || 24,
@@ -229,46 +210,153 @@ export async function openSettings(project, onSave) {
     });
   });
 
-  const bindFile = (btnId, taId, nameId, label) => {
-    root.querySelector(`#${btnId}`).addEventListener('click', () => {
-      const input = document.createElement('input');
-      input.type = 'file'; input.accept = '.json,application/json';
-      input.onchange = async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        const text = await file.text();
-        try {
-          const obj = JSON.parse(text);
-          if (Array.isArray(obj?.nodes) || Array.isArray(obj?.links)) throw new Error('请使用「导出(API)」格式');
-          root.querySelector(`#${taId}`).value = text;
-          root.querySelector(`#${nameId}`).value = file.name;
-          toast(`${label} 已载入：${Object.keys(obj).length} 个节点`, 'ok');
-        } catch (e) { toast(`导入失败：${e.message}`, 'err'); }
-      };
-      input.click();
+  /* ---------- 工作流库：选中生效 / 展开 / 重命名 / 删除 ---------- */
+  const libKey = (kind) => `${kind}WorkflowLib`;
+  const activeKey = (kind) => `${kind}ActiveId`;
+  const testing = new Set();   // 正在试跑的库项 id → 行内转圈（Task 7 接线）
+
+  const postJSON = async (url, body) => {
+    const r = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  };
+
+  const libItemHTML = (kind, e) => {
+    const t = e.lastTest;
+    const active = e.id === cfg[activeKey(kind)];
+    const badge = testing.has(e.id)
+      ? `<span class="wf-badge run"><span class="wf-spin"></span>试跑中</span>`
+      : !t ? `<span class="wf-badge none" title="尚未真实试跑">未测</span>`
+      : t.ok ? `<span class="wf-badge ok" title="上次试跑：${esc(new Date(t.at || Date.now()).toLocaleString())}">✓ ${(Number(t.durationMs) / 1000).toFixed(1)}s</span>`
+      : `<span class="wf-badge err" title="${esc(t.error || '失败')}">✕ ${esc(String(t.error || '失败').slice(0, 18))}</span>`;
+    return `<div class="wf-item ${active ? 'active' : ''}" data-id="${esc(e.id)}">
+      <input type="radio" name="wf-pick-${kind}" ${active ? 'checked' : ''} data-act="pick" title="选中即当前生效">
+      <span class="wf-name" data-act="expand" title="点击查看 / 复制 JSON · 双击重命名">${esc(e.name)}</span>
+      <span class="wf-nodes">${Object.keys(e.workflow || {}).length} 节点</span>
+      ${badge}
+      <button class="wf-del" type="button" data-act="del" title="删除">✕</button>
+      <textarea class="cf-code wf-json" rows="7" readonly hidden>${esc(JSON.stringify(e.workflow, null, 2))}</textarea>
+    </div>`;
+  };
+
+  const renderLib = (kind) => {
+    const box = root.querySelector(`#cf-lib-${kind}`);
+    if (!box) return;
+    const lib = cfg[libKey(kind)] || [];
+    box.innerHTML = lib.length
+      ? lib.map((e) => libItemHTML(kind, e)).join('')
+      : `<div class="wf-empty">暂无工作流 · 点「⇧ 导入 JSON」选择本地 ComfyUI「导出(API)」文件（可多选）</div>`;
+  };
+
+  const applyConfig = (d) => {
+    if (d?.config) { cfg = d.config; renderLib('image'); renderLib('video'); }
+  };
+
+  const deleteItem = async (kind, entry, isActive) => {
+    try {
+      const r = await fetch(`/api/comfyui/library/${kind}/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      applyConfig(d);
+      toast(isActive ? `已删除「${entry.name}」· 该环节已回退 Mock 自绘` : `已删除「${entry.name}」`, 'ok');
+    } catch (e) { toast(`删除失败：${e.message}`, 'err'); }
+  };
+
+  const requestDelete = (kind, entry) => {
+    const isActive = cfg[activeKey(kind)] === entry.id;
+    if (!isActive) { deleteItem(kind, entry, false); return; }
+    showModal({
+      title: '删除正在使用的工作流？',
+      sub: `「${esc(entry.name)}」是当前生效的工作流，删除后该环节回退到 Mock 自绘。`,
+      actions: [
+        { label: '取消' },
+        { label: '删除', primary: true, onClick: async () => { await deleteItem(kind, entry, true); } },
+      ],
     });
   };
-  bindFile('cf-file-image', 'cf-wf-image', 'cf-img-name', '出图工作流');
-  bindFile('cf-file-video', 'cf-wf-video', 'cf-video-name', '视频工作流');
 
-  const analyze = async (taId, kind) => {
-    const box = root.querySelector('#cf-result');
-    box.hidden = false;
-    box.textContent = '正在识别工作流节点…';
+  const pickActive = async (kind, entry) => {
     try {
-      const r = await fetch('/api/comfyui/analyze', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workflow: root.querySelector(`#${taId}`).value }),
+      const r = await fetch('/api/comfyui/library', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, id: entry.id }),
       });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      const rows = (d.detected || []).slice(0, 14).map((x) =>
-        `<div><code>${esc(x.node)}</code> · ${esc(x.classType)} · <b>${esc(x.input)}</b> → ${esc(x.role)}</div>`).join('');
-      box.innerHTML = `<b class="ok">✓ ${d.nodes} 个节点</b>，自动识别到 ${d.detected?.length || 0} 处可注入参数：<div class="cf-code" style="margin-top:6px">${rows || '（无，可用显式占位符）'}</div>`;
-    } catch (e) { box.innerHTML = `<b class="err">✕</b> ${esc(e.message)}`; }
+      applyConfig(d);
+      toast(`生效工作流已切换为「${entry.name}」`, 'ok');
+    } catch (e) { toast(`切换失败：${e.message}`, 'err'); }
   };
-  root.querySelector('#cf-analyze-image').addEventListener('click', () => analyze('cf-wf-image', 'image'));
-  root.querySelector('#cf-analyze-video').addEventListener('click', () => analyze('cf-wf-video', 'video'));
+
+  const startRename = (kind, item, entry) => {
+    const span = item.querySelector('.wf-name');
+    if (!span) return;
+    const input = document.createElement('input');
+    input.className = 'wf-rename';
+    input.value = entry.name;
+    span.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return;
+      done = true;
+      const next = input.value.trim();
+      if (commit && next && next !== entry.name) {
+        try {
+          const r = await fetch('/api/comfyui/library', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind, id: entry.id, name: next }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+          applyConfig(d);
+          toast(`已重命名为「${next}」`, 'ok');
+          return;
+        } catch (e) {
+          toast(`重命名失败：${e.message}`, 'err');
+        }
+      }
+      renderLib(kind);
+    };
+    input.addEventListener('keydown', (ke) => {
+      if (ke.key === 'Enter') finish(true);
+      if (ke.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+  };
+
+  const setupLib = (kind) => {
+    const box = root.querySelector(`#cf-lib-${kind}`);
+    if (!box) return;
+    box.addEventListener('click', (ev) => {
+      const item = ev.target.closest('.wf-item');
+      if (!item) return;
+      const entry = (cfg[libKey(kind)] || []).find((e) => e.id === item.dataset.id);
+      if (!entry) return;
+      const act = ev.target.dataset.act;
+      if (act === 'expand') {
+        const ta = item.querySelector('.wf-json');
+        if (ta) ta.hidden = !ta.hidden;
+        return;
+      }
+      if (act === 'del') { requestDelete(kind, entry); return; }
+      if (ev.target.matches('input[data-act="pick"]') && cfg[activeKey(kind)] !== entry.id) {
+        pickActive(kind, entry);
+      }
+    });
+    box.addEventListener('dblclick', (ev) => {
+      const item = ev.target.closest('.wf-item');
+      if (!item || !ev.target.classList.contains('wf-name')) return;
+      const entry = (cfg[libKey(kind)] || []).find((e) => e.id === item.dataset.id);
+      if (entry) startRename(kind, item, entry);
+    });
+  };
+
+  for (const kind of ['image', 'video']) { setupLib(kind); renderLib(kind); }
 }
 
 /* ---------- 新建项目 ---------- */
