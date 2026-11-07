@@ -121,6 +121,26 @@ export function loadComfyConfig() {
   return normalize({});
 }
 
+/**
+ * 图片规格智能默认（agent 决定，用户无需填写）：
+ * 宽高由画幅自动映射（16:9 → 864×480，9:16 → 480×864），步数/CFG 用内置最优值。
+ * 视频的 fps / frames 仍由用户在设置里配置。项目感知的组装点必须在本函数之后展开，
+ * 保证用户此前手填或旧配置遗留的 width/height/steps/cfg 不再生效。
+ */
+export function imageSpecFor(aspect) {
+  const portrait = String(aspect || '16:9') === '9:16';
+  return { width: portrait ? 480 : 864, height: portrait ? 864 : 480, steps: 25, cfg: 1.0 };
+}
+
+/** 组装项目生效的 ComfyUI 配置：全局 + 项目覆盖 + 画幅图片规格（规格永远自动决定） */
+export function resolveComfyConfig(project, cfg) {
+  return {
+    ...(cfg || loadComfyConfig()),
+    ...(project?.settings?.comfy || {}),
+    ...imageSpecFor(project?.settings?.aspect),
+  };
+}
+
 export function saveComfyConfig(patch = {}) {
   const merged = { ...loadComfyConfig(), ...patch };
   // 切换选中：从库回填「当前生效」镜像；id 不在库中 → 清空（回退 Mock）

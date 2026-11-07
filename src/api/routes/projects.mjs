@@ -113,7 +113,7 @@ export async function handleProjects(req, res, url) {
         const target = project.nodes.find((n) => n.id === body.nodeId);
         if (!target) return json(res, { error: '节点不存在' }, 404), true;
       }
-      runProject(id, { project, nodeId: body.nodeId }).catch((err) =>
+      runProject(id, { project, nodeId: body.nodeId, modelId: body.modelId }).catch((err) =>
         emit('log', { projectId: id, level: 'error', message: `启动失败：${err.message}` }));
       return json(res, { started: true, projectId: id, nodeId: body.nodeId || null }), true;
     }
@@ -132,7 +132,7 @@ export async function handleProjects(req, res, url) {
 
     if (action === 'chat' && method === 'POST') {
       const body = await readBody(req);
-      const result = await chatWithCanvas(project, body.message || '');
+      const result = await chatWithCanvas(project, body.message || '', body.modelId);
       for (const seg of result.segments) {
         emit('chat', { projectId: id, role: 'assistant', content: seg });
         await new Promise((r) => setTimeout(r, 90));

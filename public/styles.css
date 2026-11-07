@@ -125,6 +125,15 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border); background: var(--panel-2); color: var(--text-2); border-radius: 8px; font-size: 14px; }
 .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 .tb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
+/* 项目会话：顶栏项目封面 + ✕ 关闭项目 */
+.tb-cover { width: 26px; height: 26px; flex: 0 0 26px; border-radius: 7px; overflow: hidden; background: var(--panel-3); display: grid; place-items: center; }
+.tb-cover img { width: 100%; height: 100%; object-fit: cover; }
+.tb-cover i { width: 100%; height: 100%; display: grid; place-items: center; font-style: normal; font-weight: 800; font-size: 12px; color: #1b1109; background: linear-gradient(135deg, #ffb27a, var(--accent)); }
+.close-project { width: 26px; height: 26px; font-size: 12px; border-radius: 7px; }
+.close-project:hover { border-color: var(--red); color: var(--red); }
+/* 关闭项目后顶栏左侧的中性标识（不显示任何项目信息） */
+.home-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--text-2); white-space: nowrap; }
+.home-title span { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; font-size: 14px; color: #1b1109; background: linear-gradient(135deg, #ffb27a, var(--accent)); }
 .run-status { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); padding: 5px 12px; border-radius: 99px; }
 .rs-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .run-status.running .rs-dot { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.3s infinite; }
@@ -307,6 +316,19 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .cf-check { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); cursor: pointer; }
 .cf-check input { accent-color: var(--accent); }
 .cf-note { font-size: 10.5px; color: var(--muted); line-height: 1.65; margin: 6px 0; }
+/* 已配置模型清单：一行一模型 + 独立测试按钮与结果 */
+.llm-model-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.llm-model-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel-3); }
+.llm-model-row .llm-model-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.llm-model-row .llm-model-info b { font-size: 12px; color: var(--text); }
+.llm-model-row .llm-model-info small { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.llm-model-result { flex: 0 1 auto; max-width: 46%; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.llm-model-row .btn { flex: none; }
+/* 各 AI 入口旁的模型下拉：紧凑、与按钮基线对齐 */
+.model-picker { max-width: 170px; font-size: 11px; padding: 4px 6px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--panel-2); color: var(--text-2); outline: none; }
+.model-picker:focus { border-color: var(--accent); }
+.aichat-inputbar .model-picker { flex: none; margin-right: 6px; align-self: center; }
+.chat-compose .model-picker { margin-bottom: 6px; }
 .cf-note code { background: var(--panel-3); padding: 1px 4px; border-radius: 4px; }
 .field textarea.cf-code, textarea.cf-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.55; width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 8px 9px; color: var(--text-2); outline: none; resize: vertical; margin-top: 6px; }
 .field textarea.cf-code:focus { border-color: var(--accent); }
@@ -1158,6 +1180,10 @@ body.view-home #project-title-wrap, body.view-episode #project-title-wrap { disp
 body.view-home #step-chip, body.view-episode #step-chip { display: none !important; }
 body.view-home #sidebar, body.view-home #btn-sidebar-expand { display: none !important; }
 body.view-home #inspector, body.view-episode #inspector { display: none !important; }
+/* 项目列表页：运行态与节点/连线/Provider/缩放都是「上一个项目」的信息，换成项目总数 */
+body.view-home #run-status { display: none !important; }
+body.view-home .status-right > span:not(#stat-home) { display: none !important; }
+#stat-home { color: var(--text-2); font-weight: 600; }
 #home-view, #episode-view { flex: 1; min-width: 0; overflow-y: auto; background: var(--bg); }
 .home-crumb, .view-crumb { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; font-weight: 700; white-space: nowrap; }
 .view-crumb small { font-size: 11px; font-weight: 400; color: var(--muted); }
@@ -1453,3 +1479,76 @@ button.pmm-ep:hover { border-color: var(--accent); }
   .ev-cells { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .ecv-tip { display: none; }
 }
+
+/* ==========================================================================
+ * 项目侧栏：进入项目后左侧只讲当前项目（导航 / 资源 / 设置）
+ * 项目列表、新建、导入收敛到首页；画布工具仅在画布视图显示
+ * ========================================================================*/
+body.view-workshop #side-canvas-tools,
+body.view-episode #side-canvas-tools { display: none; }
+#project-sidebar { padding-bottom: 6px; }
+
+.ps-head { display: flex; align-items: center; gap: 10px; padding: 14px 12px 10px; }
+.ps-cover { width: 38px; height: 38px; flex: 0 0 38px; border-radius: 10px; overflow: hidden; background: var(--panel-3); box-shadow: 0 4px 12px rgba(0, 0, 0, .18); }
+.ps-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ps-cover i { display: grid; place-items: center; width: 100%; height: 100%; font-style: normal; font-weight: 800; font-size: 17px; color: #1b1109; background: linear-gradient(135deg, #ffb27a, var(--accent)); }
+.ps-head-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ps-head-main strong { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ps-head-main small { font-size: 10.5px; color: var(--muted); }
+.ps-home-btn { width: 28px; height: 28px; flex: 0 0 28px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text-2); font-size: 14px; }
+.ps-home-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ps-progress { height: 4px; margin: 0 12px; border-radius: 99px; background: var(--panel-3); overflow: hidden; }
+.ps-progress i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--accent), #ffc178); transition: width .3s ease; }
+.ps-progress-label { display: flex; align-items: center; justify-content: space-between; padding: 6px 16px 0; font-size: 10.5px; color: var(--muted); }
+.ps-progress-label b { color: var(--accent); }
+.ps-section { border-top: 1px solid var(--border-soft); margin-top: 8px; padding-top: 11px; }
+
+.ps-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.ps-nav button { padding: 7px 2px; font-size: 11px; font-weight: 600; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel-2); color: var(--text-2); }
+.ps-nav button:hover { border-color: var(--accent); color: var(--accent); }
+.ps-nav button.on { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); color: var(--accent); }
+.ps-eps { margin-top: 11px; }
+.ps-eps-head { display: flex; align-items: center; justify-content: space-between; padding: 0 3px 6px; font-size: 10.5px; color: var(--muted); }
+.ps-eps-head button { border: 0; background: none; color: var(--accent); font-size: 10px; padding: 0; }
+.ps-eps-head button:hover { text-decoration: underline; }
+.ps-eps-list { display: grid; gap: 3px; }
+.ps-eps-list button { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 7px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--text-2); font-size: 11px; text-align: left; }
+.ps-eps-list button:hover, .ps-eps-list button.on { background: var(--panel-2); border-color: var(--border); color: var(--accent); }
+.ps-eps-list i { width: 17px; height: 17px; flex: 0 0 17px; display: grid; place-items: center; border-radius: 5px; background: var(--panel-3); font-size: 9.5px; font-style: normal; color: var(--muted); }
+.ps-eps-list span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ps-filters { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 3px 8px; }
+.ps-filters button { border: 1px solid var(--border-soft); background: var(--panel-2); color: var(--muted); border-radius: 99px; padding: 3px 8px; font-size: 10px; }
+.ps-filters button:hover { color: var(--accent); border-color: var(--accent); }
+.ps-filters button.on { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); font-weight: 700; }
+.ps-assets { display: flex; flex-direction: column; gap: 3px; }
+.ps-asset { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 6px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; }
+.ps-asset:hover { background: var(--panel-2); border-color: var(--border); }
+.ps-asset-thumb { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; border-radius: 6px; background: var(--panel-3); overflow: hidden; }
+.ps-asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.ps-asset-thumb i { font-style: normal; font-size: 13px; color: var(--accent-2); }
+.ps-asset-thumb i.t-video { color: var(--red); }
+.ps-asset-thumb i.t-pack { color: var(--amber); }
+.ps-asset-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ps-asset-main strong { font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ps-asset-main small { font-size: 9.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ps-empty { padding: 14px 8px; text-align: center; color: var(--muted); font-size: 11px; line-height: 1.7; border: 1px dashed var(--border); border-radius: 9px; }
+.ps-empty small { font-size: 10px; opacity: .85; }
+.ps-more { width: 100%; padding: 6px; border: 1px dashed var(--border); border-radius: 8px; background: transparent; color: var(--muted); font-size: 10.5px; }
+.ps-more:hover { color: var(--accent); border-color: var(--accent); }
+.ps-asset-acts { display: flex; gap: 6px; padding: 9px 3px 0; }
+.ps-asset-acts .mini-btn { flex: 1; text-align: center; padding: 5px 4px; }
+.ps-asset-acts .mini-btn:last-child { flex: 0 0 60px; }
+
+.ps-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.ps-settings button { display: flex; align-items: center; gap: 6px; padding: 6px 7px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel-2); color: var(--text-2); font-size: 11px; text-align: left; white-space: nowrap; }
+.ps-settings button:hover { border-color: var(--accent); color: var(--accent); }
+.ps-settings button b { width: 14px; text-align: center; font-size: 12px; color: var(--accent); }
+
+.ps-preview { width: min(760px, 92vw); }
+.ps-preview-body { display: grid; place-items: center; min-height: 180px; max-height: 62vh; overflow: auto; margin-top: 6px; padding: 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border-soft); }
+.ps-preview-media { max-width: 100%; max-height: 58vh; border-radius: 8px; }
+.ps-preview-file { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px; color: var(--muted); }
+.ps-preview-file b { font-size: 30px; color: var(--accent); }
+.ps-preview-file span { font-size: 13px; color: var(--text-2); }
+.ps-preview-file small { font-size: 10.5px; }

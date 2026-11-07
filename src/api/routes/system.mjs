@@ -10,7 +10,10 @@ import { loadComfyConfig, comfySummary } from '../../core/comfy-config.mjs';
 import { STEPS } from '../../core/project-steps.mjs';
 import { validateNovelInput, novelPreview, mergeNovelFiles } from '../../core/novel.mjs';
 import { createProviders } from '../../core/providers.mjs';
-import { loadAppSettings, saveAppSettings, appSettingsSummary } from '../../core/app-settings.mjs';
+import { loadAppSettings, saveAppSettings, appSettingsSummary, ensureModelRoster, normalizeModelProfile, modelProfileSummary } from '../../core/app-settings.mjs';
+
+const cut60 = (v) => String(v ?? '').trim().slice(0, 60);
+const cut400 = (v) => String(v ?? '').trim().slice(0, 400);
 
 export async function handleSystem(req, res, url) {
   const { pathname } = url;
@@ -102,15 +105,90 @@ export async function handleSystem(req, res, url) {
     }), true;
   }
 
-  /** 设置面板「测试模型连接」：用请求体临时 settings 发一次微型调用，不落盘 */
+  /** 全局模型库：设置面板唯一模型管理入口。清单永不返回明文 Key。
+   *  GET 清单 / POST 保存档案（新增或按 id 更新）/ DELETE 删除（body {id}）。 */
+  if (pathname === '/api/system/llm-models' && method === 'GET') {
+    const { settings } = ensureModelRoster();
+    return json(res, {
+      models: settings.models.map(modelProfileSummary),
+      activeModelId: settings.activeModelId,
+    }), true;
+  }
+  if (pathname === '/api/system/llm-models' && method === 'POST') {
+    const body = await readBody(req);
+    const { settings } = ensureModelRoster();
+    const list = [...settings.models];
+    const id = cut60(body.id);
+    const idx = id ? list.findIndex((p) => p.id === id) : -1;
+    if (id && idx < 0) return json(res, { error: '模型档案不存在' }, 404), true;
+    // 编辑时 Key 留空 = 沿用旧 Key（浏览器拿不到明文 Key，不会误清空）
+    const prev = idx >= 0 ? list[idx] : {};
+    const profile = normalizeModelProfile({
+      ...prev,
+      name: body.name, provider: body.provider, model: body.model,
+      baseUrl: body.baseUrl, llmTimeoutMs: body.llmTimeoutMs, temperature: body.temperature,
+      apiKey: cut400(body.apiKey) || prev.apiKey || '',
+      id: idx >= 0 ? prev.id : id,
+    });
+    if (!profile) return json(res, { error: '请至少填写模型名或 Base URL' }, 400), true;
+    if (idx >= 0) list[idx] = profile; else list.push(profile);
+    // 库里还没有默认档案时，把新增的模型设为默认：避免「配了模型但运行时仍回落 Mock」
+    const patch = { models: list };
+    if (!settings.activeModelId && idx < 0) patch.activeModelId = profile.id;
+    const saved = saveAppSettings(patch);
+    return json(res, {
+      ok: true, profile: modelProfileSummary(profile),
+      models: saved.models.map(modelProfileSummary), activeModelId: saved.activeModelId,
+    }), true;
+  }
+  if (pathname === '/api/system/llm-models' && method === 'DELETE') {
+    const body = await readBody(req);
+    const { settings } = ensureModelRoster();
+    const id = cut60(body.id);
+    const list = settings.models.filter((p) => p.id !== id);
+    if (list.length === settings.models.length) return json(res, { error: '模型档案不存在' }, 404), true;
+    // 删除默认档案时回落到清单第一个
+    const activeModelId = settings.activeModelId === id ? (list[0]?.id || '') : settings.activeModelId;
+    const saved = saveAppSettings({ models: list, activeModelId });
+    return json(res, {
+      ok: true, models: saved.models.map(modelProfileSummary), activeModelId: saved.activeModelId,
+      message: '模型档案已删除',
+    }), true;
+  }
+  /** 设为默认模型：对话框未显式选择时用它 */
+  if (pathname === '/api/system/llm-models/activate' && method === 'POST') {
+    const body = await readBody(req);
+    const { settings } = ensureModelRoster();
+    const id = cut60(body.id);
+    if (!settings.models.some((p) => p.id === id)) return json(res, { error: '模型档案不存在' }, 404), true;
+    const saved = saveAppSettings({ activeModelId: id });
+    return json(res, { ok: true, activeModelId: saved.activeModelId }), true;
+  }
+
+  /** 测试模型连接：用档案或表单值发一次微型调用，不落盘。
+   *  ① ref:{profileId} —— 服务端按模型库档案的完整配置（含明文 Key）来测；
+   *  ② 表单值（provider/model/baseUrl/apiKey）—— 未重新输入 Key 时沿用已保存的旧全局 Key。 */
   if (pathname === '/api/system/llm-test' && method === 'POST') {
     const body = await readBody(req);
-    // 设置弹窗出于安全不回传明文 Key：测试时若未重新输入，就用已保存的全局 Key 补齐
     const saved = loadAppSettings().llm;
+    let cfg;
+    if (body.ref && body.ref.profileId) {
+      const { settings } = ensureModelRoster();
+      const profile = settings.models.find((p) => p.id === cut60(body.ref.profileId));
+      if (!profile) return json(res, { ok: false, error: '模型档案不存在或已删除' }, 404), true;
+      cfg = profile;
+    } else {
+      // 设置弹窗出于安全不回传明文 Key：测试时若未重新输入，就用已保存的全局 Key 补齐
+      cfg = {
+        provider: body.provider, model: body.model,
+        baseUrl: body.baseUrl, apiKey: body.apiKey || saved.apiKey,
+        llmTimeoutMs: body.llmTimeoutMs, temperature: body.temperature,
+      };
+    }
     const providers = createProviders({
-      provider: body.provider, model: body.model,
-      baseUrl: body.baseUrl, apiKey: body.apiKey || saved.apiKey,
-      llmTimeoutMs: body.llmTimeoutMs, temperature: body.temperature,
+      provider: cfg.provider, model: cfg.model,
+      baseUrl: cfg.baseUrl, apiKey: cfg.apiKey,
+      llmTimeoutMs: body.llmTimeoutMs ?? cfg.llmTimeoutMs, temperature: cfg.temperature,
     });
     const result = await providers.testConnection();
     return json(res, result), true;

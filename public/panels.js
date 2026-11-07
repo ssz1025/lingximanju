@@ -51,22 +51,16 @@ export async function openSettings(project, onSave) {
   // 从「项目列表 / 首次启动引导」进入时可能还没有打开任何项目
   const s = (project && project.settings) || {};
   let cfg = {};
-  let globalLlm = {};
+  let roster = { models: [], activeModelId: '' };   // 全局模型库（所有 AI 入口共用）
+  let editingId = null;   // 正在编辑的档案 id；null = 新增
   try {
     const r = await fetch('/api/comfyui/config');
     cfg = (await r.json()).config || {};
   } catch { /* 后端不可达时仍允许编辑模型设置 */ }
   try {
-    const r = await fetch('/api/settings');
-    globalLlm = ((await r.json()).settings || {}).llm || {};
-  } catch { /* 兼容旧后端：全局配置不可用时仍可编辑项目设置 */ }
-  const g = {
-    provider: globalLlm.provider || s.provider || 'mock',
-    model: globalLlm.model || s.model || '',
-    baseUrl: globalLlm.baseUrl || s.baseUrl || '',
-    apiKey: '',   // 出于安全不回传明文 Key；留空表示「沿用已保存的 Key」
-    hasApiKey: Boolean(globalLlm.hasApiKey),
-  };
+    const r = await fetch('/api/system/llm-models');
+    roster = await r.json();
+  } catch { /* 后端不可达时显示空库 */ }
 
   const num = (v, d) => `<input id="cf-${v}" type="number" value="${esc(cfg[v] ?? d)}">`;
   const body = `
@@ -76,38 +70,41 @@ export async function openSettings(project, onSave) {
     </div>
 
     <div class="settings-pane" id="pane-model">
-      <div class="cf-section global-model">
-        <h4>☁ 全局模型配置 <span class="cf-tag">一次配置 · 所有项目生效</span></h4>
-        <div class="modal-grid">
-          <div class="field"><label>模型模式</label><select id="g-provider">
-            <option value="mock" ${g.provider !== 'openai' ? 'selected' : ''}>Mock · 零 Key 演示</option>
-            <option value="openai" ${g.provider === 'openai' ? 'selected' : ''}>OpenAI 兼容接口</option></select></div>
-          <div class="field"><label>模型名称</label><input id="g-model" value="${esc(g.model)}" placeholder="gpt-4o-mini"></div>
-          <div class="field" style="grid-column:1/-1"><label>Base URL</label><input id="g-base" value="${esc(g.baseUrl)}" placeholder="https://api.example.com/v1"></div>
-          <div class="field" style="grid-column:1/-1"><label>API Key${g.hasApiKey ? '（已保存，留空则不修改）' : '（仅存本地）'}</label><input id="g-key" type="password" value="" placeholder="${g.hasApiKey ? '•••••••• 留空保持原值' : 'sk-...'}"></div>
+      <div class="cf-section">
+        <h4>🧠 全局模型库 <span class="cf-tag">一次配置 · 所有 AI 入口共用</span></h4>
+        <div class="llm-model-list" id="model-lib"></div>
+        <div class="cf-row"><button class="btn sm" id="model-add" type="button">＋ 新增模型</button></div>
+        <div id="model-form" hidden>
+          <div class="modal-grid">
+            <div class="field"><label>档案名称</label><input id="mf-name" placeholder="例如：DeepSeek V3"></div>
+            <div class="field"><label>模型模式</label><select id="mf-provider">
+              <option value="openai">OpenAI 兼容接口</option>
+              <option value="mock">Mock · 零 Key 演示</option></select></div>
+            <div class="field"><label>模型名称</label><input id="mf-model" placeholder="gpt-4o-mini / deepseek-chat…"></div>
+            <div class="field"><label>LLM 超时（秒）</label><input id="mf-timeout" type="number" min="30" max="1800" step="10" value="300"></div>
+            <div class="field" style="grid-column:1/-1"><label>Base URL</label><input id="mf-base" placeholder="https://api.example.com/v1"></div>
+            <div class="field" style="grid-column:1/-1"><label>API Key（仅存本地）</label><input id="mf-key" type="password" placeholder="sk-...（编辑时留空保持原值）"></div>
+            <div class="field"><label>温度</label><input id="mf-temp" type="number" min="0" max="2" step="0.1" value="0.7"></div>
+          </div>
+          <div class="cf-row"><button class="btn primary sm" id="mf-save" type="button">保存档案</button>
+            <button class="btn sm" id="mf-cancel" type="button">取消</button></div>
         </div>
-        <div class="cf-row"><button class="btn sm" id="g-test">测试全局模型连接</button><span id="g-test-result" class="muted"></span></div>
-        <div class="cf-note">全局配置用于剧本、角色提取、AI 小说等所有文本生成。下方「项目级设置」只在当前项目里覆盖它；两者都留空时使用内置 Mock 模板，全流程依旧可用。</div>
+        <div class="cf-note">点行首圆圈设为<b>默认模型</b>；每个对话框（封面 / 角色 / 剧本 / 画布…）旁都有模型下拉，可临时换用库中任一模型。「▶」用档案的完整配置真实调用一次，不落盘；推理模型响应可能需要 1-3 分钟。</div>
       </div>
-      <div class="modal-grid">
-        <div class="field"><label>模型模式</label><select id="set-provider">
-          <option value="mock" ${s.provider !== 'openai' ? 'selected' : ''}>Mock · 零 Key 演示</option>
-          <option value="openai" ${s.provider === 'openai' ? 'selected' : ''}>OpenAI 兼容接口</option></select></div>
-        <div class="field"><label>模型名称</label><input id="set-model" value="${esc(s.model || '')}" placeholder="gpt-4o-mini"></div>
-        <div class="field" style="grid-column:1/-1"><label>Base URL</label><input id="set-base" value="${esc(s.baseUrl || '')}" placeholder="https://api.example.com/v1"></div>
-        <div class="field" style="grid-column:1/-1"><label>API Key（仅存本地）</label><input id="set-key" type="password" value="${esc(s.apiKey || '')}" placeholder="sk-..."></div>
-        <div class="field"><label>LLM 超时（秒）</label><input id="set-timeout" type="number" min="30" max="1800" step="10" value="${Math.round((s.llmTimeoutMs || 300000) / 1000)}"></div>
-        <div class="field"><label>温度</label><input id="set-temp" type="number" min="0" max="2" step="0.1" value="${s.temperature ?? 0.7}"></div>
-        <div class="field" style="grid-column:1/-1"><button class="btn" id="llm-test">测试模型连接</button> <span id="llm-test-result" class="muted"></span></div>
-        <div class="field"><label>best-of-k 候选数</label><input id="set-k" type="number" min="1" max="4" value="${s.k || 2}"></div>
-        <div class="field"><label>最大并发</label><input id="set-conc" type="number" min="1" max="8" value="${s.concurrency || 3}"></div>
-        <div class="field"><label>画面风格</label><select id="set-style">
-          ${['noir', 'cinematic', 'anime', 'watercolor'].map((v) => `<option value="${v}" ${s.style === v ? 'selected' : ''}>${v}</option>`).join('')}
-        </select></div>
-        <div class="field"><label>画幅</label><select id="set-aspect"><option value="16:9" ${s.aspect !== '9:16' ? 'selected' : ''}>16:9 横屏</option><option value="9:16" ${s.aspect === '9:16' ? 'selected' : ''}>9:16 竖屏</option></select></div>
-        <div class="field" style="grid-column:1/-1"><label>图像接口（可选，留空使用本地生成）</label><input id="set-img" value="${esc(s.imageEndpoint || '')}" placeholder="https://.../images/generations"></div>
+      <div class="cf-section">
+        <h4>⚙️ 运行参数 <span class="cf-tag">项目级</span></h4>
+        <div class="modal-grid">
+          <div class="field"><label>best-of-k 候选数</label><input id="set-k" type="number" min="1" max="4" value="${s.k || 2}"></div>
+          <div class="field"><label>最大并发</label><input id="set-conc" type="number" min="1" max="8" value="${s.concurrency || 3}"></div>
+        </div>
+        <div class="cf-note">画面风格、画幅属于<b>项目设定</b>，请在项目工作台的「项目信息」中修改，随项目单独保存。</div>
       </div>
-      <div class="cf-note">LLM 只负责剧本 / 分镜 / 机位规划；画面与视频由下方 ComfyUI 工作流生成。</div>
+
+      <div class="cf-section">
+        <h4>🖼 图像接口 <span class="cf-tag">可选 · 项目级</span></h4>
+        <div class="field"><label>接口地址（留空使用本地生成）</label><input id="set-img" value="${esc(s.imageEndpoint || '')}" placeholder="https://.../images/generations"></div>
+        <div class="cf-note">填写 OpenAI 兼容的 images/generations 地址后，出图会先走本地 ComfyUI，失败时改用该云端接口；留空则回退本地自绘。模型库只负责剧本 / 分镜 / 机位规划等文本生成。</div>
+      </div>
     </div>
 
     <div class="settings-pane" id="pane-comfy" hidden>
@@ -153,14 +150,11 @@ export async function openSettings(project, onSave) {
       <div class="cf-section">
         <h4>生成参数</h4>
         <div class="modal-grid">
-          <div class="field"><label>宽</label>${num('width', 864)}</div>
-          <div class="field"><label>高</label>${num('height', 480)}</div>
           <div class="field"><label>帧率 fps</label>${num('fps', 24)}</div>
           <div class="field"><label>单镜头帧数</label>${num('frames', 124)}</div>
-          <div class="field"><label>采样步数</label>${num('steps', 25)}</div>
-          <div class="field"><label>CFG</label>${num('cfg', 1)}</div>
         </div>
         <div class="field"><label>全局负向提示词</label><input id="cf-negative" value="${esc(cfg.negativePrompt || '')}"></div>
+        <div class="cf-note">图片规格（宽高 / 采样步数 / CFG）由智能体按项目设定的画幅自动决定：16:9 → 864×480，9:16 → 480×864，无需手动填写。</div>
       </div>
 
       <div class="cf-section">
@@ -180,8 +174,9 @@ export async function openSettings(project, onSave) {
         <div class="cf-note">导演包包含 pack.json、shared_params/、asset_groups/NN/group.json、timeline.json，可被 ComfyUI 导演工作台「Import pack」直接读取；extra/ 附带中文分镜表与原始 API 工作流。</div>
       </div>
 
-      <div id="cf-result" class="cf-result" hidden></div>
-    </div>`;
+    </div>
+
+    <div id="cf-result" class="cf-result" hidden></div>`;
 
   const modal = showModal({
     title: '模型、ComfyUI 与最终产物设置',
@@ -213,12 +208,8 @@ export async function openSettings(project, onSave) {
             enabled: q('cf-enabled').checked,
             strict: q('cf-strict').checked,
             baseUrl: q('cf-base').value.trim(),
-            width: Number(q('cf-width').value) || 864,
-            height: Number(q('cf-height').value) || 480,
             fps: Number(q('cf-fps').value) || 24,
             frames: Number(q('cf-frames').value) || 124,
-            steps: Number(q('cf-steps').value) || 25,
-            cfg: Number(q('cf-cfg').value) || 1,
             negativePrompt: q('cf-negative').value,
             outputMode: q('cf-mode').value,
             packTarget: q('cf-target').value,
@@ -229,30 +220,10 @@ export async function openSettings(project, onSave) {
           });
           const d = await r.json();
           if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-          // 全局模型配置：留空 API Key 时沿用已保存的值（服务端不回传明文）
-          const llm = {
-            provider: q('g-provider').value,
-            model: q('g-model').value.trim(),
-            baseUrl: q('g-base').value.trim(),
-            llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
-            temperature: Number(q('set-temp').value) || 0.7,
-          };
-          const key = q('g-key').value.trim();
-          if (key) llm.apiKey = key;
-          const gr = await fetch('/api/settings', {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ llm }),
-          });
-          const gd = await gr.json();
-          if (!gr.ok) throw new Error(gd.error || `全局模型保存失败 HTTP ${gr.status}`);
+          // 模型配置在模型库里增删改即时保存，这里只落项目创作开关
           onSave?.({
             ...(project?.settings || {}),
-            provider: q('set-provider').value, model: q('set-model').value.trim(),
-            baseUrl: q('set-base').value.trim(), apiKey: q('set-key').value.trim(),
-            llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
-            temperature: Number.isFinite(Number(q('set-temp').value)) ? Number(q('set-temp').value) : 0.7,
             k: Number(q('set-k').value) || 2, concurrency: Number(q('set-conc').value) || 3,
-            style: q('set-style').value, aspect: q('set-aspect').value,
             imageEndpoint: q('set-img').value.trim(),
           });
           toast('ComfyUI 与产物配置已保存', 'ok');
@@ -275,68 +246,121 @@ export async function openSettings(project, onSave) {
     });
   });
 
-  /* ---------- 全局模型连接测试：用全局面板当前值发一次微型调用（不落盘） ---------- */
-  root.querySelector('#g-test').addEventListener('click', async (e) => {
-    const q = (id) => root.querySelector(`#${id}`);
-    const out = q('g-test-result');
+  /* ---------- 全局模型库：列表渲染 / 新增 / 编辑 / 设默认 / 删除 / 逐个测试 ---------- */
+  const modelLib = root.querySelector('#model-lib');
+  const modelForm = root.querySelector('#model-form');
+  const json = async (url, method, body) => {
+    const r = await fetch(url, {
+      method, headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  };
+  const renderModelLib = () => {
+    const models = roster.models || [];
+    modelLib.innerHTML = models.length ? models.map((m) => `
+      <div class="llm-model-row" data-id="${esc(m.id)}">
+        <input type="radio" name="model-default" ${m.id === roster.activeModelId ? 'checked' : ''} data-act="pick" title="设为默认模型（对话框未选择时用它）">
+        <div class="llm-model-info">
+          <b>${esc(m.name || m.model)}${m.id === roster.activeModelId ? ' · 默认' : ''}</b>
+          <small>${m.provider === 'openai' ? `${esc(m.model || '未填模型名')} · ${esc(m.baseUrl || '未填 Base URL')}` : 'Mock · 零 Key 演示'}${m.provider === 'openai' && !m.hasApiKey ? ' · 未配 Key' : ''}${m.provider === 'openai' && m.hasApiKey ? ` · Key ${esc(m.maskedKey || '已保存')}` : ''}</small>
+        </div>
+        <span class="llm-model-result muted"></span>
+        <button class="btn sm" data-act="test" type="button" title="用该档案真实调用一次">▶</button>
+        <button class="btn sm" data-act="edit" type="button" title="编辑">✎</button>
+        <button class="btn sm" data-act="del" type="button" title="删除">✕</button>
+      </div>`).join('')
+      : '<div class="cf-note">模型库为空：点「＋ 新增模型」添加一个 OpenAI 兼容模型（或 Mock 演示）。添加前各 AI 入口将回退内置模板。</div>';
+  };
+  const openModelForm = (m = null) => {
+    editingId = m?.id || null;
+    root.querySelector('#mf-name').value = m?.name || '';
+    root.querySelector('#mf-provider').value = m?.provider || 'openai';
+    root.querySelector('#mf-model').value = m?.model || '';
+    root.querySelector('#mf-base').value = m?.baseUrl || '';
+    root.querySelector('#mf-key').value = '';
+    root.querySelector('#mf-key').placeholder = m ? '•••••••• 留空保持原值' : 'sk-...';
+    root.querySelector('#mf-timeout').value = Math.round((m?.llmTimeoutMs || 300000) / 1000);
+    root.querySelector('#mf-temp').value = m?.temperature ?? 0.7;
+    modelForm.hidden = false;
+    root.querySelector('#mf-name').focus();
+  };
+  const closeModelForm = () => { modelForm.hidden = true; editingId = null; };
+
+  root.querySelector('#model-add').addEventListener('click', () => openModelForm(null));
+  root.querySelector('#mf-cancel').addEventListener('click', closeModelForm);
+  root.querySelector('#mf-save').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
-    btn.disabled = true;
-    out.textContent = '测试中…（推理模型可能需要 1-3 分钟）';
-    try {
-      const key = q('g-key').value.trim();
-      const r = await fetch('/api/system/llm-test', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: q('g-provider').value,
-          model: q('g-model').value.trim(),
-          baseUrl: q('g-base').value.trim(),
-          apiKey: key || undefined,
-          llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
-          temperature: Number(q('set-temp').value) || 0.7,
-        }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      out.innerHTML = d.ok
-        ? `<b class="ok">✓ ${esc(d.mode === 'mock' ? 'Mock 模式可用' : '模型已响应')}</b> ${(d.latencyMs / 1000).toFixed(1)}s`
-        : `<b class="err">✕ 失败</b> ${esc(d.error || '未知错误')}`;
-    } catch (err) {
-      out.innerHTML = `<b class="err">✕</b> ${esc(err.message)}`;
-    } finally {
-      btn.disabled = false;
+    const payload = {
+      id: editingId || undefined,
+      name: root.querySelector('#mf-name').value.trim(),
+      provider: root.querySelector('#mf-provider').value,
+      model: root.querySelector('#mf-model').value.trim(),
+      baseUrl: root.querySelector('#mf-base').value.trim(),
+      apiKey: root.querySelector('#mf-key').value.trim(),
+      llmTimeoutMs: (Number(root.querySelector('#mf-timeout').value) || 300) * 1000,
+      temperature: Number(root.querySelector('#mf-temp').value) || 0.7,
+    };
+    if (payload.provider === 'openai' && !payload.model && !payload.baseUrl) {
+      toast('请至少填写模型名或 Base URL', 'err');
+      return;
     }
+    btn.disabled = true;
+    try {
+      const d = await json('/api/system/llm-models', 'POST', payload);
+      roster = { models: d.models, activeModelId: d.activeModelId };
+      renderModelLib();
+      closeModelForm();
+      toast(editingId ? '模型档案已更新' : '模型档案已添加', 'ok');
+    } catch (err) {
+      toast(`保存失败：${err.message}`, 'err');
+    } finally { btn.disabled = false; }
   });
 
-  /* ---------- 测试模型连接：用面板当前值发一次微型 LLM 调用（不落盘） ---------- */
-  root.querySelector('#llm-test').addEventListener('click', async (e) => {
-    const q = (id) => root.querySelector(`#${id}`);
-    const out = q('llm-test-result');
-    const btn = e.currentTarget;
-    btn.disabled = true;
-    out.textContent = '测试中…（推理模型可能需要 1-3 分钟）';
-    try {
-      const r = await fetch('/api/system/llm-test', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: q('set-provider').value,
-          model: q('set-model').value.trim(),
-          baseUrl: q('set-base').value.trim(),
-          apiKey: q('set-key').value.trim(),
-          llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
-          temperature: Number.isFinite(Number(q('set-temp').value)) ? Number(q('set-temp').value) : 0.7,
-        }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      out.innerHTML = d.ok
-        ? `<b class="ok">✓ ${esc(d.mode === 'mock' ? 'Mock 模式' : '模型已响应')}</b> ${(d.latencyMs / 1000).toFixed(1)}s${d.preview ? ` · ${esc(String(d.preview).slice(0, 30))}` : ''}`
-        : `<b class="err">✕ 失败</b> ${esc(d.error || '未知错误')}`;
-    } catch (err) {
-      out.innerHTML = `<b class="err">✕</b> ${esc(err.message)}`;
-    } finally {
-      btn.disabled = false;
+  modelLib.addEventListener('click', async (e) => {
+    const row = e.target.closest('.llm-model-row');
+    if (!row) return;
+    const m = (roster.models || []).find((x) => x.id === row.dataset.id);
+    if (!m) return;
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'edit') { openModelForm(m); return; }
+    if (act === 'del') {
+      if (!confirm(`删除模型档案「${m.name || m.model}」？正在使用它的对话框将回退默认模型。`)) return;
+      try {
+        const d = await json('/api/system/llm-models', 'DELETE', { id: m.id });
+        roster = { models: d.models, activeModelId: d.activeModelId };
+        renderModelLib();
+        toast('模型档案已删除', 'ok');
+      } catch (err) { toast(`删除失败：${err.message}`, 'err'); }
+      return;
+    }
+    if (act === 'pick') {
+      try {
+        const d = await json('/api/system/llm-models/activate', 'POST', { id: m.id });
+        roster.activeModelId = d.activeModelId;
+        renderModelLib();
+        toast(`默认模型已切换为「${m.name || m.model}」`, 'ok');
+      } catch (err) { toast(`切换失败：${err.message}`, 'err'); }
+      return;
+    }
+    if (act === 'test') {
+      const out = row.querySelector('.llm-model-result');
+      const btn = e.target.closest('[data-act="test"]');
+      btn.disabled = true;
+      out.textContent = '测试中…（推理模型可能需要 1-3 分钟）';
+      try {
+        const d = await json('/api/system/llm-test', 'POST', { ref: { profileId: m.id } });
+        out.innerHTML = d.ok
+          ? `<b class="ok">✓ ${esc(d.mode === 'mock' ? 'Mock 模式' : '模型已响应')}</b> ${(d.latencyMs / 1000).toFixed(1)}s${d.preview ? ` · ${esc(String(d.preview).slice(0, 24))}` : ''}`
+          : `<b class="err">✕ 失败</b> ${esc(d.error || '未知错误')}`;
+      } catch (err) {
+        out.innerHTML = `<b class="err">✕</b> ${esc(err.message)}`;
+      } finally { btn.disabled = false; }
     }
   });
+  renderModelLib();
 
   /* ---------- 工作流库：选中生效 / 展开 / 重命名 / 删除 ---------- */
   const libKey = (kind) => `${kind}WorkflowLib`;

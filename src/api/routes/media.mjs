@@ -2,7 +2,7 @@
 import { json, assetFile, streamAsset } from '../http.mjs';
 import { MATCH } from './match.mjs';
 import { loadProject, saveProject } from '../../core/store.mjs';
-import { loadComfyConfig } from '../../core/comfy-config.mjs';
+import { resolveComfyConfig } from '../../core/comfy-config.mjs';
 import { exportDirectorPack } from '../../core/director-pack.mjs';
 import { emit } from '../../core/events.mjs';
 
@@ -16,7 +16,7 @@ export async function handleMedia(req, res, url) {
     const [, id, kind] = deliverableMatch;
     const project = loadProject(id);
     if (!project) return json(res, { error: '项目不存在' }, 404), true;
-    const cfg = { ...loadComfyConfig(), ...(project.settings?.comfy || {}) };
+    const cfg = resolveComfyConfig(project);
     if (kind === 'director-pack') {
       if (method === 'POST') {
         const info = exportDirectorPack(project, cfg);

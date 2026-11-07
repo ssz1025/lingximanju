@@ -12,7 +12,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'lxm-comfy-lib-'));
 process.env.LINGXIMANJU_DATA_DIR = TMP;
 
 const {
-  DEFAULT_COMFY, loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems,
+  DEFAULT_COMFY, loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems, imageSpecFor, resolveComfyConfig,
 } = await import('../src/core/comfy-config.mjs');
 
 const FILE = path.join(TMP, 'comfyui.json');
@@ -30,6 +30,30 @@ test('DEFAULT_COMFY 含工作流库字段与选中态默认值', () => {
   assert.equal(DEFAULT_COMFY.imageActiveId, null);
   assert.equal(DEFAULT_COMFY.videoActiveId, null);
   assert.equal(DEFAULT_COMFY.imageWorkflow, null, '原有镜像字段保留');
+});
+
+test('图片规格由画幅自动决定：resolveComfyConfig 覆盖遗留 width/height/steps/cfg，fps/frames 保留手动', () => {
+  reset();
+  // 用户此前手填过规格（旧配置遗留）：消费端必须被画幅映射覆盖
+  saveComfyConfig({ width: 1920, height: 1080, steps: 50, cfg: 7, fps: 30, frames: 96 });
+  const landscape = resolveComfyConfig({ settings: { aspect: '16:9' } });
+  assert.deepEqual(
+    { width: landscape.width, height: landscape.height, steps: landscape.steps, cfg: landscape.cfg },
+    { width: 864, height: 480, steps: 25, cfg: 1.0 },
+    '16:9 → 864×480，步数/CFG 用内置最优',
+  );
+  const portrait = resolveComfyConfig({ settings: { aspect: '9:16' } });
+  assert.equal(portrait.width, 480);
+  assert.equal(portrait.height, 864);
+  // 视频参数不受影响，项目 comfy 覆盖（如 outputMode）也保留
+  assert.equal(portrait.fps, 30);
+  assert.equal(portrait.frames, 96);
+  const custom = resolveComfyConfig({ settings: { comfy: { outputMode: 'video' } } });
+  assert.equal(custom.outputMode, 'video');
+  assert.equal(custom.width, 864, '画幅缺省按 16:9');
+  // imageSpecFor 纯函数直验
+  assert.deepEqual(imageSpecFor('9:16'), { width: 480, height: 864, steps: 25, cfg: 1.0 });
+  assert.deepEqual(imageSpecFor(undefined), { width: 864, height: 480, steps: 25, cfg: 1.0 });
 });
 
 test('normalize 防御清洗：库非数组清空、坏项丢弃、name/lastTest 兜底、非法 activeId 置 null', () => {

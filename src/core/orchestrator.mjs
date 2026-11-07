@@ -4,8 +4,8 @@ import { emit } from './events.mjs';
 import { topoLayers, descendants, indexEdges } from './graph.mjs';
 import { getAgent, TYPE_AGENT, buildContext } from './agent.mjs';
 import { createProviders } from './providers.mjs';
-import { loadComfyConfig } from './comfy-config.mjs';
-import { effectiveProjectSettings } from './app-settings.mjs';
+import { resolveComfyConfig } from './comfy-config.mjs';
+import { resolveModelSettings } from './app-settings.mjs';
 import { uid } from './store.mjs';
 
 const activeRuns = new Map();
@@ -53,10 +53,11 @@ export async function runProject(projectId, opts = {}) {
   const runState = { runId, pending: new Set(), dirty: false };
   activeRuns.set(projectId, { controller, runId, startedAt });
 
-  // ComfyUI 连接与 workflow 模板是全局配置；项目 settings 可局部覆盖（例如只改产出模式）
+  // ComfyUI 连接与 workflow 模板是全局配置；模型走全局模型库（对话框可选 modelId），
+  // 项目 settings 可局部覆盖产出模式；图片规格（宽高/步数/CFG）由画幅自动决定
   const settings = {
-    ...effectiveProjectSettings(project),
-    comfy: { ...loadComfyConfig(), ...(project.settings?.comfy || {}) },
+    ...resolveModelSettings(project, opts.modelId),
+    comfy: resolveComfyConfig(project),
   };
   const concurrency = Math.max(1, Math.min(8, Number(settings.concurrency) || 3));
   const scopeTypes = new Set(opts.scope || []);

@@ -54,17 +54,18 @@ lingximanju/
 ├── electron/                   # Electron 主进程（多端打包入口，见 README「桌面版安装与分发」）
 ├── examples/                   # workflows/ 两份 API 工作流 + sample-novel.txt 示例小说
 ├── public/
-│   ├── index.html              # 页面骨架（侧栏 / 三 Tab 检查器 / 画布步骤条）
-│   ├── styles.css              # 设计系统 + 四态视觉提示
+│   ├── index.html              # 页面骨架（项目侧栏 / 首页 / 工作台 / 剧集 / 三 Tab 检查器 / 画布步骤条）
+│   ├── styles.css              # 设计系统 + 四态视觉提示 + 项目侧栏 .ps-*
 │   ├── canvas.js               # 无限画布引擎（自研，创作项目层未改动）
 │   ├── nodes.js                # 节点类型与渲染（新增 episode 分集节点）
 │   ├── wizard.js               # 新建创作项目向导（只有「项目名称」必填 + 可选一句话构想，其余进项目后补）
-│   ├── project-view.js         # 项目工作台：左侧漫剧路线图 / 故事来源（上传·AI 生成）/ 资源；右侧项目信息（AI 补全）+ 步骤操作台 + 分集
-│   ├── project-manager.js      # 项目列表 / 六步面板（第 ① 步内嵌上传小说入口）/ 画布步骤条 / 管理面板（支持指定 Tab）
-│   ├── asset-manager.js        # 全局资源库：类型/标签/来源项目筛选 · 搜索 · 改名打标 · 复用选择
+│   ├── project-view.js         # 项目工作台：内容区左列漫剧路线图 / 故事来源（上传·AI 生成）/ 资源统计；右列项目信息（AI 补全）+ 步骤操作台 + 分集
+│   ├── project-sidebar.js      # 项目内左侧栏：项目卡与进度 / 导航与剧集快捷入口 / 本项目资源列表（引用归属·筛选·预览）/ 项目设置入口；collectProjectAssets（资源归属）与 projectChrome（会话外壳文案）为可单测纯函数
+│   ├── project-manager.js      # 六步面板（第 ① 步内嵌上传小说入口）/ 画布步骤条 / 管理面板（支持指定 Tab）/ 历史项目列表渲染器
+│   ├── asset-manager.js        # 资源库：类型/标签/来源项目筛选 · 搜索 · 改名打标 · 复用选择；支持 files 白名单与 project 动态范围（项目会话内默认「仅本项目」，可一键退出）
 │   ├── link-picker.js          # 拖拽松手后的「选择下一个节点 / 连接关系」浮层
 │   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片
-│   └── app.js                  # 状态机 / API / SSE / 六步执行 / 快捷键
+│   └── app.js                  # 状态机 / API / SSE / 六步执行 / 快捷键；项目会话 closeProject（清空项目态回列表）、updateChrome（整页项目化外壳）与 openProjectAssetLibrary（默认本项目范围）
 ├── tests/                      # node:test 单元与 HTTP 闭环验证（npm test）
 └── data/                       # 运行时：projects/*.json、assets/*、snapshots/*、comfyui.json
 ```

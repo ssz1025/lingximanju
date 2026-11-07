@@ -5,6 +5,9 @@
  * 都通过 openAIChat({ onSend, actions }) 接入：组件只管交互，业务在调用方。
  * ==========================================================================*/
 
+/** 模型选择器（可选）：库里有模型时在输入栏前插入下拉，本次对话用哪个模型由用户临时决定 */
+import { ensureModelPicker } from './model-picker.js';
+
 const $esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /**
@@ -28,6 +31,7 @@ export function openAIChat(o = {}) {
     onSend = null,
     actions = {},
     onClose = null,
+    modelEntry = null,   // 模型库入口 key：设置后输入栏左侧出现模型下拉（如 'cover'）
   } = o;
 
   const root = document.getElementById('modal-root') || document.body;
@@ -74,6 +78,7 @@ export function openAIChat(o = {}) {
   const input = backdrop.querySelector('[data-aichat="input"]');
   const sendBtn = backdrop.querySelector('[data-aichat="send"]');
   const closeBtn = backdrop.querySelector('[data-aichat="close"]');
+  if (modelEntry) ensureModelPicker(modelEntry, backdrop.querySelector('.aichat-inputbar'), input);
 
   /** 气泡内图片点击放大：组件内自建 lightbox，保持零依赖（不引入 panels 的预览弹窗） */
   function openImgPreview(src) {

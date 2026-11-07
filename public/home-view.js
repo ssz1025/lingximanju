@@ -5,6 +5,8 @@
  * 跳到对应操作台；下方是项目列表（搜索 / 筛选 / 卡片操作 / 继续创作）。
  * 纯原生 ESM，数据来自 /api/bootstrap 的 projects / steps / settings / comfy。
  * ==========================================================================*/
+import { llmReady, llmReadyLabel } from './startup-check.js';
+
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
@@ -104,15 +106,16 @@ function flowHTML() {
 }
 
 function configStripHTML(settings, comfy) {
-  const llmOk = Boolean(settings?.llm?.configured);
+  const llmOk = llmReady(settings);
   const videoOk = Boolean(comfy?.videoWorkflow);
   const imageOk = Boolean(comfy?.imageWorkflow);
   const allOk = llmOk && videoOk && imageOk;
+  const label = llmOk ? llmReadyLabel(settings) : null;
   return `<div class="hv-config ${allOk ? 'ok' : 'warn'}">
     <span class="hv-config-ico">${allOk ? '✓' : '⚠'}</span>
     <div class="hv-config-text"><strong>${allOk ? '模型已就绪' : '模型尚未配置完整'}</strong>
       <small>${allOk
-      ? `文本模型 ${esc(settings.llm.model || settings.llm.provider)} · 本地 ComfyUI 出图与视频工作流均已导入`
+      ? `文本模型 ${esc(label.name)} · 本地 ComfyUI 出图与视频工作流均已导入`
       : `文本大模型${llmOk ? '已配置' : '未配置（用内置模板）'} · ComfyUI 出图${imageOk ? '已导入' : '未导入'} / 视频${videoOk ? '已导入' : '未导入'} · 不配置也能完整体验流程`}</small></div>
     <button class="btn sm" data-act="settings">⚙ ${allOk ? '查看模型设置' : '去配置模型'}</button>
   </div>`;

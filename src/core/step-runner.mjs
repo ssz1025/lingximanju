@@ -5,7 +5,7 @@ import { isRunning, runProject } from './orchestrator.mjs';
 import { ensureManagement, stepProgress, startStep, finishStep,
   resetStep, resetAllSteps, STEPS, STEP_BY_ID, projectStats } from './project-steps.mjs';
 import { refreshEpisodes } from '../pipelines/novel-project.mjs';
-import { loadComfyConfig } from './comfy-config.mjs';
+import { resolveComfyConfig } from './comfy-config.mjs';
 import { exportDirectorPack } from './director-pack.mjs';
 
 /** 项目管理状态广播：步骤面板、侧栏进度、顶栏状态胶囊都靠这个事件对齐 */
@@ -72,7 +72,7 @@ export async function executeSteps(project, body = {}) {
         if (stepId === 'deliver' && ok && m.deliverables?.pack) {
           const finalNode = project.nodes.find((n) => n.type === 'final');
           if (finalNode && !finalNode.data?.directorPack?.file) {
-            const cfg = { ...loadComfyConfig(), ...(project.settings?.comfy || {}) };
+            const cfg = resolveComfyConfig(project);
             const info = exportDirectorPack(project, cfg);
             const pack = {
               url: info.url, file: info.file, filename: info.filename, bytes: info.bytes,

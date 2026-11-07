@@ -15,7 +15,7 @@ export const CHARACTER_VIEWS = [
 export const MAX_CHARACTERS = 12;
 const LIMITS = {
   name: 20, role: 60, gender: 8, age: 24, personality: 300,
-  appearance: 600, hair: 120, costume: 300, props: 200, viewPrompt: 600,
+  appearance: 600, hair: 120, costume: 300, props: 200, style: 120, viewPrompt: 600,
 };
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 const ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -65,6 +65,7 @@ export function normalizeCharacter(raw = {}) {
     hair: cut(raw.hair, LIMITS.hair),
     costume: cut(raw.costume, LIMITS.costume),
     props: cut(raw.props, LIMITS.props),
+    style: cut(raw.style, LIMITS.style),
     relations: (Array.isArray(raw.relations) ? raw.relations : [])
       .map((r) => ({ target: cut(r?.target, LIMITS.name), label: cut(r?.label, 30) }))
       .filter((r) => r.target || r.label).slice(0, 8),
@@ -89,6 +90,7 @@ export function buildCharacterPrompt(c = {}) {
   if (c.costume) parts.push(`服装：${c.costume}`);
   if (c.props) parts.push(`随身物件：${c.props}`);
   if (c.personality) parts.push(`性格：${c.personality}`);
+  if (c.style) parts.push(`设定风格：${c.style}`);
   if (c.palette?.length) parts.push(`配色：${c.palette.join(' / ')}`);
   return parts.join('；');
 }
@@ -148,7 +150,7 @@ export function mergeExtracted(existing = [], extracted = [], opts = {}) {
       || c.aliases.some((a) => charNameKey(a) === key)
       || inc.aliases.some((a) => charNameKey(a) === charNameKey(c.name)));
     if (hit) {
-      for (const f of ['role', 'gender', 'age', 'personality', 'appearance', 'hair', 'costume', 'props', 'viewPrompt']) {
+      for (const f of ['role', 'gender', 'age', 'personality', 'appearance', 'hair', 'costume', 'props', 'style', 'viewPrompt']) {
         if (!hit[f] && inc[f]) hit[f] = inc[f];
       }
       if (!hit.aliases.length && inc.aliases.length) hit.aliases = inc.aliases;

@@ -9,7 +9,7 @@ import { placeholderFrame } from './raster.mjs';
 import { storyboardGridSVG, gridShotList } from './grid-art.mjs';
 import { readAsset, writeAsset, writeAssetBinary, uid } from './store.mjs';
 import { createProviders } from './providers.mjs';
-import { effectiveProjectSettings } from './app-settings.mjs';
+import { effectiveProjectSettings, resolveModelSettings } from './app-settings.mjs';
 import { parseWorkflow } from './comfyui.mjs';
 import { splitSegments, matchEpisodeCharacters, reconstructEpisodeText } from './episode-model.mjs';
 
@@ -28,7 +28,7 @@ export function ensureEpisodeBody(project, ep) {
 export async function generateEpisodeScript(project, m, ep, opts = {}) {
   ensureEpisodeBody(project, ep);
   const log = opts.log || (() => {});
-  const providers = createProviders(effectiveProjectSettings(project), log);
+  const providers = createProviders(resolveModelSettings(project, opts.modelId), log);
   const chars = (m.characters || []).filter((c) => (ep.characterIds || []).includes(c.id));
   const vars = {
     title: `${m.bible?.title || project.name} · 第 ${ep.no} 集`,

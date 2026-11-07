@@ -248,11 +248,11 @@ providers.judge({ candidates, criteria })         -> { index, scores, reason }
 
 ## 9. 页面与体验设计
 
-布局：左侧**资源栏**（项目列表 / 节点库 / 流水线模板）、中间**无限画布**、右侧**检查器**（节点属性 ↔ Agent 对话切换）、顶部**工具栏**（项目名、运行态、运行/停止、Provider、主题、导出）、底部**状态栏**（实时日志流、节点统计、快捷键提示）。
+布局：应用按 `home / workshop / canvas / episode` 四视图切换，并用「项目会话」区分是否打开了项目。`home` 项目列表页全宽展示（侧栏隐藏、顶栏只显示 `⌂ 项目列表`、状态栏显示项目总数）；打开项目后整页项目化：左侧是**项目侧栏**（项目卡与六步进度、项目导航与剧集快捷入口、本项目资源列表、项目设置入口；画布工具「模板 / 节点库 / 智能体」仅在 `canvas` 视图追加显示），中间是**无限画布**或**项目工作台 / 剧集详情**，右侧**检查器**（节点属性 ↔ Agent 对话切换，仅画布视图），顶部**工具栏**（项目封面 + 可编辑项目名 + 步骤胶囊 + `✕ 关闭项目`、运行态、运行/停止、Provider、主题、导出；工作台 / 画布不再重复面包屑），底部**状态栏**（本项目日志、节点 / 连线 / Provider / 缩放）。侧栏品牌与页脚、资源库入口文案也随会话切换。点 `✕` / `⌂ 项目列表` / 侧栏项目卡 `✕` / `H` 会执行 `closeProject()`：清空 `state.project`、画布、项目级浮层、日志与 Agent 对话，再刷新并回到项目列表；列表提供「↩ 继续上次项目」。项目列表、新建、导入只在 `home` 页出现；项目内打开资源库默认「仅本项目」，弹窗内可退出范围看全库。
 
 设计系统：深色优先（与 IDE 一致），提供浅色切换；背景 `#0d1016`、面板 `#151a23`、描边 `#252c39`、主色橙 `#ff8a4c`；节点按类型语义着色；圆角 12–16px；字重层级清晰；所有状态变化有 160–240ms 过渡；`running` 用呼吸光晕，`done` 用一次性扫光。
 
-体验细节：首次打开自动载入示例项目「雨夜侦探」并提供「一键运行完整流水线」；空状态有引导卡片；节点库可拖入画布；运行日志逐条流入状态栏；节点产物（剧本、分镜表、SVG 关键帧）在检查器内直接预览；Agent 面板支持 `@节点` 引用并可执行「整理画布 / 解释依赖 / 生成分镜 / 找不一致」；所有破坏性操作可撤销；导出 JSON 便于备份。
+体验细节：首次打开落在项目列表页（六步图文流程 + 项目卡），点项目进入工作台 / 画布并提供「一键运行完整流水线」；空状态有引导卡片；节点库可拖入画布；运行日志逐条流入状态栏；节点产物（剧本、分镜表、SVG 关键帧）在检查器内直接预览；Agent 面板支持 `@节点` 引用并可执行「整理画布 / 解释依赖 / 生成分镜 / 找不一致」；所有破坏性操作可撤销；导出 JSON 便于备份。
 
 ---
 
@@ -418,10 +418,11 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；`rag` 用整本原著分块建库并落盘；`decomposer` 按事件 `processChain` 逐条检索并把 FRAGMENT 片段下发到 event / scene / shots；`generate('context')` 走本地 BM25 确定性检索 |
 | API | `src/api/routes.mjs`、`src/api/routes/management.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover`、`POST /api/projects/:id/cover/chat`（对话式创作）与 `POST /api/projects/:id/cover/generate`（生成入资源库 + 调用记录 `management.coverCalls`）；工作流库 `/api/comfyui/library` |
 | 前端 | `public/wizard.js` | 极简新建向导：只有项目名称必填 + 可选一句话构想 |
-| 前端 | `public/project-view.js` | 项目工作台（进入创作项目后的默认全屏页）：左侧路线图 / 故事来源 / 资源，右侧项目信息（AI 补全）+ 步骤操作台 + 分集；顶栏 `V` 与画布视图互切 |
-| 前端 | `public/project-manager.js`、`public/ai-chat.js` | 侧栏项目列表（最近 / 更多、筛选、封面缩略图与名称封面兜底）、六步任务面板、画布步骤条、四 Tab 管理面板、对话式封面创作（`openAIChat()` 复用对话弹窗：生成 → 大图预览确认 → 保存）与封面生成调用记录展示 |
-| 前端 | `public/app.js` | 状态同步、步骤执行、SSE `project:meta`、顶栏进度与快捷键 |
-| 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板；项目卡片缩略图 / 名称封面 / 封面弹窗样式；沿用现有 CSS 变量兼容深浅主题 |
+| 前端 | `public/project-view.js` | 项目工作台（进入创作项目后的默认全屏页）：内容区左列路线图 / 故事来源 / 资源统计，右列项目信息（AI 补全）+ 步骤操作台 + 分集；顶栏 `V` 与画布视图互切 |
+| 前端 | `public/project-sidebar.js` | 项目内左侧栏：项目卡与进度、导航与剧集快捷入口、本项目资源列表（递归扫描项目 JSON 的 `/assets/` 引用 + 索引 `sourceProjectId` 补充归属、类型筛选、预览弹窗、进资源库 `files` 白名单）、项目设置入口；`collectProjectAssets()` 为纯函数，可单测 |
+| 前端 | `public/project-manager.js`、`public/ai-chat.js` | 六步任务面板、画布步骤条、四 Tab 管理面板、对话式封面创作（`openAIChat()` 复用对话弹窗：生成 → 大图预览确认 → 保存）与封面生成调用记录展示；`renderProjectList()` 为历史侧栏渲染器（现由 `home-view.js` 承担） |
+| 前端 | `public/app.js` | 四视图状态机、项目侧栏 ctx 组装、状态同步、步骤执行、SSE `project:meta` / `episode:update` 防抖刷新、顶栏进度与快捷键 |
+| 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板、项目侧栏 `.ps-*`；项目卡片缩略图 / 名称封面 / 封面弹窗样式；沿用现有 CSS 变量兼容深浅主题 |
 | 节点 | `public/nodes.js` | 新增 `episode` 类型（`▥` 分集，紫色，无默认智能体） |
 | 测试 | `tests/novel.test.mjs` | 解析 / 分集策略 / 校验 / 角色抽取 / 预览不泄漏全文（16 项） |
 | 测试 | `tests/project-steps.test.mjs` | 六步定义与论文映射 / 步骤状态机 / 管理动作（含 `cover`，提示词完整保存不截断）/ 统计与索引（38 项） |
@@ -493,7 +494,7 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | POST / PUT | `/api/comfyui/library` | 批量导入工作流库 / 切换选中项 |
 | DELETE | `/api/comfyui/library/:kind/:id` | 删除工作流库条目 |
 
-SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`。前端 `handleEvent` 用它刷新步骤面板、画布步骤条、顶栏胶囊与侧栏项目列表；`state.stats`（全局）与 `state.projectStats`（单项目）严格分离。
+SSE `project:meta` 事件：`{ projectId, management, stats, progress }`。前端 `handleEvent` 用它刷新步骤面板、画布步骤条、顶栏胶囊与项目侧栏进度；`episode:update` / `character:batch` 另外防抖触发项目侧栏资源重扫（强制重取 `/api/assets` 索引）。`state.stats`（全局）与 `state.projectStats`（单项目）严格分离。
 
 ### 14.5 视觉规范（明确的四态提示）
 
@@ -501,10 +502,10 @@ SSE 新增 `project:meta` 事件：`{ projectId, management, stats, progress }`�
 |---|---|---|
 | 待执行 | 灰 | 灰边卡片、空心编号、进度条空 |
 | 进行中 | 橙 + 呼吸光晕 | `spGlow` 动画、状态胶囊脉冲、画布节点原有 `status-running` 光晕、连线流光 |
-| 已完成 | 绿 ✓ | 编号变 ✓、耗时徽标、进度条填充、侧栏「全完成」 |
+| 已完成 | 绿 ✓ | 编号变 ✓、耗时徽标、进度条填充、项目列表卡片「全完成」 |
 | 失败 | 红 | 红边、失败原因、`重试本步` 按钮，可重置 |
 
-统一提示面：向导三阶段指示、创建后的六步任务引导卡、检查器「任务步骤」Tab（`x/6` + 进度条 + 四色图例 + 每步检查清单 + 论文依据卡）、顶栏状态胶囊与 2px 进度条、画布上方六步导航条（点击定位相关节点）、Toast、运行日志、侧栏项目卡进度条。
+统一提示面：向导三阶段指示、创建后的六步任务引导卡、检查器「任务步骤」Tab（`x/6` + 进度条 + 四色图例 + 每步检查清单 + 论文依据卡）、顶栏状态胶囊与 2px 进度条、画布上方六步导航条（点击定位相关节点）、Toast、运行日志、项目侧栏进度条。
 
 ### 14.6 画布保留约束
 

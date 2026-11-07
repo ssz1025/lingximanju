@@ -41,12 +41,14 @@ test('normalizeCharacter 截断超长文本与列表', () => {
   const c = normalizeCharacter({
     name: 'n'.repeat(50),
     appearance: 'a'.repeat(1000),
+    style: 's'.repeat(300),
     aliases: ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛'],
     relations: Array.from({ length: 12 }, (_, i) => ({ target: `t${i}`, label: 'l' })),
     palette: ['#112233', '#445566', '#778899', '#aabbcc', '#ddeeff', '#000000'],
   });
   assert.equal(c.name.length, 20);
   assert.equal(c.appearance.length, 600);
+  assert.equal(c.style.length, 120);
   assert.equal(c.aliases.length, 6);
   assert.equal(c.relations.length, 8);
   assert.equal(c.palette.length, 5);
@@ -74,9 +76,9 @@ test('buildCharacterPrompt 按属性拼造型串', () => {
   const p = buildCharacterPrompt({
     name: '林晚', role: '女主角', gender: '女', age: '25岁',
     appearance: '清冷气质', hair: '黑色长发', costume: '月白长裙',
-    props: '油纸伞', personality: '外冷内热', palette: ['#112233', '#445566'],
+    props: '油纸伞', personality: '外冷内热', style: '古风清冷', palette: ['#112233', '#445566'],
   });
-  for (const seg of ['林晚', '女主角', '25岁', '清冷气质', '黑色长发', '月白长裙', '油纸伞', '外冷内热', '#112233']) {
+  for (const seg of ['林晚', '女主角', '25岁', '清冷气质', '黑色长发', '月白长裙', '油纸伞', '外冷内热', '设定风格：古风清冷', '#112233']) {
     assert.ok(p.includes(seg), `造型串应包含「${seg}」`);
   }
   assert.equal(buildCharacterPrompt({}), '');
@@ -124,11 +126,11 @@ test('buildExtractVars 无原著时仍可返回（空候选/空正文）', () =>
 
 test('mergeExtracted 新增角色并按名合并，只补空字段不覆盖手改', () => {
   const existing = [
-    normalizeCharacter({ id: 'chr_1', name: '林晚', role: '女主角', appearance: '手改外貌', source: 'manual' }),
+    normalizeCharacter({ id: 'chr_1', name: '林晚', role: '女主角', appearance: '手改外貌', style: '手改风格', source: 'manual' }),
   ];
   const out = mergeExtracted(existing, [
-    { name: '林晚', role: '原著女主', appearance: 'LLM外貌', hair: '黑色长发', palette: ['#112233'] },
-    { name: '沈默', role: '男主角', personality: '沉默寡言' },
+    { name: '林晚', role: '原著女主', appearance: 'LLM外貌', style: 'LLM风格', hair: '黑色长发', palette: ['#112233'] },
+    { name: '沈默', role: '男主角', personality: '沉默寡言', style: '冷峻水墨' },
     { name: '林晚', role: '重复条目' },
     { name: '' },
   ], { source: 'llm' });
@@ -141,12 +143,14 @@ test('mergeExtracted 新增角色并按名合并，只补空字段不覆盖手�
   assert.equal(lin.role, '女主角', '手改 role 不被覆盖');
   assert.equal(lin.appearance, '手改外貌', '手改 appearance 不被覆盖');
   assert.equal(lin.hair, '黑色长发', '空字段被 LLM 结果补齐');
+  assert.equal(lin.style, '手改风格', '手改 style 不被覆盖');
   assert.deepEqual(lin.palette, ['#112233']);
   assert.equal(lin.source, 'manual', '合并不改变原来源');
 
   const shen = out.characters.find((c) => c.name === '沈默');
   assert.equal(shen.source, 'llm');
   assert.equal(shen.personality, '沉默寡言');
+  assert.equal(shen.style, '冷峻水墨', '空 style 被 LLM 总结的设定风格补齐');
 });
 
 test('mergeExtracted 别名命中同名角色也合并', () => {

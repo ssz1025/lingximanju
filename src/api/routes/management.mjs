@@ -7,7 +7,7 @@ import { emit } from '../../core/events.mjs';
 import { ensureManagement, applyManageAction, projectStats, stepProgress, STEPS } from '../../core/project-steps.mjs';
 import { attachSource } from '../../pipelines/novel-project.mjs';
 import { isRunning } from '../../core/orchestrator.mjs';
-import { loadComfyConfig } from '../../core/comfy-config.mjs';
+import { resolveComfyConfig } from '../../core/comfy-config.mjs';
 import { parseWorkflow, runWorkflow } from '../../core/comfyui.mjs';
 import { executeSteps, broadcastMeta } from '../../core/step-runner.mjs';
 import { createProviders } from '../../core/providers.mjs';
@@ -15,20 +15,20 @@ import { extractCharacters } from '../../core/novel.mjs';
 import { CHARACTER_VIEWS, buildExtractVars, buildViewPrompt, mergeExtracted } from '../../core/characters.mjs';
 // 封面智能体（agents 统一目录）：提示词构建 / 参考图解析 / 对话编排都在那里
 import { designCoverPrompt, MAX_COVER_REFS, parseImagePayload, resolveChatRefs, coverChat } from '../../agents/cover-agent.mjs';
-import { effectiveProjectSettings } from '../../core/app-settings.mjs';
+import { resolveModelSettings } from '../../core/app-settings.mjs';
 
 /**
  * 生成单个角色的某个视图，并写回 management.characters + 资源库。
  * 单视图端点与「一键生成全部角色」共用，保证两条路径字段口径完全一致。
  */
-async function generateCharacterView(project, m, character, viewKey) {
+async function generateCharacterView(project, m, character, viewKey, modelId = '') {
   const view = CHARACTER_VIEWS.find((v) => v.key === viewKey);
   if (!view) throw new Error('视图必须是 front / side / back');
   const prompt = buildViewPrompt(character, view.key, {
     style: m.bible?.stylePrompt || project.settings?.style || '',
     negative: m.bible?.negativePrompt || '',
   });
-  const providers = createProviders(effectiveProjectSettings(project),
+  const providers = createProviders(resolveModelSettings(project, modelId),
     (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }));
   const img = await providers.image({
     kind: 'character-view', view: view.key,
@@ -150,7 +150,7 @@ export async function handleManagement(req, res, url) {
       try {
         const refs = resolveChatRefs(body.refs);
         const out = await coverChat({
-          project, m, messages: body.messages, refs,
+          project, m, messages: body.messages, refs, modelId: body.modelId,
           log: (level, msg) => emit('log', { projectId: id, level, message: `封面对话 · ${msg}` }),
         });
         // 提示词草稿随对话即时保存（不改动封面图本身），生成成功后再经 cover 动作落定
@@ -169,7 +169,7 @@ export async function handleManagement(req, res, url) {
 
     // ComfyUI 出图生成封面（约 1–2 分钟，需已配置 imageWorkflow）；支持多参考图（资源库图片 / 本地上传）
     if (coverGenMatch && method === 'POST') {
-      const config = loadComfyConfig();
+      const config = resolveComfyConfig(project);
       if (!config.enabled || !config.imageWorkflow) {
         return json(res, { error: '尚未配置 ComfyUI 出图工作流，请先在设置中导入「导出(API)」工作流' }, 400), true;
       }
@@ -179,7 +179,7 @@ export async function handleManagement(req, res, url) {
       const rawPrompt = String(body.prompt || '').trim().slice(0, 2000);
       let prompt = rawPrompt;
       if (!prompt) {
-        const designed = await designCoverPrompt({ project, m, requirement: String(body.requirement || '') });
+        const designed = await designCoverPrompt({ project, m, requirement: String(body.requirement || ''), modelId: body.modelId });
         prompt = designed.prompt;
         emit('log', { projectId: id, level: 'info', message: `封面提示词 · 由提示词 agent 生成（${designed.source}）` });
       }
@@ -320,7 +320,7 @@ export async function handleManagement(req, res, url) {
       message = `启发式提取到 ${extracted.length} 位候选角色`;
     } else {
       try {
-        const providers = createProviders(effectiveProjectSettings(project), (level, msg) => emit('log', { projectId: id, level, message: `角色提取 · ${msg}` }));
+        const providers = createProviders(resolveModelSettings(project, body.modelId), (level, msg) => emit('log', { projectId: id, level, message: `角色提取 · ${msg}` }));
         const out = await providers.generate('charExtract', buildExtractVars(project, m, limit));
         if (out?.__fallback || !Array.isArray(out?.characters) || !out.characters.length) throw new Error('模型未返回有效角色');
         extracted = out.characters;
@@ -353,7 +353,7 @@ export async function handleManagement(req, res, url) {
     const character = (m.characters || []).find((c) => c.id === String(body.characterId || ''));
     if (!character) return json(res, { error: '角色不存在' }, 404), true;
     try {
-      const out = await generateCharacterView(project, m, character, String(body.view || ''));
+      const out = await generateCharacterView(project, m, character, String(body.view || ''), body.modelId);
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'characters' });
@@ -395,7 +395,7 @@ export async function handleManagement(req, res, url) {
         });
         let lastOk = false;
         try {
-          await generateCharacterView(project, m, c, key);
+          await generateCharacterView(project, m, c, key, body.modelId);
           generated += 1;
           lastOk = true;
         } catch (err) {
@@ -430,7 +430,7 @@ export async function handleManagement(req, res, url) {
     if (m.kind !== 'novel') return json(res, { error: '只有创作项目支持 AI 生成小说' }, 400), true;
     if (isRunning(id)) return json(res, { error: '项目正在运行，稍后再生成' }, 409), true;
     const body = await readBody(req);
-    const providers = createProviders(effectiveProjectSettings(project),
+    const providers = createProviders(resolveModelSettings(project, body.modelId),
       (level, msg) => emit('log', { projectId: id, level, message: `AI 小说 · ${msg}` }));
     const idea = String(body.idea || m.bible?.logline || m.bible?.firstEpisodeTheme || project.name || '').trim().slice(0, 600);
     const chapterCount = Math.max(1, Math.min(8, Number(body.chapterCount) || 3));
@@ -523,7 +523,7 @@ export async function handleManagement(req, res, url) {
     const body = await readBody(req);
     const idea = String(body.idea || '').trim().slice(0, 600);
     if (!idea) return json(res, { error: '请先输入一句话故事构想，AI 才能据此补全项目信息' }, 400), true;
-    const providers = createProviders(effectiveProjectSettings(project),
+    const providers = createProviders(resolveModelSettings(project, body.modelId),
       (level, msg) => emit('log', { projectId: id, level, message: `AI 项目信息 · ${msg}` }));
     try {
       const out = await providers.generate('storyIdea', { idea, title: project.name, style: project.settings?.style });

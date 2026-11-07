@@ -1,7 +1,7 @@
 // 画布侧 Agent：能读画布、能解释依赖、能整理布局、能真正长出分镜节点
 import { autoLayout } from '../core/graph.mjs';
 import { createProviders } from '../core/providers.mjs';
-import { effectiveProjectSettings } from '../core/app-settings.mjs';
+import { resolveModelSettings } from '../core/app-settings.mjs';
 import { buildContext, getAgent } from '../core/agent.mjs';
 import { emit } from '../core/events.mjs';
 
@@ -36,7 +36,7 @@ function consistency(project) {
   return lines.join('\n');
 }
 
-export async function chatWithCanvas(project, message = '') {
+export async function chatWithCanvas(project, message = '', modelId = '') {
   const text = String(message).trim();
   const segments = [];
   let changed = false;
@@ -63,7 +63,7 @@ export async function chatWithCanvas(project, message = '') {
     if (!scene) {
       segments.push('当前画布还没有场景节点。请先运行完整流水线，让「层次化叙事分解」长出事件与场景，再让我补镜头。');
     } else {
-      const providers = createProviders(effectiveProjectSettings(project), () => {});
+      const providers = createProviders(resolveModelSettings(project, modelId), () => {});
       const runState = { runId: 'chat', pending: new Set(), dirty: false };
       const ctx = buildContext({
         project, node: scene, inputs: [], upstream: [], providers,

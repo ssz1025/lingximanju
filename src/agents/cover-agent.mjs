@@ -2,7 +2,7 @@
 // 路由层（api/routes/management.mjs）只做 HTTP 编排，不承载封面业务。
 import { readAsset } from '../core/store.mjs';
 import { createProviders } from '../core/providers.mjs';
-import { effectiveProjectSettings } from '../core/app-settings.mjs';
+import { resolveModelSettings } from '../core/app-settings.mjs';
 
 /** 参考图上限：与 ComfyUI LoadImage 插槽数量同量级，防止把整个资源库都上传一遍 */
 export const MAX_COVER_REFS = 6;
@@ -89,8 +89,8 @@ export function resolveChatRefs(refs) {
  * 输入项目资料 + 用户画面要求 + 参考图（VLM 真实看图），输出一句完整连贯的中文画面描述 + 负向提示词。
  * LLM 未配置 / 调用失败时自动落到完整句模板兜底（providers 内置）。
  */
-export async function designCoverPrompt({ project, m, requirement = '', refs = [], providers, log = () => {} }) {
-  const p = providers || createProviders(effectiveProjectSettings(project), log);
+export async function designCoverPrompt({ project, m, requirement = '', refs = [], providers, modelId = '', log = () => {} }) {
+  const p = providers || createProviders(resolveModelSettings(project, modelId), log);
   const vars = {
     ...buildCoverVars(project, m, String(requirement || '').trim()),
     requirement: String(requirement || '').trim().slice(0, 400),
@@ -116,13 +116,13 @@ export async function designCoverPrompt({ project, m, requirement = '', refs = [
  * 提示词一律由独立的 designCoverPrompt agent 产出（对话与设计并行请求，互不阻塞）。
  * 返回 { reply, prompt, negative, suggestions, source, fellBack, message }；prompt 为空视为失败。
  */
-export async function coverChat({ project, m, messages = [], refs = [], log = () => {} }) {
+export async function coverChat({ project, m, messages = [], refs = [], modelId = '', log = () => {} }) {
   const history = (Array.isArray(messages) ? messages : [])
     .filter((x) => x && (x.role === 'user' || x.role === 'assistant') && String(x.content || '').trim())
     .slice(-12)
     .map((x) => ({ role: x.role, content: String(x.content).slice(0, 1000) }));
   const lastUser = [...history].reverse().find((x) => x.role === 'user')?.content || '';
-  const providers = createProviders(effectiveProjectSettings(project),
+  const providers = createProviders(resolveModelSettings(project, modelId),
     (level, msg) => log(level, msg));
   const talkVars = {
     ...buildCoverVars(project, m, ''),
@@ -133,7 +133,7 @@ export async function coverChat({ project, m, messages = [], refs = [], log = ()
   // 对话回复与提示词设计并行：prompt 只信独立设计 agent 的产出
   const [talk, designed] = await Promise.all([
     providers.generate('coverChat', talkVars).catch(() => null),
-    designCoverPrompt({ project, m, requirement: lastUser, refs, providers }),
+    designCoverPrompt({ project, m, requirement: lastUser, refs, providers, modelId }),
   ]);
   const prompt = String(designed?.prompt || '').trim();
   if (!prompt) throw new Error('提示词 agent 未返回有效提示词');

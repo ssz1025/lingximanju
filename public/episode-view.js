@@ -5,6 +5,7 @@
  * 所有动作都打到 /api/projects/:id/episodes/:no/*，成功后重新拉详情，状态自动联动。
  * ==========================================================================*/
 import { mountEpisodeCanvas } from './episode-canvas.js';
+import { ensureModelPicker, withModelId } from './model-picker.js';
 
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
@@ -103,6 +104,17 @@ function scriptHTML(d) {
       ${(s.script || []).map((line) => `<div class="ev-line">${esc(line)}</div>`).join('')}
     </div>`).join('')}</div>
   </div>`;
+}
+
+/** 剧本区的模型下拉（空态与重新生成两处都可能挂；库为空 / 已挂过则跳过） */
+function mountScriptPicker(host) {
+  const blank = host.querySelector('.ev-blank-acts');
+  if (blank && !blank.querySelector('[data-model-pick]')) {
+    ensureModelPicker('episode', blank, blank.firstElementChild);
+    return;
+  }
+  const head = host.querySelector('.ev-card-head span');
+  if (head && !head.querySelector('[data-model-pick]')) ensureModelPicker('episode', head, head.firstElementChild);
 }
 
 function charactersHTML(d) {
@@ -225,6 +237,7 @@ function bind(d, ctx) {
   const toast = ctx.toast || (() => {});
 
   host.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { ui.tab = b.dataset.tab; ui.charEdit = false; paint(); }));
+  if (ui.tab === 'script') mountScriptPicker(host);
   const nav = {
     back: () => ctx.onBack?.(),
     prev: () => d.neighbors?.prev && ctx.onNavigate?.(d.neighbors.prev.no),
@@ -254,8 +267,8 @@ function bind(d, ctx) {
     }
 
     const calls = {
-      'gen-script': [() => post(`${base}/script`, {}), '正在生成本集剧本…'],
-      'gen-all-scripts': [() => post(`/api/projects/${d.project.id}/episodes/scripts`, {}), '正在生成全部剧集剧本…'],
+      'gen-script': [() => post(`${base}/script`, withModelId('episode', {})), '正在生成本集剧本…'],
+      'gen-all-scripts': [() => post(`/api/projects/${d.project.id}/episodes/scripts`, withModelId('episode', {})), '正在生成全部剧集剧本…'],
       'redetect-chars': [() => post(`${base}/characters`, {}), '正在重新识别本集角色…'],
       'gen-grids': [() => post(`${base}/grids`, {}), '正在生成宫格分镜…'],
       'gen-grid-one': [() => post(`${base}/grids`, { segmentNo: Number(b.dataset.seg) }), '正在生成该段宫格图…'],

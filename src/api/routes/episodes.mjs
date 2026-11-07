@@ -9,7 +9,7 @@ import { MATCH } from './match.mjs';
 import { loadProject, saveProject } from '../../core/store.mjs';
 import { ensureManagement, stepProgress } from '../../core/project-steps.mjs';
 import { emit } from '../../core/events.mjs';
-import { loadComfyConfig } from '../../core/comfy-config.mjs';
+import { resolveComfyConfig } from '../../core/comfy-config.mjs';
 import { appSettingsSummary } from '../../core/app-settings.mjs';
 import { buildEpisodeGraph, matchEpisodeCharacters, reconstructEpisodeText, splitSegments } from '../../core/episode-model.mjs';
 import {
@@ -47,7 +47,8 @@ export async function handleEpisodes(req, res, url) {
   if (!project) return fail(res, '项目不存在', 404);
   const m = ensureManagement(project);
   if (m.kind !== 'novel') return fail(res, '只有漫剧创作项目才有剧集详情');
-  const cfg = { ...loadComfyConfig(), ...(project.settings?.comfy || {}) };
+  // 项目生效配置：全局 + 项目覆盖，图片规格（宽高/步数/CFG）由画幅自动决定
+  const cfg = resolveComfyConfig(project);
   const log = (level, message) => emit('log', { projectId: id, level, message: `剧集 · ${message}` });
 
   /* ---------- 批量生成本项目全部分集剧本 ---------- */
@@ -55,9 +56,10 @@ export async function handleEpisodes(req, res, url) {
     if (method !== 'POST') return fail(res, '需要 POST', 405);
     const list = m.episodes || [];
     if (!list.length) return fail(res, '尚未拆分剧集');
+    const body = await readBody(req);
     const done = [];
     for (const ep of list) {
-      await generateEpisodeScript(project, m, ep, { log });
+      await generateEpisodeScript(project, m, ep, { log, modelId: body.modelId });
       done.push(ep.no);
       emit('episode:progress', { projectId: id, done: done.length, total: list.length, episodeNo: ep.no, kind: 'script' });
     }
@@ -113,7 +115,7 @@ export async function handleEpisodes(req, res, url) {
   /* ---------- 生成本集剧本 ---------- */
   if (action === 'script') {
     try {
-      const script = await generateEpisodeScript(project, m, ep, { log });
+      const script = await generateEpisodeScript(project, m, ep, { log, modelId: body.modelId });
       commit(project, ep, 'script');
       return json(res, {
         ok: true, script,

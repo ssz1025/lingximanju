@@ -10,19 +10,37 @@ const SKIP_KEY = 'lx.skipConfigCheck';
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+/** 文本模型是否就绪：旧全局 llm 配齐，或模型库默认档案（activeModelId 指向）可用。
+ *  与后端 resolveModelSettings 的解析优先级保持一致：默认档案 > 旧全局 llm。 */
+export function llmReady(settings) {
+  if (settings?.llm?.configured) return true;
+  const models = Array.isArray(settings?.models) ? settings.models : [];
+  const active = models.find((m) => m.id === settings?.activeModelId);
+  return Boolean(active?.configured);
+}
+
+/** 就绪时的展示名：优先模型库默认档案，其次旧全局 llm */
+export function llmReadyLabel(settings) {
+  const models = Array.isArray(settings?.models) ? settings.models : [];
+  const active = models.find((m) => m.id === settings?.activeModelId);
+  if (active?.configured) return { name: active.name || active.model || active.baseUrl, maskedKey: active.maskedKey || '' };
+  const llm = settings?.llm || {};
+  return { name: `${llm.provider} · ${llm.model || '默认模型'}`, maskedKey: llm.maskedKey || '' };
+}
+
 /** 是否需要提示：文本模型未配置 或 本地 ComfyUI 工作流未导入 */
 export function configNeedsAttention(settings, comfy) {
-  const llm = settings?.llm || {};
-  const llmOk = Boolean(llm.configured);
+  const llmOk = llmReady(settings);
   const comfyOk = Boolean(comfy?.imageWorkflow || comfy?.videoWorkflow);
   return !llmOk || !comfyOk;
 }
 
 export function configDetail(settings, comfy) {
-  const llm = settings?.llm || {};
+  const llmOk = llmReady(settings);
+  const ready = llmOk ? llmReadyLabel(settings) : null;
   return {
-    llmOk: Boolean(llm.configured),
-    llmText: llm.configured ? `${esc(llm.provider)} · ${esc(llm.model || '默认模型')} · ${esc(llm.maskedKey || '')}` : '未配置 · 当前使用内置 Mock 模板',
+    llmOk,
+    llmText: llmOk ? `${esc(ready.name)} · ${esc(ready.maskedKey)}` : '未配置 · 当前使用内置 Mock 模板',
     comfyImageOk: Boolean(comfy?.imageWorkflow),
     comfyVideoOk: Boolean(comfy?.videoWorkflow),
     comfyText: comfy?.baseUrl ? `本地服务 ${esc(comfy.baseUrl)}` : '默认 http://127.0.0.1:8188',

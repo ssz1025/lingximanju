@@ -504,5 +504,10 @@ export function projectIndex(p) {
     deliverables: m.deliverables || { video: true, pack: true },
     cover: m.cover || { url: '', source: 'name', updatedAt: 0, prompt: '' },
     hasPack: !!(p.nodes || []).find((n) => n.type === 'final')?.data?.directorPack?.file,
+    // LLM 配置摘要（绝不含明文 Key）：「已配置模型清单」据此免解析完整项目 JSON
+    llm: {
+      provider: p.settings?.provider, model: p.settings?.model,
+      baseUrl: p.settings?.baseUrl, hasApiKey: Boolean(p.settings?.apiKey),
+    },
   };
 }

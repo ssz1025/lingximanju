@@ -7,9 +7,11 @@
  * 纯自主实现，无框架依赖；弹窗结构照搬 openCoverDialog 的 backdrop 模式。
  * ==========================================================================*/
 import { toast } from './panels.js';
+import { collectProjectAssets } from './project-sidebar.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
 const fmtTime = (ts) => {
   const d = new Date(Number(ts));
@@ -51,12 +53,16 @@ function cellMedia(a) {
  * @param {'manage'|'pick'} o.mode    manage=管理（筛选/搜索/打标/预览/删除）；pick=选择并回调
  * @param {'all'|'image'|'video'} o.accept  pick 模式下限制可选类型
  * @param {boolean} [o.multi]        pick 模式多选：点击勾选，确认后按勾选顺序回调全部所选
+ * @param {string[]} [o.files]      manage 模式限定只显示这些文件（项目侧栏的「本项目资源」）
+ * @param {object} [o.project]      项目会话：按项目 JSON 引用动态算出白名单，默认「仅本项目」
  * @param {(asset)=>void} o.onPick    pick 模式选中回调；multi 模式下回调资产数组
  */
 export function openAssetLibrary(o = {}) {
   const mode = o.mode === 'pick' ? 'pick' : 'manage';
   const multi = mode === 'pick' && o.multi === true;
   const accept = ['image', 'video'].includes(o.accept) ? o.accept : 'all';
+  let fileScope = Array.isArray(o.files) ? new Set(o.files) : null; // 项目侧栏传入的资源白名单
+  let scopeProject = o.project || null;   // 项目会话打开：每次重载都按最新项目数据重算范围
   let assets = [];
   let stats = null;
   let filter = 'all';            // 类型/角色筛选（kind 优先，回退 type）
@@ -73,9 +79,14 @@ export function openAssetLibrary(o = {}) {
 
   const load = async () => {
     const d = await api('/api/assets');
-    assets = d.assets || [];
+    const all = d.assets || [];
+    assets = all;
     stats = d.stats || null;
     if (accept !== 'all') assets = assets.filter((a) => a.type === accept);
+    // 项目会话：以项目 JSON 的 /assets/ 引用 + 索引里的 sourceProjectId 为准；
+    // 产物落盘后重新载入也不会漏掉新资源。点「查看全部资源」可退出范围。
+    if (scopeProject) fileScope = new Set(collectProjectAssets(scopeProject, all).map((a) => a.file));
+    if (fileScope) assets = assets.filter((a) => fileScope.has(a.file));
   };
 
   /** 当前筛选条件下可见的资源（类型 → 标签 → 来源项目 → 搜索，逐层收窄） */
@@ -121,10 +132,14 @@ export function openAssetLibrary(o = {}) {
       .map(([id, name]) => `<button class="asset-chip proj${projectFilter === id ? ' on' : ''}" data-proj="${esc(id)}" title="${esc(name)}">⌂ ${esc(name.length > 12 ? name.slice(0, 12) + '…' : name)}</button>`).join('');
     const activeTags = tagFilter || projectFilter || query
       ? `<button class="asset-chip clear" data-clear>✕ 清除筛选</button>` : '';
+    const scopeChip = fileScope
+      ? `<button class="asset-chip proj on" data-unscope title="退出本项目范围，查看全部资源">⌂ 仅${scopeProject?.name ? `「${esc(cut(scopeProject.name, 10))}」` : '本项目'} · 查看全部资源 ✕</button>` : '';
 
     const grid = gridHTML(shown);
 
-    const st = stats ? `共 ${stats.total} 项 · ${fmtBytes(stats.bytes)}${stats.tagCount ? ` · ${stats.tagCount} 个标签` : ''}` : `${assets.length} 项`;
+    const st = fileScope
+      ? `${scopeProject?.name ? `「${esc(cut(scopeProject.name, 12))}」` : '本项目'} ${assets.length} 项`
+      : (stats ? `共 ${stats.total} 项 · ${fmtBytes(stats.bytes)}${stats.tagCount ? ` · ${stats.tagCount} 个标签` : ''}` : `${assets.length} 项`);
     backdrop.innerHTML = `<div class="modal asset-modal" role="dialog" aria-label="资源库">
       <div class="pmm-head"><div><h2>▣ 资源库</h2><div class="sub">${mode === 'pick' ? (multi ? '点击勾选，可多选后按勾选顺序使用' : '点击资源即可选用') : `${st} · 生成的封面 / 角色 / 片段统一管理，可打标签跨项目复用`}</div></div>
         <button class="icon-btn" data-act="close" aria-label="关闭">✕</button></div>
@@ -137,7 +152,7 @@ export function openAssetLibrary(o = {}) {
           <input class="asset-search" id="asset-search" type="search" placeholder="搜索名称 / 标签 / 来源项目…" value="${esc(query)}">
         </div>
       </div>
-      ${(tagChips || projChips) ? `<div class="asset-filters sub">${tagChips}${projChips}${activeTags}</div>` : ''}
+      ${(tagChips || projChips || scopeChip) ? `<div class="asset-filters sub">${scopeChip}${tagChips}${projChips}${activeTags}</div>` : ''}
       ${multi ? `<div class="asset-selbar"><b>${selSet.size}</b> 项已选（按勾选顺序返回）
         <button class="btn sm" data-sel-all>全选本页</button>
         <button class="btn sm" data-sel-clear ${selSet.size ? '' : 'disabled'}>清空</button>
@@ -202,6 +217,10 @@ export function openAssetLibrary(o = {}) {
     });
     backdrop.querySelectorAll('[data-tag]').forEach((c) => c.addEventListener('click', () => { tagFilter = tagFilter === c.dataset.tag ? '' : c.dataset.tag; render(); }));
     backdrop.querySelectorAll('[data-proj]').forEach((c) => c.addEventListener('click', () => { projectFilter = projectFilter === c.dataset.proj ? '' : c.dataset.proj; render(); }));
+    backdrop.querySelector('[data-unscope]')?.addEventListener('click', async () => {
+      fileScope = null; scopeProject = null; filter = 'all'; projectFilter = ''; tagFilter = ''; query = '';
+      await load(); render();
+    });
     backdrop.querySelector('[data-clear]')?.addEventListener('click', () => { tagFilter = ''; projectFilter = ''; query = ''; render(); });
     const search = backdrop.querySelector('#asset-search');
     search?.addEventListener('input', (e) => {
@@ -215,7 +234,13 @@ export function openAssetLibrary(o = {}) {
 
     function shown2() { return visible(); }
     function gridHTML(list) {
-      if (!list.length) return `<div class="asset-empty">${assets.length ? '没有匹配的资源<br><small>试试清除筛选或换个关键词</small>' : '资源库为空——生成封面、运行流水线后，产出会自动收录到这里'}</div>`;
+      if (!list.length) {
+        const empty = fileScope && !assets.length
+          ? '当前项目还没有资源<br><small>生成封面、角色定妆图、运行流水线或导出导演包后会自动出现在这里</small>'
+          : assets.length ? '没有匹配的资源<br><small>试试清除筛选或换个关键词</small>'
+            : '资源库为空——生成封面、运行流水线后，产出会自动收录到这里';
+        return `<div class="asset-empty">${empty}</div>`;
+      }
       return `<div class="asset-grid">${list.map((a) => `<div class="asset-cell${selSet.has(a.file) ? ' selected' : ''}" data-file="${esc(a.file)}" title="${esc(a.name)}">
           <div class="asset-media">${cellMedia(a)}</div>
           <div class="asset-meta">

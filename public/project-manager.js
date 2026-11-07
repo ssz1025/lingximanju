@@ -5,6 +5,7 @@
  * ==========================================================================*/
 import { openAssetLibrary } from './asset-manager.js';
 import { openAIChat } from './ai-chat.js';
+import { ensureModelPicker, withModelId } from './model-picker.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -295,7 +296,7 @@ export function openCoverDialog(ctx = {}) {
   /** 与封面助手对话一轮：AI 回复 + 提示词；autoGenerate=true 时链式直接调 ComfyUI 出图 */
   async function roundChat(ui, opts = {}) {
     try {
-      const d = await api(`/api/projects/${p.id}/cover/chat`, { messages: ui.history(), refs: refsPayload() });
+      const d = await api(`/api/projects/${p.id}/cover/chat`, withModelId('cover', { messages: ui.history(), refs: refsPayload() }));
       lastPrompt = String(d.prompt || '');
       lastNegative = String(d.negative || '');
       if (d.fellBack) toast('LLM 未返回有效结果，已用内置模板生成提示词', 'warn');
@@ -326,9 +327,9 @@ export function openCoverDialog(ctx = {}) {
   async function doGenerate(ui) {
     ui.setBusy(true, 'ComfyUI 正在生成封面（约 1–2 分钟）…');
     try {
-      const d = await api(`/api/projects/${p.id}/cover/generate`, {
+      const d = await api(`/api/projects/${p.id}/cover/generate`, withModelId('cover', {
         prompt: lastPrompt, negative: lastNegative, refs: refsPayload(),
-      });
+      }));
       const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
       // 生成结果带上实际使用的提示词：确认保存时原样回传落盘（只用这提示词、完整保存）
       const g = { ...(d.generated || {}), prompt: d.prompt || lastPrompt, promptId: d.promptId || '' };
@@ -418,6 +419,7 @@ export function openCoverDialog(ctx = {}) {
     title: '🖼 项目封面',
     subtitle: `${p.name} · 对话式封面创作`,
     placeholder: '描述你想要的封面（如「水墨风、留白多、带点孤寂感」）…',
+    modelEntry: 'cover',
     welcome: {
       role: 'assistant',
       text: `我是封面创作助手，已了解《${p.name}》的资料${cover.url ? '，当前封面如下（点击可放大），可随时替换' : ''}。`
@@ -774,6 +776,7 @@ function charCardHTML(c, gen = { charId: null }) {
         ${(c.aliases || []).map((a) => `<span class="pmm-chip">${esc(a)}</span>`).join('')}
         <span class="pmm-chip">${esc(srcLabel)}</span></div>
       ${c.role ? `<div class="pmm-char-role">${esc(c.role)}</div>` : ''}
+      ${c.style ? `<div class="pmm-char-desc">设定风格：${esc(cut(c.style, 60))}</div>` : ''}
       ${c.personality ? `<div class="pmm-char-desc">${esc(cut(c.personality, 60))}</div>` : ''}
       <div class="pmm-char-pal">${(c.palette || []).map((col) => `<i style="background:${esc(col)}"></i>`).join('')}</div>
     </div>
@@ -814,6 +817,8 @@ export function openCharacterEditor(char = {}, onSave) {
           <div class="field"><label>随身物件</label><input id="ce-props" value="${esc(char.props || '')}"></div>
           <div class="field" style="grid-column:1/-1"><label>服装 / 配饰</label><textarea id="ce-costume" rows="2">${esc(char.costume || '')}</textarea></div>
         </div>
+        <div class="field"><label>设定风格（一句话总结，驱动多视图与关键帧）</label>
+          <input id="ce-style" maxlength="120" value="${esc(char.style || '')}" placeholder="如：古风玄幻 · 清冷剑修，白衣墨发，水墨淡彩"></div>
         <div class="cf-section"><h4>人物关系</h4>
           <div class="char-rel-list">${relations.map((r, i) => `
             <div class="char-rel-row">
@@ -857,6 +862,7 @@ export function openCharacterEditor(char = {}, onSave) {
         role: val('#ce-role'), gender: val('#ce-gender'), age: val('#ce-age'),
         personality: val('#ce-personality'), appearance: val('#ce-appearance'),
         hair: val('#ce-hair'), costume: val('#ce-costume'), props: val('#ce-props'),
+        style: val('#ce-style'),
         relations: relations.filter((r) => r.target || r.label),
         palette: [...backdrop.querySelectorAll('[data-pal]')].map((el) => el.value),
         viewPrompt: val('#ce-view-prompt'),
@@ -946,6 +952,8 @@ export function openProjectManager(ctx = {}) {
         ? `<div class="pmm-chars">${chars.map((c) => charCardHTML(c, viewGen)).join('')}</div>`
         : '<div class="cf-note">还没有角色。可从小说自动提取（LLM 优先、启发式兜底），或手动新增角色。</div>'}
       </div>`;
+    // 模型选择器：提取与多视图生成都用它选中的模型（库为空时不出现）
+    ensureModelPicker('chars', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
     body.querySelector('#pmm-char-add').addEventListener('click', () => {
       openCharacterEditor({}, (obj) => manage('char-upsert', obj));
     });
@@ -955,7 +963,7 @@ export function openProjectManager(ctx = {}) {
       btns.forEach((b) => { b.disabled = true; });
       if (status) status.textContent = mode === 'heuristic' ? '启发式提取中…' : 'LLM 提取中，可能需要 30 秒以上，请耐心等待…';
       try {
-        const d = await api(`/api/projects/${ctx.project.id}/characters/extract`, { mode });
+        const d = await api(`/api/projects/${ctx.project.id}/characters/extract`, withModelId('chars', { mode }));
         toast(d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`, d.fellBack ? 'err' : 'ok');
         await refresh();
         await ctx.onChanged?.();
@@ -977,10 +985,10 @@ export function openProjectManager(ctx = {}) {
       btn.textContent = '✦ 批量生成中…';
       if (status) status.textContent = '正在准备批量生成…';
       try {
-        const d = await api(`/api/projects/${ctx.project.id}/characters/views/all`, {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views/all`, withModelId('chars', {
           allViews: body.querySelector('#pmm-char-all-views')?.checked === true,
           onlyMissing: body.querySelector('#pmm-char-only-missing')?.checked !== false,
-        });
+        }));
         toast(d.message || '批量生成完成', d.failed?.length ? 'warn' : 'ok');
         if (status) status.textContent = d.message || '';
         await refresh();
@@ -1015,7 +1023,7 @@ export function openProjectManager(ctx = {}) {
       viewGen = { charId: c.id, current: i + 1, total: CHARACTER_VIEWS.length };
       render();
       try {
-        await api(`/api/projects/${ctx.project.id}/characters/views`, { characterId: c.id, view: v.key });
+        await api(`/api/projects/${ctx.project.id}/characters/views`, withModelId('chars', { characterId: c.id, view: v.key }));
         okCount += 1;
       } catch (e) { fails.push(`${v.label}：${e.message}`); }
     }

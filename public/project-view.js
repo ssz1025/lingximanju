@@ -10,6 +10,8 @@
  * 画布视图仍保留，顶栏一键切换（高级编辑）。
  * 零第三方依赖，原生 ESM。
  * ==========================================================================*/
+import { ensureModelPicker, withModelId } from './model-picker.js';
+
 const $ = (id) => document.getElementById(id);
 const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
@@ -468,7 +470,16 @@ function bindEvents(host, ctx, { def, m }) {
   const p = ctx.project;
   const toast = ctx.toast || (() => {});
   const q = (sel) => host.querySelector(sel);
-  const rerender = () => renderProjectView(host, ctx);
+  const rerender = () => { renderProjectView(host, ctx); mountModelPickers(); };
+  /** 各 AI 入口旁的模型下拉（rerender 会重建 DOM，每次重挂；选择由 localStorage 记忆） */
+  const mountModelPickers = () => {
+    const aiFill = q('[data-act="ai-fill"]');
+    if (aiFill && !host.querySelector('[data-model-pick="bible"]')) ensureModelPicker('bible', aiFill.parentElement, aiFill);
+    const novelBtn = host.querySelector('[data-ai="outline"]');
+    if (novelBtn && !host.querySelector('[data-model-pick="novel"]')) ensureModelPicker('novel', novelBtn.parentElement, novelBtn);
+    const charBtn = host.querySelector('[data-act="char-extract"]');
+    if (charBtn && !host.querySelector('[data-model-pick="chars"]')) ensureModelPicker('chars', charBtn.parentElement, charBtn);
+  };
   const manage = async (action, value, silent = false) => {
     try {
       const d = await api(`/api/projects/${p.id}/manage`, { action, value });
@@ -513,7 +524,7 @@ function bindEvents(host, ctx, { def, m }) {
     if (!idea) { toast('先填一句故事构想，AI 才有依据', 'err'); q('#pv-bi-idea')?.focus(); return; }
     e.target.disabled = true; e.target.textContent = 'AI 补全中…';
     try {
-      const d = await api(`/api/projects/${p.id}/bible/ai`, { idea });
+      const d = await api(`/api/projects/${p.id}/bible/ai`, withModelId('bible', { idea }));
       toast(d.message || '已补全', 'ok');
       ui.info = {};
       ui.skipCapture = true;   // 服务端已改写 bible：丢弃 DOM 里的旧编辑稿，直接渲染新数据
@@ -635,9 +646,9 @@ function bindEvents(host, ctx, { def, m }) {
     if (act === 'outline') {
       ui.ai.busy = true; ui.ai.busyText = '生成大纲中…'; ui.ai.message = '正在生成大纲…'; rerender();
       try {
-        const d = await api(`/api/projects/${p.id}/novel/ai`, {
+        const d = await api(`/api/projects/${p.id}/novel/ai`, withModelId('novel', {
           mode: 'outline', idea: ui.ai.idea, chapterCount: ui.ai.chapterCount,
-        });
+        }));
         ui.ai.outline = d.outline; ui.ai.source = d.source; ui.ai.message = d.message || '';
       } catch (e2) { ui.ai.message = e2.message; toast(e2.message, 'err'); }
       ui.ai.busy = false; ui.ai.busyText = ''; rerender();
@@ -645,10 +656,10 @@ function bindEvents(host, ctx, { def, m }) {
       captureState(host);
       ui.ai.busy = true; ui.ai.busyText = '逐章生成正文中…'; ui.ai.message = '正在逐章生成正文，LLM 模式下可能需要几分钟…'; rerender();
       try {
-        const out = await api(`/api/projects/${p.id}/novel/ai`, {
+        const out = await api(`/api/projects/${p.id}/novel/ai`, withModelId('novel', {
           mode: 'full', idea: ui.ai.idea, outline: ui.ai.outline,
           chapterCount: ui.ai.chapterCount, chapterChars: ui.ai.chapterChars, split: m.split,
-        });
+        }));
         toast(`✦ ${out.message}`, 'ok');
         ui.ai = { open: false, idea: ui.ai.idea, chapterCount: ui.ai.chapterCount, chapterChars: ui.ai.chapterChars, outline: null, source: '', message: '', busy: false, busyText: '' };
         ui.stepId = 'episodes';
@@ -676,7 +687,7 @@ function bindEvents(host, ctx, { def, m }) {
   host.querySelectorAll('[data-act="char-extract"]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true; b.textContent = '提取中…';
     try {
-      const d = await api(`/api/projects/${p.id}/characters/extract`, { mode: b.dataset.mode });
+      const d = await api(`/api/projects/${p.id}/characters/extract`, withModelId('chars', { mode: b.dataset.mode }));
       toast(d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`, d.fellBack ? 'err' : 'ok');
       await ctx.onChanged?.();
       rerender();
@@ -689,6 +700,7 @@ function bindEvents(host, ctx, { def, m }) {
   }));
   q('[data-act="dl-film"]')?.addEventListener('click', () => { window.location.href = `/api/projects/${p.id}/film`; });
   q('[data-act="dl-pack"]')?.addEventListener('click', () => ctx.onDownloadPack?.());
+  mountModelPickers();
 }
 
 /** 首页流程卡片「进入这一步」：切到工作台并定位对应步骤操作台 */
