@@ -5,7 +5,8 @@
  * 与 public/canvas.js 的区别：这是只读的资源关系视图，自带平移 / 缩放 / 节点拖动 /
  * 点击检查器，不依赖任何全局 DOM id，可反复挂载在剧集详情页里。
  * ==========================================================================*/
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+import { esc } from './utils.js';
+
 const NODE_W = 208;
 const NODE_H = 78;
 const COLORS = {

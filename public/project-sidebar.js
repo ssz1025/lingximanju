@@ -15,8 +15,9 @@
  * 里 sourceProjectId === 当前项目的条目，避免索引未回写时漏项。
  * 零第三方依赖，原生 ESM；collectProjectAssets 是纯函数，可在 Node 下单测。
  * ==========================================================================*/
-const esc = (s = '') => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
+import { seasonGroups } from './project-model.js';
+import { esc, cut } from './utils.js';
+
 const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 const fmtTime = (ts) => ts ? new Date(Number(ts)).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '';
 const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '文件' };
@@ -27,7 +28,7 @@ const FILTERS = [
   { key: 'pack', label: '导演包' },
   { key: 'other', label: '其他' },
 ];
-const PAGE_SIZE = 5;   // 首屏给「项目设置」留位置；其余项点「展开」或进资源库查看
+const PAGE_SIZE = 3;   // 首屏给「项目设置」留位置；完整资源统一到工作台「资源」Tab
 
 function typeFromExt(file) {
   const ext = String(file).split('.').pop().toLowerCase();
@@ -114,6 +115,7 @@ export function projectChrome(project, opts = {}) {
     foot: '本地运行 · 数据仅保存在 data/',
     homeStatus: `共 ${projectCount} 个项目`,
     assetLibTitle: '资源库：全部项目已生成资源统一管理',
+    title: 'lingximanju · 项目列表',
     inProject: false,
   };
   if (!project || typeof project !== 'object' || view === 'home') return home;
@@ -124,8 +126,9 @@ export function projectChrome(project, opts = {}) {
   const name = String(project.name || '未命名项目');
   const titles = { workshop: '项目工作台', canvas: '画布编辑', episode: '剧集详情' };
   const isNovel = m.kind === 'novel';
+  const seasonCount = seasonGroups(project).length;
   const foot = isNovel
-    ? `本项目 · ${eps} 集 · ${nodes} 节点 · 数据保存在 data/`
+    ? `本项目 · ${seasonCount} 季 ${eps} 集 · ${nodes} 节点 · 数据保存在 data/`
     : `本项目 · ${nodes} 节点 · ${edges} 连线 · 数据保存在 data/`;
   return {
     brandTitle: titles[view] || '项目工作台',
@@ -133,7 +136,33 @@ export function projectChrome(project, opts = {}) {
     foot,
     homeStatus: '',
     assetLibTitle: `本项目资源库 · ${name}`,
+    title: `${name} · ${titles[view] || '项目工作台'}${view === 'episode' ? ` · 第 ${Number(episodeNo) || 1} 集` : ''}`,
     inProject: true,
+  };
+}
+
+/**
+ * 画布工具区的「本项目」统计。纯函数，不碰 DOM / 网络。
+ * 模板 / 节点库 / 智能体不再罗列全应用定义，而是以当前项目的节点图为依据标注使用情况。
+ * @param {object} project 当前项目
+ * @param {object} [nodeTypes] NODE_TYPES（type → {agent} 等定义）
+ * @returns {{typeCount: object, agentCount: object, nodeCount: number, templateId: string}}
+ */
+export function collectToolStats(project, nodeTypes = {}) {
+  const nodes = Array.isArray(project?.nodes) ? project.nodes : [];
+  const typeCount = {};
+  const agentCount = {};
+  for (const n of nodes || []) {
+    const t = String(n?.type || '');
+    if (t) typeCount[t] = (typeCount[t] || 0) + 1;
+    const a = String(n?.agent || n?.agentId || nodeTypes[t]?.agent || '');
+    if (a) agentCount[a] = (agentCount[a] || 0) + 1;
+  }
+  return {
+    typeCount,
+    agentCount,
+    nodeCount: nodes.length,
+    templateId: String(project?.mode || ''),
   };
 }
 
@@ -172,6 +201,7 @@ function shellHTML(p, ctx) {
   const done = steps.filter((s) => s.status === 'done').length;
   const percent = total ? Math.round(done / total * 100) : 0;
   const eps = Array.isArray(m.episodes) ? m.episodes : [];
+  const groups = seasonGroups(p);
   const kindLabel = m.kind === 'novel' ? '小说分集创作' : '标准流水线';
   const v = ctx.view || 'workshop';
   return `
@@ -193,9 +223,24 @@ function shellHTML(p, ctx) {
         <button data-nav="canvas" class="${v === 'canvas' ? 'on' : ''}">⬡ 画布</button>
         <button data-nav="manage">▤ 管理</button>
       </nav>
+      <div class="ps-links">
+        <button data-act="tab-source" title="查看导入原著与数据统计">📖 原著</button>
+        <button data-act="tab-episodes" title="按季管理分集与独立画布">▥ 分季</button>
+        <button data-act="tab-assets" title="归纳本项目全部资源">▣ 资源</button>
+        <button data-act="overall-canvas" title="打开全部组合画布">🌐 组合</button>
+      </div>
       ${eps.length ? `<div class="ps-eps">
-        <div class="ps-eps-head"><span>剧集</span><button data-act="episodes">全部 ${eps.length} 集 ›</button></div>
-        <div class="ps-eps-list">${eps.slice(0, 3).map((e) => `<button data-ep="${Number(e.no) || 0}" class="${v === 'episode' && Number(ctx.episodeNo) === Number(e.no) ? 'on' : ''}" title="${esc(e.title || `第 ${e.no} 集`)}"><i>${Number(e.no) || '·'}</i><span>${esc(cut(e.title || `第 ${e.no} 集`, 11))}</span></button>`).join('')}</div>
+        <div class="ps-eps-head"><span>季 / 集 · ${groups.length} 季</span><button data-act="episodes">全部 ${eps.length} 集 ›</button></div>
+        ${groups.map((g) => `<div class="ps-season">
+          <div class="ps-season-head"><span>S${g.no} ${esc(cut(g.title, 10))}</span><em>${g.episodes.length} 集</em></div>
+          <div class="ps-season-eps">${g.episodes.slice(0, 3).map((e) => {
+            const no = Number(e.no) || 0;
+            return `<div class="ps-ep-row">
+              <button class="ps-ep-open ${v === 'episode' && Number(ctx.episodeNo) === no ? 'on' : ''}" data-ep="${no}" title="${esc(e.title || `第 ${no} 集`)}"><i>${no || '·'}</i><span>${esc(cut(e.title || `第 ${no} 集`, 10))}</span></button>
+              <button class="ps-ep-canvas" data-ep-canvas="${no}" title="打开第 ${no} 集独立画布">⬡</button>
+            </div>`;
+          }).join('')}${g.episodes.length > 3 ? `<button class="ps-season-more" data-act="episodes">还有 ${g.episodes.length - 3} 集 ›</button>` : ''}</div>
+        </div>`).join('')}
       </div>` : ''}
     </section>
 
@@ -210,14 +255,17 @@ function shellHTML(p, ctx) {
     </section>
 
     <section class="side-section ps-section">
-      <div class="section-head"><span>项目设置</span></div>
+      <div class="section-head"><span>项目设置</span><span class="ps-set-mini">
+        <button data-act="theme" title="切换主题 (T)">◐</button>
+        <button data-act="help" title="本项目快捷键与操作指引 (?)">?</button>
+      </span></div>
       <div class="ps-settings">
         <button data-act="overview" title="项目概览：名称 / 备注 / 收藏 / 封面"><b>▦</b>项目信息</button>
         <button data-act="bible" title="类型 / 受众 / 基调 / 画风等创作设定"><b>✎</b>创作设定</button>
         <button data-act="characters" title="角色库与定妆图"><b>👤</b>角色</button>
         <button data-act="deliverables" title="交付物与产物下载"><b>✦</b>交付物</button>
         <button data-act="cover" title="设置项目封面"><b>🖼</b>项目封面</button>
-        <button data-act="settings" title="文本大模型 / ComfyUI 工作流（全局）"><b>⚙</b>模型设置</button>
+        <button data-act="settings" title="本项目运行参数（模型库与连接配置为应用级共享）"><b>⚙</b>模型与运行</button>
         <button data-act="export" title="导出当前项目 JSON"><b>⇩</b>导出项目</button>
       </div>
     </section>`;
@@ -290,7 +338,7 @@ function openAssetPreview(a) {
 
 /* ---------------------------------------------------------------- 事件委托 */
 function onClick(e) {
-  const el = e.target.closest('[data-act], [data-nav], [data-kind], [data-file], [data-ep]');
+  const el = e.target.closest('[data-act], [data-nav], [data-kind], [data-file], [data-ep], [data-ep-canvas]');
   if (!el) return;
   const c = latestCtx;
   const host = document.getElementById('project-sidebar');
@@ -302,12 +350,17 @@ function onClick(e) {
     return;
   }
   if (el.dataset.ep) { c.onEpisode?.(Number(el.dataset.ep)); return; }
+  if (el.dataset.epCanvas) { c.onEpisodeCanvas?.(Number(el.dataset.epCanvas)); return; }
   if (el.dataset.kind) { ui.filter = el.dataset.kind; ui.showAll = false; paintAssets(host, currentAssets); return; }
   if (el.dataset.file) { openAssetPreview(currentAssets.find((a) => a.file === el.dataset.file)); return; }
 
   switch (el.dataset.act) {
     case 'home': c.onHome?.(); break;
-    case 'episodes': c.onManage?.('episodes'); break;
+    case 'episodes': c.onWorkshopTab?.('episodes'); break;
+    case 'tab-source': c.onWorkshopTab?.('source'); break;
+    case 'tab-episodes': c.onWorkshopTab?.('episodes'); break;
+    case 'tab-assets': c.onWorkshopTab?.('assets'); break;
+    case 'overall-canvas': c.onOverallCanvas?.(); break;
     case 'assets': c.onOpenAssets?.(currentAssets.map((a) => a.file)); break;
     case 'more': ui.showAll = true; paintAssets(host, currentAssets); break;
     case 'refresh-assets':
@@ -321,6 +374,8 @@ function onClick(e) {
     case 'deliverables': c.onManage?.('deliverables'); break;
     case 'cover': c.onCover?.(); break;
     case 'settings': c.onSettings?.(); break;
+    case 'theme': c.onTheme?.(); break;
+    case 'help': c.onHelp?.(); break;
     case 'export': c.onExport?.(); break;
     default: break;
   }

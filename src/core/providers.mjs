@@ -13,7 +13,21 @@ const SCHEMAS = {
   events: '事件图谱：{events:[{title,summary,processChain:[字符串],scenes:[{title,location,time,summary}]}]}',
   shots: '分镜表：{shots:[{shotNo,size,angle,movement,ffDesc,motionDesc,audioDesc,duration,characters:[名称]}]}',
   characters: '角色设定：{characters:[{name,role,appearance,palette:[颜色],traits:[字符串]}]}',
-  charExtract: '角色抽取：{characters:[{name,aliases:[string],role,gender,age,personality,appearance,hair,costume,props,style:string(基本设定风格：综合该角色的提取信息输出一句话造型风格总结，须同时覆盖 ①题材/画风气质（如古风玄幻、赛博朋克、校园清新）②造型方向（发型、服装、轮廓等关键特征）③主配色倾向与整体氛围；30~40 字，风格统一便于跨镜头定妆，例：「古风玄幻 · 清冷剑修，白衣墨发佩长剑，水墨淡彩冷色调」),relations:[{target,label}],palette:[颜色],viewPrompt}]}',
+  // 角色抽取：论文 ViMax「Character Extractor」方法论的结构化映射
+  //   static_features  = 不随场景变化的外貌/体型（跨镜头恒定，保证身份一致）
+  //   dynamic_features = 服饰/配饰/随身物品（随场景可变）
+  //   aliases          = 同一实体的多种称呼（原文用过的别称都列出，便于跨集归并）
+  charExtract: '角色抽取：{characters:[{name,aliases:[string](原文中出现过的别称/昵称/职务，同一实体的多种称呼都要列出),role,gender,age,personality,appearance,hair,costume,props,staticFeatures:string(固定特征：脸型五官、发型发色、体型、肤色等不随场景变化的外貌特征，40~80 字，须具体可视化，不要写「气质出众」这类抽象词),dynamicFeatures:string(可变特征：服装、配饰、随身道具等会随场景变化的造型元素，30~60 字，须具体到颜色与款式),style:string(基本设定风格：综合该角色的提取信息输出一句话造型风格总结，须同时覆盖 ①题材/画风气质（如古风玄幻、赛博朋克、校园清新）②造型方向（发型、服装、轮廓等关键特征）③主配色倾向与整体氛围；30~40 字，风格统一便于跨镜头定妆，例：「古风玄幻 · 清冷剑修，白衣墨发佩长剑，水墨淡彩冷色调」),relations:[{target,label}],palette:[颜色](该角色的主色，用于定妆配色，须与其他角色明显不同),viewPrompt:string(定妆画面提示词：一句话概括该角色的标志性外观，20~40 字，供生成三视图参考),evidence:[{quote:string(该角色在输入原著片段中逐字出现的一句完整原文，不得超过 60 字),kind:string(mention|dialogue|description)}](证据引用：每个角色 1~3 条，全部来自下方「原著片段」，用于回溯校验与幻觉过滤)]}',
+  // 角色抽取的推理准则：对应 ViMax character_extractor.py 的 Guidelines 段
+  charExtractGuide: [
+    '只依据输入的原著片段抽取角色，不得引入片段之外的设定；片段未写明但必需的外观特征可以依据题材与上下文合理补全，但不得与原文矛盾。',
+    '同一实体在原文中出现的所有称呼（姓名、昵称、职务、称谓）都要归并到同一个角色，其余写法列入 aliases。',
+    '原文未点名、以身份或外貌指代的关键角色，也要提取并用「身份+外貌特征」命名（如「穿灰风衣的刑警队长」）。',
+    '与主线无关的背景群众不单独建角色。',
+    'staticFeatures 只写跨场景恒定的外貌体型，dynamicFeatures 只写会变的服饰配饰；两者都不要写性格、身份定位或人物关系。',
+    '不同角色的外形与主配色要能明确区分开，便于生成定妆图后仍能分辨谁是谁。',
+    '每个角色必须给出 evidence：quote 必须是下方「原著片段」里逐字出现的一句原文（含标点），不得改写、拼接或编造；找不到原文依据的角色不要输出。',
+  ].join('\n'),
   cameras: '机位依赖图：{cameras:[{id,label,shotNos:[数字],parent,reason}]}',
   context: '检索结果：{query, passages:[字符串], notes:[字符串]}',
   spatial: '转场说明：{fromCam,toCam,spatialNotes,axisRule,cameraPath}',
@@ -198,6 +212,7 @@ function mockGenerate(intent, vars = {}) {
       // 用启发式候选名 / 主题角色映射成完整角色属性结构，零 Key 可跑通角色提取
       const candidates = Array.isArray(vars.candidates) && vars.candidates.length
         ? vars.candidates : theme.chars.map((c) => ({ name: c.name, hits: 1 }));
+      const mains = ['#3a506b', '#6b4f8a', '#7a6fc4', '#3f6b5c', '#8a4f4f', '#4f6b8a'];
       return {
         characters: candidates.slice(0, 8).map((c, i) => ({
           name: c.name,
@@ -208,13 +223,16 @@ function mockGenerate(intent, vars = {}) {
           personality: '动机连贯，立场鲜明，能在冲突中保持稳定的性格特征。',
           appearance: theme.chars.find((t) => t.name === c.name)?.appearance
             || `${c.name}的外貌由角色属性驱动，${theme.styleHint} 画面下辨识度高。`,
+          // static/dynamic 二分：跨镜头恒定的外貌 vs 随场景变化的造型
+          staticFeatures: `${c.name}面部轮廓清晰、眉眼辨识度高，发型与发色固定，体型匀称`,
+          dynamicFeatures: `服装随场景更换，主色为 ${mains[i % mains.length]}，配饰简洁`,
           hair: '发型颜色与整体配色一致',
           costume: '与身份相符的日常服装，颜色呼应主配色',
           props: '随身物件待补充',
           style: `${theme.styleHint} 画风，${['主角', '关键配角', '反派', '线索人物'][i % 4]}气质，${['深蓝灰', '蓝紫', '紫蓝', '墨绿'][i % 4]}主调 + 暖橙点缀，全身造型统一`,
           relations: i > 0 ? [{ target: candidates[0].name, label: '同伴' }] : [],
-          palette: ['#0b111c', ['#3a506b', '#6b4f8a', '#7a6fc4', '#3f6b5c'][i % 4], '#ff9a5c'],
-          viewPrompt: '',
+          palette: ['#0b111c', mains[i % mains.length], '#ff9a5c'],
+          viewPrompt: `${c.name}的标志性外观，${theme.styleHint} 画风，主色 ${mains[i % mains.length]}`,
         })),
       };
     }
@@ -555,9 +573,43 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
         const images = userVars.__images;
         delete userVars.__images;
         const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。` +
-          (vars.fragments ? '输入中的 fragments 是原著检索片段（FRAGMENT 标签），镜头/场景描述必须与其人物、道具、环境、光线保持一致，不要引入矛盾设定。' : '');
-        const user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(userVars, null, 2)}`;
-        const out = await callLLM(system, user, signal, { intent, images });
+          (intent === 'charExtract'
+            ? '输入的「原著片段」是全书检索召回的原文证据（FRAGMENT 标签）。只能依据这些片段抽取角色，不得引入片段之外的设定；片段未写明但必需的外观特征可以依据题材与上下文合理补全，但不得与原文矛盾。'
+            : (vars.fragments ? '输入中的 fragments 是原著检索片段（FRAGMENT 标签），镜头/场景描述必须与其人物、道具、环境、光线保持一致，不要引入矛盾设定。' : '')) +
+          (intent === 'charExtract' ? `\n角色抽取准则：\n${SCHEMAS.charExtractGuide}` : '');
+        // 角色抽取：原文证据以可读文本呈现（JSON 里再塞一遍会重复占 token），fragments 只保留元信息
+        let user;
+        if (intent === 'charExtract') {
+          const { fragments, novelText, ...rest } = userVars;
+          user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(rest, null, 2)}`
+            + `\n\n原著片段（FRAGMENT，抽取角色的唯一证据来源）：\n${vars.novelText || ''}`
+            + (fragments?.length ? `\n\n（已召回 ${fragments.length} 段相关原文）` : '');
+        } else {
+          user = `任务类型：${intent}\n输入数据：\n${JSON.stringify(userVars, null, 2)}`;
+        }
+        // 输出解析失败（响应不是合法 JSON / 缺结构）给一次带提示的重试：
+        // 模型偶发的 Markdown 包裹或尾部截断不该直接把整次提取退回启发式
+        let out = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const retryHint = attempt
+              ? '\n注意：上一次响应不是合法 JSON。只能输出符合上述结构的严格 JSON 对象，不要 Markdown 代码块、不要任何解释文字。'
+              : '';
+            out = await callLLM(system + retryHint, user, signal, { intent, images });
+            break;
+          } catch (err) {
+            const parseFailed = /JSON|响应中没有|Unexpected token|Unterminated/i.test(String(err?.message || ''));
+            if (!parseFailed || attempt === 1) throw err;
+            log('warn', `模型输出解析失败，重试一次：${err.message}`);
+          }
+        }
+        if (!out) throw new Error('模型未返回输出');
+        // 角色抽取不做 Mock 补位：模型没给的字段一律留空。
+        // 补位会让 mockGenerate 的玩具角色属性冒充真实提取结果写进项目（且不触发 __fallback）。
+        if (intent === 'charExtract') {
+          if (!Array.isArray(out.characters) || !out.characters.length) throw new Error('模型未返回有效角色');
+          return out;
+        }
         return mergeDefaults(intent, out, vars);
       } catch (err) {
         // 失败回退 Mock 也计入调用次数（tokens 为 0），保证「调用了真实端点」这件事可审计

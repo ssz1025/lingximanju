@@ -6,10 +6,8 @@
 import { openAssetLibrary } from './asset-manager.js';
 import { openAIChat } from './ai-chat.js';
 import { ensureModelPicker, withModelId } from './model-picker.js';
+import { $, esc, cut } from './utils.js';
 
-const $ = (id) => document.getElementById(id);
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
 const fmtTime = (ts) => {
   if (!ts) return '—';
   const d = new Date(Number(ts));
@@ -776,6 +774,7 @@ function charCardHTML(c, gen = { charId: null }) {
         ${(c.aliases || []).map((a) => `<span class="pmm-chip">${esc(a)}</span>`).join('')}
         <span class="pmm-chip">${esc(srcLabel)}</span></div>
       ${c.role ? `<div class="pmm-char-role">${esc(c.role)}</div>` : ''}
+      ${c.staticFeatures ? `<div class="pmm-char-desc">固定特征：${esc(cut(c.staticFeatures, 50))}</div>` : ''}
       ${c.style ? `<div class="pmm-char-desc">设定风格：${esc(cut(c.style, 60))}</div>` : ''}
       ${c.personality ? `<div class="pmm-char-desc">${esc(cut(c.personality, 60))}</div>` : ''}
       <div class="pmm-char-pal">${(c.palette || []).map((col) => `<i style="background:${esc(col)}"></i>`).join('')}</div>
@@ -816,6 +815,12 @@ export function openCharacterEditor(char = {}, onSave) {
           <div class="field"><label>发型</label><input id="ce-hair" value="${esc(char.hair || '')}"></div>
           <div class="field"><label>随身物件</label><input id="ce-props" value="${esc(char.props || '')}"></div>
           <div class="field" style="grid-column:1/-1"><label>服装 / 配饰</label><textarea id="ce-costume" rows="2">${esc(char.costume || '')}</textarea></div>
+        </div>
+        <div class="modal-grid">
+          <div class="field"><label>固定特征（跨镜头恒定：脸型五官 / 发型发色 / 体型肤色）</label>
+            <textarea id="ce-static-features" rows="2" placeholder="如：轮廓分明的鹅蛋脸、剑眉深目、墨色长发束成高马尾、身形清瘦挺拔">${esc(char.staticFeatures || '')}</textarea></div>
+          <div class="field"><label>可变特征（随场景变化：服装 / 配饰 / 随身道具）</label>
+            <textarea id="ce-dynamic-features" rows="2" placeholder="如：月白广袖长袍配银丝暗纹、腰悬青玉佩、腕戴素银镯">${esc(char.dynamicFeatures || '')}</textarea></div>
         </div>
         <div class="field"><label>设定风格（一句话总结，驱动多视图与关键帧）</label>
           <input id="ce-style" maxlength="120" value="${esc(char.style || '')}" placeholder="如：古风玄幻 · 清冷剑修，白衣墨发，水墨淡彩"></div>
@@ -861,6 +866,7 @@ export function openCharacterEditor(char = {}, onSave) {
         aliases: val('#ce-aliases').split(/[,，、]/).map((s) => s.trim()).filter(Boolean),
         role: val('#ce-role'), gender: val('#ce-gender'), age: val('#ce-age'),
         personality: val('#ce-personality'), appearance: val('#ce-appearance'),
+        staticFeatures: val('#ce-static-features'), dynamicFeatures: val('#ce-dynamic-features'),
         hair: val('#ce-hair'), costume: val('#ce-costume'), props: val('#ce-props'),
         style: val('#ce-style'),
         relations: relations.filter((r) => r.target || r.label),

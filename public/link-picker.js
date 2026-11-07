@@ -1,7 +1,7 @@
 // 连线选择器：拖拽松手后弹出的「选择下一个节点 / 选择连接关系」浮层。
 // 纯自主实现，无框架依赖；支持搜索、分组、键盘操作、点击外部关闭。
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+import { esc, clamp } from './utils.js';
 
 let current = null;
 

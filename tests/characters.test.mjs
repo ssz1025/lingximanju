@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import {
   CHARACTER_VIEWS, MAX_CHARACTERS, EXTRACT_CAP,
   charNameKey, normalizeCharacter, buildCharacterPrompt,
-  buildViewPrompt, buildExtractVars, mergeExtracted,
+  buildViewPrompt, buildExtractVars, buildCharacterPassages, mergeExtracted,
+  verifyEvidence,
 } from '../src/core/characters.mjs';
 
 test('CHARACTER_VIEWS 定义正面/侧面/背面三视图', () => {
@@ -84,7 +85,7 @@ test('buildCharacterPrompt 按属性拼造型串', () => {
   assert.equal(buildCharacterPrompt({}), '');
 });
 
-test('buildViewPrompt 含视图角度，viewPrompt 优先于属性拼装', () => {
+test('buildViewPrompt 正面含角度并优先用 viewPrompt', () => {
   const c = { name: '林晚', appearance: '清冷气质', viewPrompt: '水墨风格少女' };
   const front = buildViewPrompt(c, 'front', { style: '电影感', negative: '模糊' });
   assert.ok(front.includes('正面'), '正面视图提示词应含角度');
@@ -92,16 +93,56 @@ test('buildViewPrompt 含视图角度，viewPrompt 优先于属性拼装', () =>
   assert.ok(!front.includes('清冷气质'), '有 viewPrompt 时不用属性拼装');
   assert.ok(front.includes('电影感'), '应拼风格串');
   assert.ok(front.includes('模糊'), '应拼负面串');
-
-  const side = buildViewPrompt({ name: '沈默', appearance: '冷峻' }, 'side');
-  assert.ok(side.includes('90度侧面'), '侧面视图应含角度');
-  assert.ok(side.includes('冷峻'), '无 viewPrompt 时用属性拼装');
-  const back = buildViewPrompt({ name: '沈默' }, 'back');
-  assert.ok(back.includes('背面'));
-  assert.ok(back.includes('沈默'));
 });
 
-test('buildExtractVars 组装候选/正文/梗概且截断 ≤ EXTRACT_CAP', () => {
+test('buildViewPrompt 无 viewPrompt 时正面用属性拼装', () => {
+  const front = buildViewPrompt({ name: '沈默', appearance: '冷峻', staticFeatures: '眉骨高而轮廓分明' }, 'front');
+  assert.ok(front.includes('沈默'));
+  assert.ok(front.includes('冷峻'));
+  assert.ok(front.includes('眉骨高而轮廓分明'));
+});
+
+test('buildViewPrompt 正面显式写出静态/动态特征二分', () => {
+  const front = buildViewPrompt({
+    name: '沈默', viewPrompt: '水墨风格冷峻青年',
+    staticFeatures: '眉骨高而轮廓分明', dynamicFeatures: '月白广袖袍配青玉佩',
+  }, 'front');
+  assert.ok(front.includes('固定特征：眉骨高而轮廓分明'));
+  assert.ok(front.includes('可变特征：月白广袖袍配青玉佩'));
+});
+
+test('buildViewPrompt 侧面/背面以正面定妆图为依据，不重复特征描述', () => {
+  const c = { name: '沈默', appearance: '冷峻', staticFeatures: '眉骨高而轮廓分明' };
+  const side = buildViewPrompt(c, 'side');
+  assert.ok(side.includes('90度侧面'), '侧面视图应含角度');
+  assert.ok(side.includes('正面定妆图'), '侧面应声明以正面图为外观依据');
+  assert.ok(!side.includes('眉骨高而轮廓分明'), '侧面不重复特征描述，避免与正面图不一致');
+  assert.ok(!side.includes('冷峻'));
+
+  const back = buildViewPrompt(c, 'back');
+  assert.ok(back.includes('背面'));
+  assert.ok(back.includes('正面定妆图'));
+  assert.ok(back.includes('背面不可见五官'));
+});
+
+test('normalizeCharacter 缺静态/动态特征时按语义派生', () => {
+  const c = normalizeCharacter({ name: '林晚', appearance: '清冷', hair: '黑色长发', costume: '月白长裙' });
+  assert.ok(c.staticFeatures.includes('清冷'));
+  assert.ok(c.staticFeatures.includes('黑色长发'));
+  assert.ok(c.dynamicFeatures.includes('月白长裙'));
+
+  const given = normalizeCharacter({ name: '林晚', staticFeatures: '剑眉深目', dynamicFeatures: '月白广袖袍' });
+  assert.equal(given.staticFeatures, '剑眉深目', '模型给出的固定特征不被派生覆盖');
+  assert.equal(given.dynamicFeatures, '月白广袖袍');
+});
+
+test('buildCharacterPrompt 区分固定特征与可变特征', () => {
+  const p = buildCharacterPrompt({ name: '林晚', staticFeatures: '剑眉深目', dynamicFeatures: '月白广袖袍' });
+  assert.ok(p.includes('固定特征：剑眉深目'));
+  assert.ok(p.includes('可变特征：月白广袖袍'));
+});
+
+test('buildExtractVars 以召回片段组装证据且截断 ≤ EXTRACT_CAP', () => {
   const text = `林晚说：“下雨了。”沈默问：“要伞吗？”${'正文'.repeat(6000)}林晚说：“走吧。”沈默答：“好。”`;
   const project = { name: '测试项目' };
   const m = {
@@ -112,15 +153,27 @@ test('buildExtractVars 组装候选/正文/梗概且截断 ≤ EXTRACT_CAP', () 
   assert.equal(vars.title, '雨夜来信');
   assert.ok(vars.candidates.length > 0, '应有启发式候选');
   assert.ok(vars.candidates.every((c) => c.name && c.hits > 0));
-  assert.ok(vars.novelText.includes('【小说开头】'));
+  assert.ok(Array.isArray(vars.fragments) && vars.fragments.length > 0, '应召回原著片段');
+  assert.ok(vars.fragments.every((f) => f.text && ['recall', 'window'].includes(f.kind)));
   assert.ok(vars.novelText.includes('【分集梗概】'));
   assert.ok(vars.novelText.includes('雨夜来信'));
   assert.ok(vars.novelText.length <= EXTRACT_CAP, `novelText ${vars.novelText.length} 应 ≤ ${EXTRACT_CAP}`);
 });
 
+test('buildCharacterPassages 召回长篇中后段角色的原文描述', () => {
+  // 角色描写只出现在全文靠后位置，旧实现（取开头 + 有限窗口）必然取不到
+  const filler = '雨下了一整夜，青石街上空无一人。'.repeat(200);
+  const text = `${filler}林晚推门而入，鹅蛋脸、剑眉深目，月白广袖长裙，腰间悬一枚青玉佩。${filler}`;
+  const { fragments } = buildCharacterPassages(text, [{ name: '林晚' }], []);
+  assert.ok(fragments.length > 0, '应有召回片段');
+  assert.ok(fragments.some((f) => f.text.includes('青玉佩')), '应召回含角色外貌描写的原文');
+  assert.ok(fragments.some((f) => f.kind === 'window'), '候选名应产生原文定位窗口');
+});
+
 test('buildExtractVars 无原著时仍可返回（空候选/空正文）', () => {
   const vars = buildExtractVars({ name: 'x' }, { source: { text: '' } });
   assert.deepEqual(vars.candidates, []);
+  assert.deepEqual(vars.fragments, []);
   assert.ok(vars.novelText.length <= EXTRACT_CAP);
 });
 
@@ -162,8 +215,101 @@ test('mergeExtracted 别名命中同名角色也合并', () => {
   assert.equal(out.characters[0].age, '25岁');
 });
 
+test('mergeExtracted 别名取并集，不丢已有别称', () => {
+  const existing = [normalizeCharacter({ name: '林晚', aliases: ['阿晚'] })];
+  const out = mergeExtracted(existing, [{ name: '林晚', aliases: ['晚晚', '阿晚'] }], { source: 'llm' });
+  assert.deepEqual(out.characters[0].aliases, ['阿晚', '晚晚']);
+});
+
+test('mergeExtracted 启发式占位特征可被 LLM 结果覆盖，来源升级为 llm', () => {
+  // 启发式角色的固定特征只是「外观串」派生出来的占位值，不是真实特征
+  const heuristic = normalizeCharacter({
+    id: 'chr_h', name: '沈默', source: 'heuristic',
+    appearance: '原著中出现的「沈默」· 服装 / 发型 / 随身物件跨镜头保持一致',
+  });
+  const out = mergeExtracted([heuristic], [{
+    name: '沈默', source: 'llm',
+    appearance: '剑眉深目，风衣猎猎',
+    staticFeatures: '剑眉深目、轮廓分明、墨色短发',
+    dynamicFeatures: '深色风衣、左手旧怀表',
+    role: '男主角',
+  }], { source: 'llm' });
+  const c = out.characters[0];
+  assert.equal(c.staticFeatures, '剑眉深目、轮廓分明、墨色短发', '派生占位特征应被真实特征替换');
+  assert.equal(c.dynamicFeatures, '深色风衣、左手旧怀表');
+  assert.equal(c.appearance, '剑眉深目，风衣猎猎');
+  assert.equal(c.role, '男主角');
+  assert.equal(c.source, 'llm', '覆盖后来源升级为 llm');
+});
+
+test('mergeExtracted 手动角色的特征不被 LLM 覆盖', () => {
+  const manual = normalizeCharacter({ name: '林晚', source: 'manual', staticFeatures: '我手改的固定特征' });
+  const out = mergeExtracted([manual], [{ name: '林晚', staticFeatures: 'LLM 的固定特征' }], { source: 'llm' });
+  assert.equal(out.characters[0].staticFeatures, '我手改的固定特征');
+});
+
+test('mergeExtracted 用户手改过的启发式角色不被 LLM 覆盖', () => {
+  const edited = normalizeCharacter({
+    name: '沈默', source: 'heuristic', edited: true,
+    appearance: '我手改的外貌',
+    staticFeatures: '我手改的固定特征',
+  });
+  const out = mergeExtracted([edited], [{
+    name: '沈默', appearance: 'LLM 外貌', staticFeatures: 'LLM 固定特征', role: '主角',
+  }], { source: 'llm' });
+  assert.equal(out.characters[0].staticFeatures, '我手改的固定特征');
+  assert.equal(out.characters[0].appearance, '我手改的外貌');
+  assert.equal(out.characters[0].source, 'heuristic', '手改过的角色来源不应被改写');
+});
+
 test('mergeExtracted 尊重 MAX_CHARACTERS 上限', () => {
   const extracted = Array.from({ length: 20 }, (_, i) => ({ name: `角色${i}` }));
   const out = mergeExtracted([], extracted, { source: 'llm' });
   assert.equal(out.characters.length, MAX_CHARACTERS);
+});
+
+test('normalizeCharacter 归一 evidence：去空去重、quote 截断、未知 kind 降级', () => {
+  const c = normalizeCharacter({
+    name: '林晚',
+    evidence: [
+      { quote: '林晚推门而入', kind: 'mention' },
+      { quote: '林晚推门而入', kind: 'dialogue' },      // 重复 → 丢
+      { kind: 'mention' },                              // 无 quote → 丢
+      { quote: 'x'.repeat(300), kind: 'internal' },     // 截断 + kind 降级
+    ],
+  });
+  assert.equal(c.evidence.length, 2);
+  assert.equal(c.evidence[0].quote, '林晚推门而入');
+  assert.equal(c.evidence[1].quote.length, 120);
+  assert.equal(c.evidence[1].kind, 'mention');
+});
+
+test('verifyEvidence 只保留能在原著中逐字定位的引用，角色本身不丢', () => {
+  const src = '林晚推门而入，鹅蛋脸、剑眉深目。\n老王把钥匙递给小丽，说你先走。';
+  const { characters, verified, dropped } = verifyEvidence([
+    {
+      name: '林晚',
+      evidence: [
+        { quote: '林晚推门而入，鹅蛋脸、剑眉深目。', kind: 'mention' }, // 逐字命中
+        { quote: '她昨夜根本没来过这里', kind: 'dialogue' },             // 原著没有 → 幻觉
+      ],
+    },
+    { name: '老王', evidence: [] },
+  ], src);
+
+  assert.equal(verified, 1, '真实存在的引用应计入 verified');
+  assert.equal(dropped, 1, '定位不到的引用必须丢弃');
+  assert.deepEqual(characters[0].evidence.map((e) => e.quote), ['林晚推门而入，鹅蛋脸、剑眉深目。']);
+  assert.equal(characters.length, 2, '只丢引用，不丢角色');
+  assert.deepEqual(characters[1].evidence, [], '无证据角色原样保留');
+});
+
+test('verifyEvidence 忽略空白匹配：原文换行/缩进被模型抄丢也算命中', () => {
+  const src = '第一章\n\n  老王把钥匙\n\t递给小丽。';
+  const out = verifyEvidence(
+    [{ name: '老王', evidence: [{ quote: '老王把钥匙 递给小丽。', kind: 'dialogue' }] }],
+    src,
+  );
+  assert.equal(out.verified, 1, '空白差异不应误杀有效引用');
+  assert.equal(out.dropped, 0);
 });

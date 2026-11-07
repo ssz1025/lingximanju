@@ -12,7 +12,7 @@ import { parseWorkflow, runWorkflow } from '../../core/comfyui.mjs';
 import { executeSteps, broadcastMeta } from '../../core/step-runner.mjs';
 import { createProviders } from '../../core/providers.mjs';
 import { extractCharacters } from '../../core/novel.mjs';
-import { CHARACTER_VIEWS, buildExtractVars, buildViewPrompt, mergeExtracted } from '../../core/characters.mjs';
+import { CHARACTER_VIEWS, buildExtractVars, buildViewPrompt, mergeExtracted, verifyEvidence } from '../../core/characters.mjs';
 // 封面智能体（agents 统一目录）：提示词构建 / 参考图解析 / 对话编排都在那里
 import { designCoverPrompt, MAX_COVER_REFS, parseImagePayload, resolveChatRefs, coverChat } from '../../agents/cover-agent.mjs';
 import { resolveModelSettings } from '../../core/app-settings.mjs';
@@ -30,12 +30,20 @@ async function generateCharacterView(project, m, character, viewKey, modelId = '
   });
   const providers = createProviders(resolveModelSettings(project, modelId),
     (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }));
+  // 论文对齐（ViMax CharacterPortraitsGenerator）：侧面/背面以正面定妆图为参考图，
+  // 保证同一人物的脸型/发型/服装/配饰完全一致；正面图缺失时退化为纯文本描述
+  const frontUrl = character.views?.front?.url || '';
+  const refs = view.key === 'front' || !frontUrl ? [] : [frontUrl];
+  if (view.key !== 'front' && !frontUrl) {
+    emit('log', { projectId: project.id, level: 'warn', message: `角色多视图 · ${character.name} 缺正面定妆图，${view.label}将仅依据文字特征生成` });
+  }
   const img = await providers.image({
     kind: 'character-view', view: view.key,
     label: `${character.name}·${view.label}`,
     prompt, palette: character.palette,
     style: project.settings?.style || 'cinematic',
     seed: `${project.id}-${character.id}-${view.key}`,
+    refs,
   });
   const file = String(img.url || '').split('/').pop();
   registerAsset({
@@ -321,9 +329,18 @@ export async function handleManagement(req, res, url) {
     } else {
       try {
         const providers = createProviders(resolveModelSettings(project, body.modelId), (level, msg) => emit('log', { projectId: id, level, message: `角色提取 · ${msg}` }));
-        const out = await providers.generate('charExtract', buildExtractVars(project, m, limit));
+        // 论文式(6)：全书分块 → BM25 召回 + 候选名原文定位 → 原文证据喂给模型
+        const vars = buildExtractVars(project, m, limit);
+        emit('log', { projectId: id, level: 'info', message: `角色提取 · 召回 ${vars.fragments.length} 段原著片段（候选 ${vars.candidates.length} 位）` });
+        const out = await providers.generate('charExtract', vars);
         if (out?.__fallback || !Array.isArray(out?.characters) || !out.characters.length) throw new Error('模型未返回有效角色');
         extracted = out.characters;
+        // 证据校验：引用必须能在原著原文里逐字定位，定位不到即视为幻觉引用并丢弃
+        const checked = verifyEvidence(extracted, m.source.text);
+        extracted = checked.characters;
+        if (checked.dropped) {
+          emit('log', { projectId: id, level: 'info', message: `角色提取 · 证据校验：${checked.verified} 条引用有效，${checked.dropped} 条无法在原著中定位已丢弃` });
+        }
         message = `LLM 提取到 ${extracted.length} 位角色`;
       } catch (err) {
         // LLM 不可用/失败自动落回启发式，响应里明示，避免假成功

@@ -7,8 +7,8 @@
 
 /** 模型选择器（可选）：库里有模型时在输入栏前插入下拉，本次对话用哪个模型由用户临时决定 */
 import { ensureModelPicker } from './model-picker.js';
+import { esc as $esc } from './utils.js';
 
-const $esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /**
  * 打开一个 AI 对话弹窗。

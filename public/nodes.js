@@ -1,4 +1,6 @@
 // 节点类型注册表与 DOM 渲染（画布与检查器共用）
+import { esc } from './utils.js';
+
 export const NODE_TYPES = {
   idea:       { label: '创意输入', icon: '✦', color: '#a78bfa', agent: 'screenwriter', group: '输入', fields: [{ key: 'text', label: '创意描述', type: 'textarea' }] },
   script:     { label: '剧本', icon: '▤', color: '#818cf8', agent: 'screenwriter', group: '叙事', fields: [{ key: 'text', label: '创作输入', type: 'textarea' }] },
@@ -22,7 +24,6 @@ export const PALETTE_ORDER = ['idea', 'episode', 'script', 'rag', 'plan', 'chara
 export const typeOf = (t) => NODE_TYPES[t] || NODE_TYPES.note;
 export const STATUS_LABEL = { idle: '待运行', queued: '排队中', running: '运行中', done: '已完成', error: '失败', skipped: '已跳过' };
 
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const img = (url, cls = 'node-thumb') => (url ? `<img class="${cls}" loading="lazy" src="${esc(url)}" alt="预览" onerror="this.style.display='none'">` : '');
 const chips = (arr = []) => arr.filter(Boolean).length
   ? `<div class="node-kv">${arr.filter(Boolean).slice(0, 4).map((c) => `<span class="kv-chip">${esc(c)}</span>`).join('')}</div>` : '';

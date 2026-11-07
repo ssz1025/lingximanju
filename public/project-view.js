@@ -11,10 +11,11 @@
  * 零第三方依赖，原生 ESM。
  * ==========================================================================*/
 import { ensureModelPicker, withModelId } from './model-picker.js';
+import * as SV from './source-view.js';
+import * as PMODEL from './project-model.js';
+import { collectProjectAssets } from './project-sidebar.js';
+import { $, esc, cut } from './utils.js';
 
-const $ = (id) => document.getElementById(id);
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
 
 async function api(path, body) {
   const res = await fetch(path, {
@@ -45,9 +46,19 @@ const SPLIT_STRATEGIES = [
   { id: 'scene', name: '按场景段落', hint: '空行分段聚合' },
 ];
 
+/** 工作台四个 Tab：把原来一屏塞满的卡片按用途归拢，首屏只讲「现在该做什么」 */
+const TABS = [
+  { id: 'overview', label: '▦ 概览', hint: '路线图 · 项目信息 · 当前步骤' },
+  { id: 'source', label: '📖 原著', hint: '导入统计与全文阅读' },
+  { id: 'episodes', label: '▥ 分季分集', hint: '按季管理 · 每集独立画布' },
+  { id: 'assets', label: '▣ 资源', hint: '本项目产物统一归纳' },
+];
+const ASSET_KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '其他' };
+
 /* 工作台 UI 状态（跨渲染保留：AI 大纲草稿、上传草稿、项目信息编辑稿） */
 const ui = {
   projectId: null,
+  tab: 'overview',
   stepId: null,
   info: {},                       // 项目信息编辑稿（bible 字段）
   skipCapture: false,             // AI 补全等服务端改写场景：跳过一次 DOM 捕获，避免旧输入框值盖回新数据
@@ -58,6 +69,7 @@ const ui = {
 function resetUi(p) {
   const m = p.management || {};
   ui.projectId = p.id;
+  ui.tab = 'overview';
   ui.stepId = null;
   ui.info = {};
   ui.upload = { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 };
@@ -130,6 +142,7 @@ function sourceCardHTML(m) {
         </div>`
       : `<div class="pv-source-empty">还没有故事。上传你的小说，或让 AI 按一句话构想生成一部。</div>`}
     <div class="pv-source-acts">
+      ${s.text ? `<button class="btn sm primary" data-act="view-source">📖 查看原著与统计</button>` : ''}
       <button class="btn sm" data-act="goto-upload">⇧ 上传小说</button>
       <button class="btn sm accent-mini" data-act="goto-ai">✦ AI 生成小说</button>
     </div>
@@ -410,6 +423,113 @@ function episodesListHTML(m) {
   </div>`;
 }
 
+/* ---------------------------------------------------------------- Tab 导航 */
+function tabsHTML(ctx) {
+  const m = ctx.project?.management || {};
+  const src = ctx.source || {};
+  const counts = {
+    source: src.ok ? `${(src.stats?.totalChars || 0).toLocaleString()} 字` : '未导入',
+    episodes: `${(m.episodes || []).length} 集`,
+    assets: `${collectProjectAssets(ctx.project, ctx.assets || []).length} 项`,
+  };
+  return `<nav class="pv-tabs" role="tablist">${TABS.map((t) => `
+    <button class="pv-tab ${ui.tab === t.id ? 'on' : ''}" data-tab="${t.id}" title="${esc(t.hint)}" role="tab" aria-selected="${ui.tab === t.id}">
+      <span>${t.label}</span>${counts[t.id] ? `<em>${esc(counts[t.id])}</em>` : ''}
+    </button>`).join('')}</nav>`;
+}
+
+/* ---------------------------------------------------------- 分季 / 分集管理 */
+function seasonsHTML(p, ctx) {
+  const groups = PMODEL.seasonGroups(p);
+  const eps = p.management?.episodes || [];
+  const seasonCount = Math.max(1, groups.length);
+  const seasonOptions = (active) => Array.from({ length: seasonCount }, (_, i) => i + 1)
+    .map((n) => `<option value="${n}" ${n === active ? 'selected' : ''}>${esc(PMODEL.seasonTitle(p, n))}</option>`).join('');
+  const head = `<div class="sx-head">
+      <div><h2>分季 · 分集</h2><p>${groups.length} 季 · ${eps.length} 集 · 每季可包含多集，每集都有自己独立的无限画布</p></div>
+      <div class="sx-head-acts">
+        <button class="btn sm" data-act="open-overall">🌐 打开全部组合画布</button>
+        <button class="btn sm primary" data-act="add-season">＋ 新增一季</button>
+      </div>
+    </div>`;
+  if (!eps.length) {
+    return `<div class="sx-wrap">${head}<div class="sx-empty">还没有分集。先到「📖 原著」导入小说并完成分集拆解，这里会自动按季列出每一集。</div></div>`;
+  }
+  const cards = groups.map((g) => `
+    <section class="sx-season">
+      <div class="sx-season-head">
+        <span class="sx-season-mark">S${g.no}</span>
+        <input class="sx-season-title" data-season-title="${g.no}" value="${esc(g.title)}" aria-label="第 ${g.no} 季标题" spellcheck="false">
+        <span class="sx-season-count">${g.episodes.length} 集 · ${g.chars.toLocaleString()} 字</span>
+        <div class="sx-season-acts">
+          <button class="btn sm" data-act="open-season-canvas" data-no="${g.no}" title="看这一季在组合画布中的位置">🌐 组合视图</button>
+          ${g.no > 1 ? `<button class="btn sm danger-ghost" data-act="remove-season" data-no="${g.no}" title="删除该季，集回到第一季">✕ 删除季</button>` : ''}
+        </div>
+      </div>
+      <div class="sx-ep-grid">${g.episodes.map((ep) => {
+        const no = Number(ep.no) || 0;
+        const done = [ep.script ? '剧本' : '', (ep.segments || []).some((s) => s.gridUrl) ? '分镜' : '', ep.video ? '视频' : ''].filter(Boolean).join(' · ');
+        return `<article class="sx-ep">
+          <div class="sx-ep-top"><span class="sx-ep-no">EP ${String(no).padStart(2, '0')}</span>
+            <label class="sx-ep-season">季
+              <select data-ep-season="${no}" aria-label="第 ${no} 集所属季">${seasonOptions(PMODEL.seasonOf(ep))}</select>
+            </label></div>
+          <h3>${esc(cut(ep.title || `第 ${no} 集`, 26))}</h3>
+          <p>${esc(cut(ep.summary || '暂无梗概', 68))}</p>
+          <div class="sx-ep-meta"><span>${(ep.chars || 0).toLocaleString()} 字</span><span>${(ep.chapters || []).length || (ep.sourceTitles || []).length} 章</span><span>${(ep.segments || []).length} 段</span>${done ? `<span class="ok">${esc(done)}</span>` : ''}</div>
+          <div class="sx-ep-acts">
+            <button class="btn sm" data-act="open-episode" data-no="${no}">▤ 剧集详情</button>
+            <button class="btn sm primary" data-act="open-ep-canvas" data-no="${no}">⬡ 本集画布</button>
+          </div>
+        </article>`;
+      }).join('')}</div>
+    </section>`).join('');
+  return `<div class="sx-wrap">${head}${cards}
+    <div class="sx-foot">调整季归属、重命名季会立即保存；「🌐 全部组合画布」把所有季、所有集的独立画布拼成一张完整总览图。</div>
+  </div>`;
+}
+
+/* --------------------------------------------------------------- 资源归纳 Tab */
+function assetsHTML(p, ctx) {
+  const list = collectProjectAssets(p, ctx.assets || []);
+  const byKind = {};
+  for (const a of list) {
+    const k = ASSET_KIND_LABEL[a.kind] ? a.kind : (a.type === 'video' ? 'video' : a.type === 'pack' ? 'pack' : 'image');
+    (byKind[k] ||= []).push(a);
+  }
+  const order = ['cover', 'character', 'image', 'video', 'pack', 'other'];
+  const chars = p.management?.characters || [];
+  const cards = order.filter((k) => (byKind[k] || []).length).map((k) => `
+    <section class="ax-group">
+      <div class="ax-group-head"><span>${ASSET_KIND_LABEL[k]}</span><em>${byKind[k].length}</em></div>
+      <div class="ax-grid">${byKind[k].map((a) => `
+        <button class="ax-item" data-file="${esc(a.file)}" title="${esc(a.name || a.file)}">
+          <span class="ax-thumb">${a.type === 'image'
+            ? `<img loading="lazy" src="/assets/${esc(a.file)}" alt="">`
+            : `<i>${a.type === 'video' ? '▶' : a.type === 'pack' ? '▤' : '📄'}</i>`}</span>
+          <span class="ax-name">${esc(cut(a.name || a.file, 20))}</span>
+          <small>${a.bytes ? `${(a.bytes / 1024).toFixed(0)} KB` : ASSET_KIND_LABEL[k]}</small>
+        </button>`).join('')}</div>
+    </section>`).join('');
+  return `<div class="ax-wrap">
+    <div class="ax-head">
+      <div><h2>项目资源</h2><p>封面 / 角色定妆图 / 宫格分镜 / 视频 / 导演包，按类型统一归纳 · 共 ${list.length} 项</p></div>
+      <div class="ax-head-acts">
+        <button class="btn sm" data-act="refresh-assets">↻ 重扫资源</button>
+        <button class="btn sm primary" data-act="open-assets">▣ 在资源库中管理</button>
+      </div>
+    </div>
+    <div class="ax-summary">
+      <div class="ax-stat"><b>${list.length}</b><span>资源文件</span></div>
+      <div class="ax-stat"><b>${chars.length}</b><span>角色</span></div>
+      <div class="ax-stat"><b>${(p.management?.episodes || []).length}</b><span>分集</span></div>
+      <div class="ax-stat"><b>${(p.nodes || []).length}</b><span>主画布节点</span></div>
+    </div>
+    <div class="ax-char-acts"><button class="btn sm" data-act="chars">👤 角色管理</button><button class="btn sm" data-act="manage">▤ 项目管理面板</button></div>
+    ${cards || '<div class="ax-empty">还没有生成资源。运行流水线或生成封面 / 角色定妆图 / 宫格分镜后，产物会自动归纳到这里。</div>'}
+  </div>`;
+}
+
 /* ================================================================== 主渲染 */
 export function renderProjectView(host, ctx = {}) {
   if (!host) return;
@@ -446,23 +566,63 @@ export function renderProjectView(host, ctx = {}) {
   else if (def.id === 'storyboard') consoleBody = storyboardConsoleHTML(p, stats);
   else if (def.id === 'deliver') consoleBody = deliverConsoleHTML(p, m, stats, busy);
 
-  host.innerHTML = `<div class="pv">
-    <aside class="pv-side">
-      ${roadmapHTML(m, steps, busy)}
-      ${sourceCardHTML(m)}
-      ${resourceCardHTML(p, m, stats)}
-    </aside>
-    <section class="pv-main">
-      ${infoCardHTML(p, m)}
-      <div class="pv-card pv-console" id="pv-console">
-        ${consoleHeadHTML(def, st, busy)}
-        ${consoleBody}
+  const tab = TABS.some((t) => t.id === ui.tab) ? ui.tab : 'overview';
+  const hide = (id) => (tab === id ? '' : 'hidden');
+  host.innerHTML = `<div class="pv-shell">
+    ${tabsHTML(ctx)}
+    <div class="pv-panels">
+      <div class="pv-panel" data-panel="overview" ${hide('overview')}>
+        <div class="pv">
+          <aside class="pv-side">
+            ${roadmapHTML(m, steps, busy)}
+            ${sourceCardHTML(m)}
+          </aside>
+          <section class="pv-main">
+            ${infoCardHTML(p, m)}
+            <div class="pv-quick">
+              <button data-tab="source">📖 原著与统计</button>
+              <button data-tab="episodes">▥ 分季分集</button>
+              <button data-tab="assets">▣ 资源归纳</button>
+              <button data-act="open-overall">🌐 全部组合画布</button>
+            </div>
+            <div class="pv-card pv-console" id="pv-console">
+              ${consoleHeadHTML(def, st, busy)}
+              ${consoleBody}
+            </div>
+          </section>
+        </div>
       </div>
-      ${episodesListHTML(m)}
-      ${chapterMapHTML(m)}
-    </section>
+      <div class="pv-panel" data-panel="source" ${hide('source')}><div id="pv-source-host"></div></div>
+      <div class="pv-panel" data-panel="episodes" ${hide('episodes')}>
+        ${seasonsHTML(p, ctx)}
+        ${episodesListHTML(m)}
+        ${chapterMapHTML(m)}
+      </div>
+      <div class="pv-panel" data-panel="assets" ${hide('assets')}>
+        ${resourceCardHTML(p, m, stats)}
+        ${assetsHTML(p, ctx)}
+      </div>
+    </div>
   </div>`;
+  // 原文阅读器只在「原著」Tab 挂载，避免把整本小说常驻在其它视图的 DOM 里
+  if (tab === 'source') {
+    const srcHost = host.querySelector('#pv-source-host');
+    if (srcHost) SV.renderSourceView(srcHost, {
+      project: p,
+      source: ctx.source || null,
+      toast: ctx.toast,
+      onOpenEpisode: (no) => ctx.onOpenEpisode?.(no),
+      onReupload: () => ctx.onReupload?.(),
+      onOpenAssets: () => ctx.onOpenAssets?.(),
+    });
+  }
   bindEvents(host, ctx, { def, m });
+}
+
+/** 顶栏「更多」/ 首页流程卡直达某个工作台 Tab */
+export function setWorkshopTab(id) {
+  if (!id || !TABS.some((t) => t.id === id)) return;
+  ui.tab = id;
 }
 
 /* ================================================================== 事件绑定 */
@@ -491,6 +651,26 @@ function bindEvents(host, ctx, { def, m }) {
     } catch (e) { toast(e.message, 'err'); return null; }
   };
   const gotoStep = (id) => { ui.stepId = id; rerender(); };
+  const switchTab = (id) => { ui.tab = id; ctx.onTabChange?.(id); rerender(); };
+
+  // Tab 导航（顶部标签 + 概览里的快捷入口共用 data-tab）
+  host.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+  q('[data-act="view-source"]')?.addEventListener('click', () => switchTab('source'));
+  host.querySelectorAll('[data-act="open-overall"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenOverallCanvas?.()));
+  host.querySelectorAll('[data-act="open-episode"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenEpisode?.(Number(b.dataset.no))));
+  host.querySelectorAll('[data-act="open-ep-canvas"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenEpisodeCanvas?.(Number(b.dataset.no))));
+  host.querySelectorAll('[data-act="open-season-canvas"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenOverallCanvas?.()));
+  host.querySelectorAll('[data-act="add-season"]').forEach((b) => b.addEventListener('click', () => ctx.onAddSeason?.()));
+  host.querySelectorAll('[data-act="remove-season"]').forEach((b) => b.addEventListener('click', () => ctx.onRemoveSeason?.(Number(b.dataset.no))));
+  host.querySelectorAll('[data-ep-season]').forEach((sel) => sel.addEventListener('change', () => {
+    ctx.onAssignSeason?.(Number(sel.dataset.epSeason), Number(sel.value));
+  }));
+  host.querySelectorAll('[data-season-title]').forEach((inp) => inp.addEventListener('change', () => {
+    ctx.onRenameSeason?.(Number(inp.dataset.seasonTitle), inp.value);
+  }));
+  host.querySelectorAll('[data-act="open-assets"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenAssets?.()));
+  host.querySelectorAll('[data-act="refresh-assets"]').forEach((b) => b.addEventListener('click', () => ctx.onRefreshAssets?.()));
+  host.querySelectorAll('[data-file]').forEach((b) => b.addEventListener('click', () => ctx.onPreviewAsset?.(b.dataset.file)));
 
   // 路线图
   host.querySelectorAll('[data-step]').forEach((b) => b.addEventListener('click', () => gotoStep(b.dataset.step)));
@@ -498,10 +678,10 @@ function bindEvents(host, ctx, { def, m }) {
   q('[data-act="run-all"]')?.addEventListener('click', () => ctx.onRunStep?.(null, true));
   q('[data-act="run-step"]')?.addEventListener('click', (e) => ctx.onRunStep?.(e.target.dataset.id, false, true));
 
-  // 资源 / 管理入口
-  q('[data-act="assets"]')?.addEventListener('click', () => ctx.onOpenAssets?.());
-  q('[data-act="chars"]')?.addEventListener('click', () => ctx.onManage?.('characters'));
-  q('[data-act="manage"]')?.addEventListener('click', () => ctx.onManage?.());
+  // 资源 / 管理入口：多个 Tab 里可能出现同名按钮，统一按全部匹配绑定
+  host.querySelectorAll('[data-panel="assets"] [data-act="assets"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenAssets?.()));
+  host.querySelectorAll('[data-act="chars"]').forEach((b) => b.addEventListener('click', () => ctx.onManage?.('characters')));
+  host.querySelectorAll('[data-act="manage"]').forEach((b) => b.addEventListener('click', () => ctx.onManage?.()));
   q('[data-act="cover"]')?.addEventListener('click', () => ctx.onOpenCover?.());
   q('[data-act="open-canvas"]')?.addEventListener('click', () => ctx.onOpenCanvas?.());
   q('[data-act="goto-upload"]')?.addEventListener('click', () => { ui.upload.open = true; gotoStep('upload'); });

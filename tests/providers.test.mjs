@@ -146,6 +146,52 @@ test('Mock 模式产出 → 不算回退，无 __fallback 标记', async () => {
   assert.equal(out.__fallback, undefined, 'Mock 模式本身就是 Mock，不算回退');
 });
 
+/* ------------------------------------- 角色抽取：方法论准则 + 式(6) 证据注入 */
+const extractRequests = [];
+const extractServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    extractRequests.push(JSON.parse(body));
+    const json = {
+      model: 'test-model',
+      choices: [{ message: { content: JSON.stringify({ characters: [{ name: '林晚', staticFeatures: '剑眉深目', dynamicFeatures: '月白长裙' }] }) } }],
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(json));
+  });
+});
+await new Promise((resolve) => extractServer.listen(0, '127.0.0.1', resolve));
+
+after(() => {
+  extractServer.closeAllConnections?.();
+  extractServer.close();
+});
+
+test('charExtract → system prompt 含论文抽取准则，原著片段作为 FRAGMENT 证据注入', async () => {
+  extractRequests.length = 0;
+  const providers = createProviders({
+    provider: 'openai', apiKey: 'k',
+    baseUrl: `http://127.0.0.1:${extractServer.address().port}/v1/chat/completions`,
+  }, () => {});
+  const vars = {
+    title: '雨夜来信',
+    candidates: [{ name: '林晚', hits: 3 }],
+    fragments: [{ text: '林晚推门而入，鹅蛋脸、剑眉深目。', score: 1, kind: 'recall' }],
+    novelText: '【原著相关片段】\n林晚推门而入，鹅蛋脸、剑眉深目。',
+  };
+  await providers.generate('charExtract', vars);
+  const body = extractRequests[0];
+  const system = body.messages[0].content;
+  const user = body.messages[1].content;
+  assert.ok(system.includes('角色抽取准则'), 'system 应含抽取准则段');
+  assert.ok(system.includes('归并'), '准则应覆盖同一实体多称呼归并');
+  assert.ok(system.includes('aliases'), '输出结构应要求别称字段');
+  assert.ok(system.includes('FRAGMENT'), 'system 应声明片段为原文证据');
+  assert.ok(user.includes('林晚推门而入，鹅蛋脸、剑眉深目。'), 'user 应带召回的原文片段');
+  assert.ok(!user.includes('"fragments"'), 'fragments 元信息不应重复塞进 JSON');
+});
+
 /* ------------------------------------------------- 式(4) VLM 真实看图择优 */
 const judgeRequests = [];
 const judgeServer = http.createServer((req, res) => {
@@ -211,4 +257,71 @@ test('judge：Mock 模式 → 启发式打分（不算回退）', async () => {
   const verdict = await providers.judge({ candidates: [{ prompt: 'a' }, { prompt: 'b' }] });
   assert.equal(verdict.judgeMode, 'heuristic');
   assert.equal(verdict.fallback, undefined, 'Mock 模式本身就是启发式，不算回退');
+});
+
+/* --------------------- 角色抽取：输出解析重试 + 不被 Mock 玩具值污染（消灭假成功） */
+const charServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    const send = (content) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ model: 'test-model', choices: [{ message: { content } }] }));
+    };
+    if (req.url.startsWith('/retry')) {
+      charServer.calls = (charServer.calls || 0) + 1;
+      if (charServer.calls === 1) return send('这个角色有三个人……（思考过程，非 JSON）');
+      return send(JSON.stringify({
+        characters: [{ name: '林晚', evidence: [{ quote: '林晚推门而入', kind: 'mention' }] }],
+      }));
+    }
+    if (req.url.startsWith('/empty')) return send(JSON.stringify({ characters: [] }));
+    if (req.url.startsWith('/missing')) return send(JSON.stringify({
+      characters: [{ name: '林晚', staticFeatures: '剑眉深目', evidence: [] }],
+    }));
+    send('{}');
+  });
+});
+await new Promise((resolve) => charServer.listen(0, '127.0.0.1', resolve));
+
+after(() => {
+  charServer.closeAllConnections?.();
+  charServer.close();
+});
+
+function charProviders(route) {
+  return createProviders({
+    provider: 'openai', apiKey: 'k',
+    baseUrl: `http://127.0.0.1:${charServer.address().port}/${route}`,
+  }, () => {});
+}
+
+const CHAR_VARS = {
+  title: '雨夜来信',
+  candidates: [{ name: '林晚', hits: 3 }],
+  fragments: [{ text: '林晚推门而入', score: 1, kind: 'recall' }],
+  novelText: '林晚推门而入',
+};
+
+test('charExtract 输出非 JSON → 自动带提示重试一次并成功', async () => {
+  charServer.calls = 0;
+  const out = await charProviders('retry').generate('charExtract', CHAR_VARS);
+  assert.equal(charServer.calls, 2, '第一次解析失败后应重试第二次');
+  assert.equal(out.__fallback, undefined, '重试成功即视为真实产出');
+  assert.equal(out.characters.length, 1);
+  assert.deepEqual(out.characters[0].evidence, [{ quote: '林晚推门而入', kind: 'mention' }]);
+});
+
+test('charExtract 返回空角色数组 → 走回退并打标，不把 Mock 玩具角色当真实结果', async () => {
+  const out = await charProviders('empty').generate('charExtract', CHAR_VARS);
+  assert.equal(out.__fallback, true, '空结果必须打 __fallback，由路由层识别后退回启发式');
+  assert.ok(Array.isArray(out.characters), 'Mock 结果照常返回，但带标即不可信');
+});
+
+test('charExtract 成功 → 缺失字段不被 Mock 玩具值补齐', async () => {
+  const out = await charProviders('missing').generate('charExtract', CHAR_VARS);
+  assert.equal(out.__fallback, undefined, '真实产出不打回退标');
+  assert.equal(out.characters.length, 1);
+  assert.equal(out.characters[0].staticFeatures, '剑眉深目', '模型给的字段原样保留');
+  assert.equal(out.characters[0].costume, undefined, '模型没给的字段留空，不能被 Mock 默认值顶替');
 });

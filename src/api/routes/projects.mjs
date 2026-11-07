@@ -10,6 +10,7 @@ import { buildTemplate } from '../../pipelines/templates.mjs';
 import { validate, autoLayout } from '../../core/graph.mjs';
 import { runProject, stopProject, isRunning } from '../../core/orchestrator.mjs';
 import { chatWithCanvas } from '../../agents/canvas-agent.mjs';
+import { buildSourceView } from '../../core/source-view.mjs';
 
 export async function handleProjects(req, res, url) {
   const { pathname } = url;
@@ -84,6 +85,13 @@ export async function handleProjects(req, res, url) {
     } catch (err) {
       return json(res, { error: err.message }, 400), true;
     }
+  }
+
+  // 原著统计与原文读取：投影视图，不改项目、不落盘
+  if (sourceMatch && method === 'GET') {
+    const project = loadProject(sourceMatch[1]);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    return json(res, buildSourceView(project)), true;
   }
 
   const actionMatch = pathname.match(MATCH.projectAction);

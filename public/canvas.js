@@ -1,8 +1,7 @@
 // 无限画布引擎（全自主实现）：视口变换、缩放平移、节点拖拽、连线、框选、小地图、撤销重做
 import { createNodeEl, decorateNode, typeOf } from './nodes.js';
+import { clamp, uid } from './utils.js';
 
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const uid = (p = 'n') => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 export class CanvasController {
@@ -33,8 +32,14 @@ export class CanvasController {
   }
 
   /* ---------------- 数据与渲染 ---------------- */
-  setProject(project, { keepViewport = false } = {}) {
+  /**
+   * 绑定一份画布数据（{ nodes, edges, viewport }）。
+   * 项目主画布 / 单集独立画布 / 组合总览会共用同一个控制器反复切换数据源，
+   * 因此 resetHistory 必须清掉撤销栈，否则 undo 会把 A 画布的快照写回 B 画布。
+   */
+  setProject(project, { keepViewport = false, resetHistory = false } = {}) {
     this.project = project;
+    if (resetHistory) { this.history = []; this.future = []; }
     if (!keepViewport) this.vp = { ...(project.viewport || { x: 80, y: 60, zoom: 0.8 }) };
     this.selection.clear();
     this.render();

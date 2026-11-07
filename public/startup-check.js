@@ -6,9 +6,9 @@
  *   「先跳过」    → 记住选择（本地 + 服务端），顶栏保留「⚠ 模型未配置」入口随时可补配
  * 内置 Mock 模板可零配置跑通全流程，因此「跳过」是完全可用的路径，不是半成品。
  * ==========================================================================*/
+import { $, esc } from './utils.js';
+
 const SKIP_KEY = 'lx.skipConfigCheck';
-const $ = (id) => document.getElementById(id);
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /** 文本模型是否就绪：旧全局 llm 配齐，或模型库默认档案（activeModelId 指向）可用。
  *  与后端 resolveModelSettings 的解析优先级保持一致：默认档案 > 旧全局 llm。 */

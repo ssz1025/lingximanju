@@ -4,8 +4,8 @@
  * 可逐步补充，也可用「✦ AI 生成」一键补全。
  * 零第三方依赖，原生 ESM。
  * ==========================================================================*/
-const $ = (id) => document.getElementById(id);
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+import { $ } from './utils.js';
 
 async function api(path, body) {
   const res = await fetch(path, {

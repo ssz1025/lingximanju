@@ -100,7 +100,7 @@
 
 | 环节 | ViMax 参考实现 | lingximanju 实现 | 是否等价 |
 |---|---|---|---|
-| 分块 | `RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)` | `src/core/knowledge.mjs · chunkNovel(text, {chunkSize:512, overlap:128})`，按段落 / 句子边界聚合，块间带 128 字重叠 | ✅ 参数与重叠语义一致 |
+| 分块 | `RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)` | `src/core/bm25.mjs · chunkNovel(text, {chunkSize:512, overlap:128})`，按段落 / 句子边界聚合，块间带 128 字重叠 | ✅ 参数与重叠语义一致 |
 | 索引 / 宽召回 | `FAISS.from_texts()` + `CacheBackedEmbeddings`，`similarity_search(k=10)` | `KnowledgeBase` 构建 `df` / `avgLen`，`search(query,{k:10})` 用 BM25（`K1=1.5, B=0.75`）打分 | ⚠️ 同为「top-k 宽召回」，但用字词重合度替代向量语义 |
 | 重排 | `BAAI/bge-reranker-v2-m3`（SiliconAPI `/rerank`, `top_n=10`, `relevance_score`） | `normalizeScores()` 对 BM25 分做 min-max 归一化到 `[0,1]`，语义对齐 rerank 分数 | ⚠️ 同为「把召回结果重新打分到可阈值化的量纲」，但不用外部模型 |
 | 阈值与聚合 | `if score >= 0.7: relevant[chunk] += score`，对 `event.process_chain` 每条单独检索 | `retrieveRelevantChunks(kb, processChain, {topK:10, threshold:0.7})`，同一块跨 process 分数累加 | ✅ 逐条检索 / 0.7 / 累加语义一致 |
@@ -117,6 +117,22 @@
 
 **代价与边界**：BM25 无法捕捉「同义不同字」的语义相关性；若需要严格复现 ViMax 的向量召回 + bge reranker，可在 `src/core/providers.mjs` 增加可配置的 embedding / rerank Provider（当前实现不依赖外部服务，Mock 模式也能跑通式(6)）。差异不影响论文机制层的完整性：**分块 → 宽召回 → 重排 → 阈值 → processChain 累加 → FRAGMENT 下发**这条链路已逐条落地。
 
+### 5.2 角色提取与定妆：论文方法论 → 代码落点
+
+角色提取与定妆对应 ViMax 的 `agents/character_extractor.py` 与 `agents/character_portraits_generator.py`。本项目在「项目管理 → 角色」页实现同名能力，落点如下：
+
+| 论文方法 | ViMax 参考实现 | lingximanju 实现 | 是否等价 |
+|---|---|---|---|
+| 特征二分 | `CharacterInScene.static_features` / `dynamic_features` | `src/core/characters.mjs` 的 `staticFeatures`（脸型五官 / 发型发色 / 体型肤色，跨镜头恒定）与 `dynamicFeatures`（服装 / 配饰 / 道具，随场景变化）；缺失时由 `deriveFeatures()` 从外貌/发型/服装按语义派生 | ✅ 二分语义一致 |
+| 抽取准则 | `character_extractor.py` 的 `Guidelines` 段（不引入片段外设定 / 同一实体多称呼归并 / 未点名角色用身份+外貌命名 / 背景群众不单列 / 静态动态分离 / 角色间外形配色可区分） | `src/core/providers.mjs · SCHEMAS.charExtractGuide`（6 条），由 `generate('charExtract')` 注入 system prompt | ✅ 逐条对应 |
+| 检索增强（式(6)） | `retrieve_relevant_chunks`：分块 → 召回 → 重排 → 阈值 → FRAGMENT 下发 | `src/core/characters.mjs · buildCharacterPassages()`：全书 512/128 分块 → BM25 召回（候选角色名 + 分集梗概为线索）→ 阈值过滤 → 候选名字面定位窗口补齐 → 拼成 `【原著相关片段】/【「name」原文片段】` 证据 | ✅ 机制一致（检索器为纯 JS BM25，见 §5.1） |
+| 提示词结构 | extractor 输出 `appearance / hair / costume / props` 等自由字段 | `SCHEMAS.charExtract` 增加 `aliases`（别称归并）、`staticFeatures` / `dynamicFeatures`（特征二分）、`palette`（角色间配色可区分）、`viewPrompt`（定妆画面提示词） | ✅ 字段语义一致 |
+| 多视图一致性 | `character_portraits_generator.py`：front 写明 `(static) X; (dynamic) Y`，side/back 以 **front 定妆图为参考图**（`reference_image_paths`），提示词不重复特征描述 | `buildViewPrompt()`：front 写特征串；side/back 只声明朝向 +「以提供的正面定妆图为唯一外观依据」，不重述特征；`management.mjs · generateCharacterView()` 把 `character.views.front.url` 作为 `refs[0]` 注入图像生成（ComfyUI 侧为 `imageBuffer`） | ✅ 一致性策略等价 |
+
+**与旧实现的差异**：旧提取链路只取「开头 6000 字 + 每候选名附近 2 个窗口」，长篇中后段角色的外貌/服饰描写必然落空，模型只能靠常识编造；现改为全书检索召回 + 原文定位窗口，模型看到的是原文证据。单次 LLM 调用成本不变（上下文总量仍受 `EXTRACT_CAP=12000` 约束），召回率与属性准确度显著提升。
+
+**依赖方向约束**：检索算法层独立在 `src/core/bm25.mjs`（零 I/O、零依赖），`src/core/knowledge.mjs` 只保留磁盘缓存并转出算法。否则 `characters → knowledge → store → project-steps → characters` 会形成循环依赖。
+
 ---
 
 ## 6. 可验证清单（机制是否真的落地）
@@ -130,12 +146,14 @@
 | 机位依赖图与空间锚点 | `edges` 中 `kind='anchor'` 数量、`camera` 节点 `anchorCount / parallelLayers` |
 | best-of-2 择优 | `keyframe` 节点 `candidates.length=2`，`review` 节点 `selected / scores / reason` |
 | 角色一致性 | `edges` 中 `kind='ref'` 数量；`keyframe.data.refs` 含角色定妆图 |
+| 角色提取基于原文证据 | 「角色」页点「从原著提取」→ 运行日志「角色提取 · 召回 N 段原著片段」；角色对象的 `staticFeatures` / `dynamicFeatures` / `aliases` 字段；`management.characters[].source='llm'` |
+| 多视图以正面图为参考 | 角色卡片的侧面 / 背面图与正面图同脸型同服装；`character.views.side.prompt` 只含朝向与「以提供的正面定妆图为唯一外观依据」 |
 | 并行调度 | 运行日志的「第 N 波：X 个节点就绪，按并发 3 调度」 |
 | 六步状态与视觉提示 | 右侧「任务步骤」Tab、顶栏 `x/6` 胶囊与进度条、画布上方六步导航条、Toast 与运行日志 |
 | 双产物 | 第 ⑥ 步后 `final` 节点 `data.directorPack`（可下载 ZIP）/ `data.film`（接入 ComfyUI 后才有 MP4）、`timeline.json` |
 | 项目管理 | 侧栏搜索 / 筛选 / 收藏 / 归档 / 复制 / 标签，管理面板的快照创建与恢复 |
 
-### 6.1 自动化验证（`npm test` → 112 项全通过）
+### 6.1 自动化验证（`npm test` → 257 项全通过）
 
 机制层面的"真的落地"由测试固化，而非仅靠肉眼检查：
 
@@ -146,6 +164,10 @@
 | 层次化分解（式(5)） | `tests/novel-project.test.mjs`：分集节点与 `management.episodes` 数量一致；所有连线的 `from`/`to` 均指向存在的节点 |
 | RAG 语料（式(6)） | `idea` 节点携带原著全文；`management.source.text` 在重新分集后仍保留全文 |
 | 知识库 / 重排（式(6)） | `tests/knowledge.test.mjs`：`chunkNovel()` 的 512/128 分块与块间重叠、`KnowledgeBase.search()` 的 BM25 排序与 k 限制、`retrieveRelevantChunks()` 的 `processChain` 逐条检索 / 0.7 阈值 / 分数累加 / 单命中保底、缓存落盘往返、`formatFragments()` 的 FRAGMENT 标签与 512 截断 |
+| 检索算法层（角色提取复用） | `tests/bm25.test.mjs`：中文 bigram 分词与停用词过滤、512/128 分块与重叠、BM25 排序、多线索召回与阈值过滤、`formatFragments()` 标签串 |
+| 角色提取与定妆（§5.2） | `tests/characters.test.mjs`：`normalizeCharacter()` 的静态/动态特征派生与不被覆盖、`buildCharacterPrompt()` 区分固定/可变特征、`buildViewPrompt()` 正面显式写出特征二分、侧面/背面以正面图为依据且不重复特征描述、`buildCharacterPassages()` 能召回长篇中后段角色的外貌原文、`buildExtractVars()` 证据组装与 `EXTRACT_CAP` 截断、`mergeExtracted()` 别名并集 / 启发式占位可被覆盖 / 手改与已手改角色不被覆盖 |
+| 角色抽取的提示词注入（§5.2） | `tests/providers.test.mjs`：`charExtract` 的 system prompt 含论文抽取准则与 FRAGMENT 声明，user 消息带召回的原文片段且不重复塞入 `fragments` 元信息 |
+| 角色管理路由（§5.2） | `tests/character-routes.test.mjs`：`POST /characters/extract` 召回片段并写回角色（含 static/dynamic 特征）、无原著 400、`POST /characters/views` 三视图依次产出且侧面/背面提示词以正面定妆图为依据、角色不存在 404、非法视图 502 |
 | 项目封面（管理动作） | `tests/project-steps.test.mjs`：`createManagement` 初始化名称封面、`ensureManagement` 兼容老项目、上传 / ComfyUI 生成 / 恢复名称封面三种 `cover` 动作、`url`/`prompt` 长度钳制、`projectIndex` 下发 `cover` |
 | 角色一致性（ref 边） | `projectStats` 断言 `anchorCount` / `refCount` 分别统计两类依赖边 |
 | 六步状态机 | `tests/project-steps.test.mjs`：待执行→进行中→完成/失败→重置的完整迁移；进度百分比；失败时 `status='error'` |

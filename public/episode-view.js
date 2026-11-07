@@ -6,9 +6,8 @@
  * ==========================================================================*/
 import { mountEpisodeCanvas } from './episode-canvas.js';
 import { ensureModelPicker, withModelId } from './model-picker.js';
+import { esc, cut } from './utils.js';
 
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const q = (host, sel) => host.querySelector(sel);
 
 const TABS = [
@@ -47,6 +46,7 @@ function headerHTML(d) {
         <div><h1>${esc(ep.title)}</h1><small>${esc(d.project.name)} · ${(ep.chars || 0).toLocaleString()} 字 · ${(ep.chapters || []).length} 章 · ${(ep.segments || []).length} 段</small></div></div>
     </div>
     <div class="ev-head-right">
+      <button class="btn sm primary" data-act="open-ep-canvas" title="打开这一集自己的无限画布">⬡ 本集画布</button>
       <button class="btn sm" data-act="prev" ${d.neighbors?.prev ? '' : 'disabled'}>← 上一集</button>
       <span class="ev-pager">${ep.no} / ${d.episodeCount}</span>
       <button class="btn sm" data-act="next" ${d.neighbors?.next ? '' : 'disabled'}>下一集 →</button>
@@ -243,6 +243,8 @@ function bind(d, ctx) {
     prev: () => d.neighbors?.prev && ctx.onNavigate?.(d.neighbors.prev.no),
     next: () => d.neighbors?.next && ctx.onNavigate?.(d.neighbors.next.no),
     settings: () => ctx.onSettings?.(),
+    'open-ep-canvas': () => ctx.onOpenEpisodeCanvas?.(ep.no),
+    'open-overall-canvas': () => ctx.onOpenOverallCanvas?.(),
     'open-char-manager': () => ctx.onManageCharacters?.(),
   };
   host.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', async () => {
@@ -357,7 +359,7 @@ async function load(force = false) {
 /**
  * @param {HTMLElement} host #episode-view
  * @param {Object} ctx {projectId, no, toast, onBack, onNavigate, onSettings,
- *   onManageCharacters, onLocateCanvasNode}
+ *   onManageCharacters, onLocateCanvasNode, onOpenEpisodeCanvas, onOpenOverallCanvas}
  * @param {boolean} force 强制重新拉取（SSE 状态变更时用）
  */
 export async function renderEpisodeView(host, ctx = {}, force = false) {

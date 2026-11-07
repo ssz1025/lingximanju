@@ -6,9 +6,8 @@
  * 纯原生 ESM，数据来自 /api/bootstrap 的 projects / steps / settings / comfy。
  * ==========================================================================*/
 import { llmReady, llmReadyLabel } from './startup-check.js';
+import { esc, cut } from './utils.js';
 
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
 /** 六步流程说明：图文结合，id 与后端 STEPS / 工作台路线图一致 */
 const GUIDE = [

@@ -8,10 +8,8 @@
  * ==========================================================================*/
 import { toast } from './panels.js';
 import { collectProjectAssets } from './project-sidebar.js';
+import { $, esc, cut } from './utils.js';
 
-const $ = (id) => document.getElementById(id);
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const cut = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
 const fmtTime = (ts) => {
   const d = new Date(Number(ts));

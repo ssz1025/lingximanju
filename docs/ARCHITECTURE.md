@@ -154,6 +154,29 @@
 
 所有事件带 `ts` 与 `projectId`；前端只处理当前项目的事件。
 
+### 4.5 季 / 集 / 画布范围（2026-11-08 扩展）
+
+季是**轻量分组**，不引入二级集号：全局唯一集号 `no` 保持不变，`ep.season` 缺省为 `1`，季标题只存在 `management.seasons[]`；老项目读入即归「第 1 季」，无需迁移。
+
+```jsonc
+management.seasons = [{ "no": 2, "title": "第二季" }]
+management.episodes[n].season = 2            // 缺省 1
+management.episodes[n].canvas = {            // 该集独立无限画布，首次进入时播种落盘
+  "nodes": [Node], "edges": [Edge],
+  "viewport": { "x": 40, "y": 30, "zoom": 0.72 }
+}
+```
+
+画布范围键由 `public/project-model.js` 的 `scopeKeyOf() / parseScopeKey()` 统一管理：
+
+| key | 数据来源 | 可写 |
+|---|---|---|
+| `overall` | `composeOverallCanvas(project)` 从所有季 / 集画布派生的组合总览 | **否**（只读派生视图） |
+| `main` | `project.nodes / edges / viewport` | 是 |
+| `ep:<no>` | `management.episodes[n].canvas` | 是 |
+
+组合图节点 id 加 `cp_<集号>_` 前缀并携带 `data.scopeRef / data.sourceNodeId`，季分行、集按列，跨集用 `ref` 连线；它**不写回项目主画布**，双击节点按 `scopeRef` 跳回单集画布。切换范围时 `CanvasController.setProject(project, { resetHistory: true })` 清空 `history/future`，保证 A 画布的 undo 快照不会写回 B 画布；组合范围下 `scopeReadOnly()` 禁用运行 / 布局 / 删除 / 撤销等写操作。
+
 ---
 
 ## 5. REST API
@@ -163,6 +186,7 @@
 | GET | `/api/bootstrap` | 项目列表 + 最近项目 + 节点类型注册表 + 模板列表 |
 | POST | `/api/projects` | 新建项目（可带 `template`）；`kind:'novel'` 且不带 `text` 时创建**极简骨架**（六步全 pending，小说延后到第 ① 步） |
 | POST | `/api/projects/:id/source` | **延迟上传小说**：解析 + 分集 + 注入节点 + 完成 ①② 步（骨架项目的第 ① 步入口） |
+| GET | `/api/projects/:id/source` | **原著统计与全文**：`buildSourceView(project)` 返回 `{ ok, stats, chapters, sources, episodes, text }`；只读、不落盘、不改入参，历史项目惰性重建章节 |
 | GET / PUT / DELETE | `/api/projects/:id` | 读取 / 保存画布快照 / 删除项目 |
 | POST | `/api/projects/:id/template` | 应用流水线模板，重建节点图 |
 | POST | `/api/projects/:id/run` | 启动编排，body 可带 `nodeId`（单节点及下游重跑） |
@@ -248,7 +272,9 @@ providers.judge({ candidates, criteria })         -> { index, scores, reason }
 
 ## 9. 页面与体验设计
 
-布局：应用按 `home / workshop / canvas / episode` 四视图切换，并用「项目会话」区分是否打开了项目。`home` 项目列表页全宽展示（侧栏隐藏、顶栏只显示 `⌂ 项目列表`、状态栏显示项目总数）；打开项目后整页项目化：左侧是**项目侧栏**（项目卡与六步进度、项目导航与剧集快捷入口、本项目资源列表、项目设置入口；画布工具「模板 / 节点库 / 智能体」仅在 `canvas` 视图追加显示），中间是**无限画布**或**项目工作台 / 剧集详情**，右侧**检查器**（节点属性 ↔ Agent 对话切换，仅画布视图），顶部**工具栏**（项目封面 + 可编辑项目名 + 步骤胶囊 + `✕ 关闭项目`、运行态、运行/停止、Provider、主题、导出；工作台 / 画布不再重复面包屑），底部**状态栏**（本项目日志、节点 / 连线 / Provider / 缩放）。侧栏品牌与页脚、资源库入口文案也随会话切换。点 `✕` / `⌂ 项目列表` / 侧栏项目卡 `✕` / `H` 会执行 `closeProject()`：清空 `state.project`、画布、项目级浮层、日志与 Agent 对话，再刷新并回到项目列表；列表提供「↩ 继续上次项目」。项目列表、新建、导入只在 `home` 页出现；项目内打开资源库默认「仅本项目」，弹窗内可退出范围看全库。
+布局：应用按 `home / workshop / canvas / episode` 四视图切换，并用「项目会话」区分是否打开了项目。`home` 项目列表页全宽展示（侧栏隐藏、顶栏只显示 `⌂ 项目列表`、状态栏显示项目总数）；打开项目后整页项目化：左侧是**项目侧栏**（项目卡与六步进度、项目导航与剧集快捷入口、本项目资源列表、项目设置入口；画布工具「模板 / 节点库 / 智能体」仅在 `canvas` 视图追加显示），中间是**无限画布**或**项目工作台 / 剧集详情**，右侧**检查器**（节点属性 ↔ Agent 对话切换，仅画布视图），顶部**工具栏**（项目封面 + 可编辑项目名 + 步骤胶囊 + `✕ 关闭项目`、运行态、运行/停止、本项目模型、Provider、导出；不出现应用级按钮，工作台 / 画布不再重复面包屑），底部**状态栏**（本项目日志、节点 / 连线 / Provider / 缩放）。侧栏品牌与页脚、资源库入口文案也随会话切换。点 `✕` / `⌂ 项目列表` / 侧栏项目卡 `✕` / `H` 会执行 `closeProject()`：清空 `state.project`、画布、项目级浮层、日志与 Agent 对话，再刷新并回到项目列表；列表提供「↩ 继续上次项目」。项目列表、新建、导入以及应用级入口（`⌂ 项目列表` / `⚙` 设置 / `☀` 主题 / `?` 帮助 / `⚠ 模型未配置`，统一 class `.app-only`，由 `body:not(.view-home) .app-only` 隐藏）只在 `home` 页出现；项目内打开资源库默认「仅本项目」，弹窗内可退出范围看全库。**项目会话内全部内容绑定当前项目**：浏览器标签标题、状态栏 Provider（`本项目 · …`）、画布空态引导与剧集面包屑都带项目名；所有 AI 入口的模型下拉按「项目 + 入口」隔离记忆并显示「本项目默认模型」，切项目 / 关闭自动恢复；设置弹窗标题带项目名、帮助弹窗给出本项目 `x/6 步 · N 集 · M 节点` 与项目内快捷键；画布工具区标注当前模板、各类型节点数与只列本项目在用的智能体。项目内 `T` 切换主题（侧栏项目设置 `◐`）、`?` 打开本项目指引。
+
+**工作台降密度（2026-11-08）**：项目工作台改为四 Tab（`▦ 概览 / 📖 原著 / ▥ 分季分集 / ▣ 资源`），首屏只渲染概览，其余按需加载；`project-view.js` 的 `ui.tab` 与 `setWorkshopTab()` 支持顶栏「··· 更多」菜单深链直达。项目内次要按钮（项目管理 / 布局 / 导演包 / 导出 / 资源库）加 `.in-more`，由 `body:not(.view-home) .in-more` 隐藏，统一收进 `#more-menu`（`data-more` 或 `data-target` 触发）。项目侧栏增加 `.ps-links` 四个快捷入口与按季分组的剧集树。画布视图顶部新增范围条 `#canvas-scopebar`：`overall / main / ep:<no>` 三类，按季生成 `optgroup`，`⤢` 只适应当前范围。资源统一以 `collectProjectAssets()` 口径归属，在「资源」Tab 按类型归纳展示，与侧栏列表、资源库「仅本项目」一致。
 
 设计系统：深色优先（与 IDE 一致），提供浅色切换；背景 `#0d1016`、面板 `#151a23`、描边 `#252c39`、主色橙 `#ff8a4c`；节点按类型语义着色；圆角 12–16px；字重层级清晰；所有状态变化有 160–240ms 过渡；`running` 用呼吸光晕，`done` 用一次性扫光。
 
@@ -410,18 +436,27 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 | 层 | 文件 | 职责 |
 |---|---|---|
 | 纯逻辑 | `src/core/novel.mjs` | 解析小说（书名 / 章节 / 段落 / 字数）、三种分集策略、角色频次抽取、轻量预览与输入校验；无 DOM、无副作用 |
+| 纯逻辑 | `src/core/source-view.mjs` | `buildSourceView(project)`：以 `management.source.text` 为准汇总六项统计，优先用 `management.chapters`，为空时调 `parseNovel()` 惰性重建；只读、不落盘、不改入参；供 `GET /api/projects/:id/source` 使用 |
 | 纯逻辑 | `src/core/project-steps.mjs` | `STEPS` 六步定义（含 `scope` 与论文依据）、`management` 元数据（含 `cover`）、步骤状态机、管理动作、统计与索引 |
-| 纯逻辑 | `src/core/knowledge.mjs` | 式(6) 本地知识库：`chunkNovel(512,128)` 分块、BM25 `KnowledgeBase`、`retrieveRelevantChunks()` 归一化重排 / 0.7 阈值 / `processChain` 分数累加、磁盘缓存、`formatFragments()` FRAGMENT 标签 |
+| 纯逻辑 | `src/core/bm25.mjs` | 检索算法层（零 I/O、零依赖）：中文 bigram 分词与停用词、`chunkNovel(512,128)` 分块、BM25 `KnowledgeBase`、`retrieveRelevantChunks()` 归一化重排 / 阈值过滤 / 分数累加 / 近重复去重、`formatFragments()` FRAGMENT 标签 |
+| 纯逻辑 | `src/core/knowledge.mjs` | 式(6) 本地知识库的**磁盘缓存层**：`saveKnowledgeCache()` / `loadKnowledgeCache()` → `data/knowledge/<projectId>.json`；算法部分从 `bm25.mjs` 转出（拆层是为避免 `characters → knowledge → store → project-steps → characters` 循环依赖） |
+| 纯逻辑 | `src/core/characters.mjs` | 角色域模型：属性归一（含静态/动态特征二分与派生兜底）、造型与多视图提示词拼装、论文式(6) 角色召回 `buildCharacterPassages()`、提取输入组装 `buildExtractVars()`、提取结果合并 `mergeExtracted()` |
 | 构建 | `src/pipelines/novel-project.mjs` | `buildNovelProject()` 复用 `buildTemplate('novel2video')` 的完整 DAG，插入 `episode` 节点并注入原著 / 分集 / 交付设置；`refreshEpisodes()` 重算第 ② 步 |
 | 持久化 | `src/core/store.mjs` | 项目索引字段（`projectIndex`）、快照写入 / 列举 / 读取（`data/snapshots/<id>/<ts>.json`） |
 | 编排 | `src/core/orchestrator.mjs` | `runProject(id, { scope })` 按节点类型白名单分阶段调度；不传 `scope` 时行为不变 |
 | 智能体 | `src/agents/narrative.mjs`、`src/core/providers.mjs` | 编剧读取 `novelEpisodes / characters`；`rag` 用整本原著分块建库并落盘；`decomposer` 按事件 `processChain` 逐条检索并把 FRAGMENT 片段下发到 event / scene / shots；`generate('context')` 走本地 BM25 确定性检索 |
-| API | `src/api/routes.mjs`、`src/api/routes/management.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover`、`POST /api/projects/:id/cover/chat`（对话式创作）与 `POST /api/projects/:id/cover/generate`（生成入资源库 + 调用记录 `management.coverCalls`）；工作流库 `/api/comfyui/library` |
+| API | `src/api/routes.mjs`、`src/api/routes/management.mjs` | 向导预览 / 示例、创建创作项目、`manage / duplicate / snapshots / restore / step`、`broadcastMeta()`；封面 `POST / DELETE /api/projects/:id/cover`、`POST /api/projects/:id/cover/chat`（对话式创作）与 `POST /api/projects/:id/cover/generate`（生成入资源库 + 调用记录 `management.coverCalls`）；角色 `POST /api/projects/:id/characters/extract`（式(6) 召回证据 → LLM 抽取，失败回退启发式）、`POST /api/projects/:id/characters/views`（单视图，侧面/背面以正面图为 `refs`）、`POST /api/projects/:id/characters/views/all`（批量 + SSE 进度）；工作流库 `/api/comfyui/library` |
 | 前端 | `public/wizard.js` | 极简新建向导：只有项目名称必填 + 可选一句话构想 |
-| 前端 | `public/project-view.js` | 项目工作台（进入创作项目后的默认全屏页）：内容区左列路线图 / 故事来源 / 资源统计，右列项目信息（AI 补全）+ 步骤操作台 + 分集；顶栏 `V` 与画布视图互切 |
-| 前端 | `public/project-sidebar.js` | 项目内左侧栏：项目卡与进度、导航与剧集快捷入口、本项目资源列表（递归扫描项目 JSON 的 `/assets/` 引用 + 索引 `sourceProjectId` 补充归属、类型筛选、预览弹窗、进资源库 `files` 白名单）、项目设置入口；`collectProjectAssets()` 为纯函数，可单测 |
+| 前端 | `public/project-view.js` | 项目工作台四 Tab：概览（路线图 / 故事来源 / 项目信息 / 当前步骤）、原著（挂 `source-view.js`）、分季分集（`seasonsHTML()`：季卡片 / 每集卡片 / 跨季移动 / 本集画布）、资源（`assetsHTML()`：按类型归纳）；`setWorkshopTab()` 支持外部深链 |
+| 前端 | `public/project-model.js` | 季 / 集 / 画布范围的纯函数模型（`seasonGroups / assignEpisodeSeason / addSeason / removeSeason / scopeKeyOf / parseScopeKey`）与 `localSourceView()`（旧服务无 `/source` 时的前端等价统计与章节重建回退） |
+| 前端 | `public/source-view.js` | 原著阅读器 `renderSourceView()` + `sourceStatCards()`：六项统计卡、章节目录、全文 / 按章阅读、搜索高亮、复制 / 下载 / 重新导入；默认全文 |
+| 前端 | `public/canvas-compose.js` | `seedEpisodeCanvas()` 播种单集画布、`composeOverallCanvas()` 派生全部组合总览（id 加 `cp_<no>_` 前缀、跨集 `ref`、600 节点裁剪）、`canvasScopeLabel()` / `canvasScopeOptions()` |
+| 前端 | `public/canvas.js` | `setProject(project, { keepViewport, resetHistory })` 新增撤销栈隔离，供三种画布范围安全切换；其余自研画布引擎行为不变 |
+| 前端 | `public/index.html` | `··· 更多` 菜单（`.in-more` 收口）与画布范围条 `#canvas-scopebar`；`public/app.js` 负责 `activeCanvasGraph / setCanvasScope / scopeReadOnly / openEpisodeCanvas / openOverallCanvas` 与更多菜单接线 |
+| 前端 | `public/project-sidebar.js` | 项目内左侧栏：项目卡与进度、导航与剧集快捷入口、本项目资源列表（递归扫描项目 JSON 的 `/assets/` 引用 + 索引 `sourceProjectId` 补充归属、类型筛选、预览弹窗、进资源库 `files` 白名单）、项目设置入口（含 `◐` / `?`）；`collectProjectAssets()`（资源归属）、`projectChrome()`（会话外壳与标签标题）、`collectToolStats()`（本项目模板 / 节点 / 智能体统计）均为纯函数，可单测 |
 | 前端 | `public/project-manager.js`、`public/ai-chat.js` | 六步任务面板、画布步骤条、四 Tab 管理面板、对话式封面创作（`openAIChat()` 复用对话弹窗：生成 → 大图预览确认 → 保存）与封面生成调用记录展示；`renderProjectList()` 为历史侧栏渲染器（现由 `home-view.js` 承担） |
-| 前端 | `public/app.js` | 四视图状态机、项目侧栏 ctx 组装、状态同步、步骤执行、SSE `project:meta` / `episode:update` 防抖刷新、顶栏进度与快捷键 |
+| 前端 | `public/app.js` | 四视图状态机、**项目会话**（`closeProject()` 清空项目态回列表、`updateChrome()` 整页项目化含标签标题与画布空态、`openProjectAssetLibrary()` 默认本项目范围）、`renderCanvasTools()` 按本项目节点图统计工具区、`toggleTheme()`（`T` / 侧栏 `◐`）、`setModelProjectScope()` 接线、项目侧栏 ctx 组装、状态同步、步骤执行、SSE `project:meta` / `episode:update` 防抖刷新、顶栏进度与快捷键 |
+| 前端 | `public/model-picker.js` | AI 入口模型下拉：`modelScopeKey(entry, projectId)` 纯函数生成隔离键、`setModelProjectScope(id, name)` 同步页面上所有下拉到该项目的记忆值；项目内首项显示「本项目默认模型」，关闭项目回应用级默认，不写全局 `lm.model.*` |
 | 样式 | `public/styles.css` | 四态视觉、进度条、向导、步骤面板、管理面板、项目侧栏 `.ps-*`；项目卡片缩略图 / 名称封面 / 封面弹窗样式；沿用现有 CSS 变量兼容深浅主题 |
 | 节点 | `public/nodes.js` | 新增 `episode` 类型（`▥` 分集，紫色，无默认智能体） |
 | 测试 | `tests/novel.test.mjs` | 解析 / 分集策略 / 校验 / 角色抽取 / 预览不泄漏全文（16 项） |
@@ -444,7 +479,9 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
   "deliverables": { "video": true, "pack": true },      // → settings.comfy.outputMode
   "split": { "strategy": "chapter|fixed|scene", "targetChars": 1200, "maxEpisodes": 4 },
   "source": { "filename": "", "title": "", "totalChars": 0, "chapterCount": 0, "uploadedAt": 0, "text": "原著全文" },
-  "episodes": [{ "no": 1, "title": "", "chars": 0, "summary": "", "hook": "", "sourceTitles": [] }],
+  "seasons": [{ "no": 1, "title": "第 1 季" }],        // 轻量分组；缺省时老项目自动归入第 1 季
+  "episodes": [{ "no": 1, "season": 1, "title": "", "chars": 0, "summary": "", "hook": "", "sourceTitles": [],
+                 "canvas": { "nodes": [], "edges": [], "viewport": {} } }],   // 每集独立画布，首次进入播种落盘
   "steps": [{ "id": "script", "no": 3, "status": "pending|running|done|error", "startedAt": 0, "finishedAt": 0, "durationMs": 0, "note": "", "runs": 0 }],
   "currentStep": 3,
   "history": [{ "id": "", "at": 0, "action": "", "detail": "" }],
@@ -478,6 +515,7 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
+| GET | `/api/projects/:id/source` | 原著统计与全文（`buildSourceView()`）：`{ ok, stats, chapters, sources, episodes, text }`；前端在 404 时用 `localSourceView()` 等价回退 |
 | GET | `/api/novel/sample` | 向导「载入示例小说」（`examples/sample-novel.txt`） |
 | POST | `/api/novel/preview` | 实时分集预览，不落盘 |
 | GET | `/api/bootstrap` | 额外返回 `steps: STEPS`、`stats`（全部 / 创作 / 完成 / 进行中 / 归档 / 收藏）与扩展后的项目索引 |
@@ -509,7 +547,7 @@ SSE `project:meta` 事件：`{ projectId, management, stats, progress }`。前�
 
 ### 14.6 画布保留约束
 
-- `public/canvas.js` 一行未改：平移 / 指针缩放 / 拖拽 / 框选 / 端口连线 / 小地图 / 适应视图 / 自动布局 / 撤销重做 / 视口外回到内容全部保留。
+- 2026-11-06 时 `public/canvas.js` 一行未改；2026-11-08 为支持「每集独立画布 / 全部组合画布」仅给 `setProject()` 增加了 `resetHistory` 参数（切换范围时清空撤销栈）。平移 / 指针缩放 / 拖拽 / 框选 / 端口连线 / 小地图 / 适应视图 / 自动布局 / 撤销重做 / 视口外回到内容全部保留。
 - 创作项目初始图 = 原 `novel2video` DAG（8 节点）+ 每集一个 `episode` 节点；后续智能体动态展开的节点照旧画在同一画布。
 - 画布顶部在创作项目下由步骤导航条占据，`canvas-hint` 自动隐藏，避免两层提示重叠；`[hidden]` 兜底规则已覆盖新增组件。
 - 「查看画布节点」按步骤 `scope` 选中并聚焦对应节点；「⤢ 适应视图」「⌗ 布局」「F」「L」仍可随时使用。
@@ -579,5 +617,94 @@ management.source.text (原著全文)
 - 三个入口统一走 `applyManageAction(project, 'cover', value)` → `saveProject()` → `broadcastMeta()` → SSE `state`，并写入 `management.history`；确认保存时随带生成实际使用的完整提示词（`prompt`）落盘**不截断**。
 - 每次 `/cover/generate`（成功 / 失败）写入 `management.coverCalls` 调用记录（上限 20 条）：`promptId`、耗时、完整提示词、负向、参考图、提示词注入结果（注入节点 / 策略 / 告警）、`applied` 绑定明细与 `runWorkflow` 过程日志；管理面板「版本 / 记录」Tab 以折叠 `<details>` 展示过程日志，生成消息中显示调用号。
 - 前端 `openAIChat()` 复用对话弹窗组件（消息气泡 / promptBlock / 建议 chips / 动作按钮 / 忙等）；`openGeneratedConfirm` 放大预览 3:4，生成期间显示忙碌遮罩并禁用关闭，避免重复提交。
+
+### 14.11 项目重组：原著 / 分季分集 / 画布范围 / 资源归纳（2026-11-08）
+
+> 目标：降低项目内信息密度、把资源按类型归纳，并让「导入的小说」与「分集」都有可查看、可操作的落点。
+
+#### 14.11.1 数据落点
+
+| 能力 | 权威数据 | 派生 / 只读 |
+|---|---|---|
+| 原著全文 | `management.source.text` | `buildSourceView()` 统计与章节目录；旧服务由 `localSourceView()` 前端重建 |
+| 季 | `management.seasons[]`（`{no, title}`） | `seasonGroups(project)` 按季分组，含声明但未分配的空季 |
+| 集 | `management.episodes[]`（全局唯一 `no` + `season`） | 季标题、侧栏季树、范围下拉 `optgroup` |
+| 单集画布 | `management.episodes[n].canvas` | 首次进入 `seedEpisodeCanvas()` 播种并 `persist(true)` |
+| 组合画布 | — | `composeOverallCanvas()` 派生，不落盘、不写回主画布 |
+| 资源 | 项目 JSON 内 `/assets/` 引用 + 索引 `sourceProjectId` | `collectProjectAssets()` 统一口径，工作台 / 侧栏 / 资源库共用 |
+
+**兼容性**：季字段全部缺省可读，老项目视为第 1 季；`chapters=[]` / `sources=[]` / `episodes[].text=''` 的历史数据在统计时惰性重建；`GET /source` 404 时前端不报错而是走等价回退。所有新增纯函数不改入参。
+
+#### 14.11.2 范围切换与只读保护
+
+```
+#canvas-scope (change) ─► setCanvasScope(key)
+   ├─ activeCanvasGraph()  ─ overall → composeGraph()（派生）
+   │                        ├─ main   → project
+   │                        └─ ep:N   → episodes[n].canvas（缺失则 seed + persist）
+   ├─ canvas.setProject(graph, { keepViewport, resetHistory:true })
+   ├─ updateCanvasScopeUI()  ─ 按季生成 optgroup + hint
+   └─ scopeReadOnly()        ─ overall 时禁用运行/布局/删除/撤销与字段写回
+```
+
+检查器 `renderInspector()` 与 `activeNodeList()` 改为面向**当前范围**的图；`onFieldChange()` 在组合范围下不触发 `persist()`。SSE `state` / `syncProject()` 刷新时统一经过 `syncCanvasScope()`，避免把主画布快照覆盖到单集 / 组合视图。
+
+#### 14.11.3 交互收口
+
+- 项目会话内 `.app-only` 隐藏应用级入口、`.in-more` 隐藏次要项目按钮；`#more-menu` 通过 `data-more="source|seasons|assets|overall"` 直达工作台 Tab 或组合画布，`data-target` 复用既有按钮。
+- 侧栏 `.ps-links` 四个快捷入口与按季分组的剧集树，每集带 `data-ep-canvas` 直达本集画布；页脚显示 `N 季 M 集`。
+- 剧集详情头部增加「⬡ 本集画布」与「🌐 全部组合画布」入口。
+- 工作台首屏只渲染概览 Tab；原著 Tab 默认全文阅读（不截成第一章），分集 Tab 提供季下拉与跨季移动，资源 Tab 按类型给出统计卡与缩略图网格。
+
+#### 14.11.4 验证
+
+`npm run check` 93 文件通过；`npm test` **284/284**（本轮新增 `source-view` 6 / `canvas-compose` 6 / `project-model` 9 共 21 项）。Electron 33 offscreen 连隔离服务 `LINGXIMANJU_DATA_DIR=/tmp/lxm-e2e-data-4 PORT=45423` 真机 E2E **35/35 断言通过、0 JS 运行时错误**，覆盖四 Tab、原著统计与全文、新增 / 重命名 / 跨季移动与刷新持久化、资源归纳、单集画布、组合画布（250 节点 / 417 连线）、主画布、更多菜单与关闭返回列表。真实 `data/projects/*.json` 未被写入。详见 [`VERIFICATION.md`](VERIFICATION.md)。
+
+### 14.12 代码结构整理：共享层与纯函数边界（2026-11-08）
+
+> 目标：在不改变任何现有文件路径、不改动业务行为的前提下，消除重复实现、明确依赖方向，让规则类逻辑可被单测直接覆盖。
+
+#### 14.12.1 整理前的问题
+
+| 现象 | 影响 |
+|---|---|
+| `esc` / `escapeHTML` 在 14 个前端模块各写一份 | 存在两种转义强度：多数只转 `& < > "`，少数还转 `'`；单引号属性值有注入风险，且修复一处不会同步到其他模块 |
+| `cut` 在 9 个模块各写一份 | 两种语义并存：`slice(0, n) + '…'`（输出 n+1 长度）与 `slice(0, n - 1) + '…'`（输出 ≤ n），同一文案在不同视图被截成不同长度 |
+| `num` / `clamp` / `uid` / `fmt` / `str` / `escapeRegExp` 各有 2–3 份 | 口径漂移，无法统一加固 |
+| 画布范围的「分组 / 签名 / 提示 / 只读」规则散在 `app.js` 的 `updateCanvasScopeUI()` 等函数里 | 与 DOM 写入混在一起，无法单测；规则改动只能靠真机点测 |
+| `styles.css` 单文件 1700+ 行 | 只有零散分节注释，缺少全局导航与命名约定 |
+
+#### 14.12.2 分层与依赖方向
+
+```
+public/utils.js          零依赖 · 无 DOM 副作用 · 唯一一份通用纯工具
+   ▲          ▲
+   │          │
+纯函数层      视图 / 引擎层（nodes / canvas / 各 *-view / panels / ...）
+project-model.js            │
+canvas-compose.js           │
+canvas-scope.js ────────────┘
+   ▲
+   └── public/app.js（只做编排：把纯函数结果写进 DOM、绑定事件、驱动画布）
+```
+
+- `utils.js` **不 import 任何业务模块**，因此 `nodes.js → utils.js`、`canvas.js → utils.js` 等不会形成环。
+- `canvas-scope.js` 只依赖 `project-model.js` 的 `parseScopeKey()`；范围键编解码仍归 `project-model.js`，下拉数据仍归 `canvas-compose.js`，本模块负责「怎么分组、何时算变化、显示什么、是否只读」。
+- 所有新模块顶层不触碰 `document` / `window` / `localStorage`（`$()` 内部用 `typeof document` 保护），`node:test` 可直接导入。
+
+#### 14.12.3 统一口径与两处有意的健壮性提升
+
+| 项 | 统一后 | 说明 |
+|---|---|---|
+| `esc(s)` | 转义 `& < > " '`，`null/undefined` 归空串 | 升级为原先更安全的版本；浏览器中 `&#39;` 仍渲染成 `'`，视觉无变化 |
+| `cut(s, n)` | 输出长度 ≤ n，`…` 计入 n | 与 `source-view` / `canvas-compose` 等原本较严格的口径对齐；原 `slice(0,n)+'…'` 的调用方少 1 个字符 |
+| `uid(prefix)` | 时间戳 + 单调递增序列 + 随机尾 | 原实现同毫秒内高频调用约 7% 概率碰撞（单测曾偶发失败），补序列后同毫秒连续调用也唯一；调用方只用其作 id 值，不依赖格式 |
+| `EMPTY_CANVAS_PROJECT` | 从 `app.js` 移到 `canvas-scope.js`，保持普通对象 | 不冻结，避免画布空态被写入时由静默失败变成 TypeError |
+
+除上述两点（转义强度、uid 唯一性）属于**修复**外，其余均为等价搬移，`cut` 的长度统一只影响省略号位置，不改变任何业务流程或数据结构。
+
+#### 14.12.4 验证
+
+`npm run check` **97 文件**通过；`npm test` **299/299**（新增 `utils` 8 项、`canvas-scope` 7 项）。另做 ESM 链接与符号完整性扫描，确认 19 个被改模块无重复声明、无漏导入。Electron 33 offscreen 连隔离服务 `PORT=45423` 复跑既有 E2E **35/35、0 JS 运行时错误**，两张深色主题截图目视确认无转义残留与布局回归。详见 [`VERIFICATION.md`](VERIFICATION.md)。
 
 

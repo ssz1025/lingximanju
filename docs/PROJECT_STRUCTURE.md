@@ -26,6 +26,10 @@ lingximanju/
 │   │   ├── events.mjs          # 事件总线 + SSE 订阅
 │   │   ├── store.mjs           # JSON 原子持久化 + 资产落盘 + 项目快照
 │   │   ├── novel.mjs           # 小说解析 / 三种分集策略 / 角色抽取 / 预览校验
+│   │   ├── source-view.mjs     # 原著统计纯函数 buildSourceView()：从 source.text 汇总字数/章节/段落/集/季/角色，惰性重建章节与来源关联
+│   │   ├── characters.mjs      # 角色域模型：属性归一（含静态/动态特征二分）/ 造型与多视图提示词 / 式(6) 角色召回 / 提取输入组装 / 结果合并
+│   │   ├── bm25.mjs            # 检索算法层（零 I/O）：中文 bigram 分词 / 512-128 分块 / BM25 召回 / 归一化重排与阈值过滤 / 近重复去重
+│   │   ├── knowledge.mjs       # 式(6) 知识库的磁盘缓存层（data/knowledge/*.json）；算法部分转出 bm25.mjs
 │   │   ├── assets.mjs          # 资源索引（index.json 打标签/改名/类型）+ 跨项目角色优先匹配
 │   │   ├── project-steps.mjs   # 六步定义（含 scope 与论文依据）/ management / 状态机 / 管理动作
 │   │   ├── graph.mjs           # DAG 拓扑分层 / 上下游 / 自动布局
@@ -51,21 +55,30 @@ lingximanju/
 │       ├── routes.mjs          # 路由聚合器：跨源访问硬化 + 按域分发
 │       ├── http.mjs            # json / readBody 等共用件
 │       └── routes/             # system / comfy / management / media / projects / assets / match 各域实现
+│                               #   projects.mjs 另含 GET /api/projects/:id/source（原著统计与全文）
 ├── electron/                   # Electron 主进程（多端打包入口，见 README「桌面版安装与分发」）
 ├── examples/                   # workflows/ 两份 API 工作流 + sample-novel.txt 示例小说
 ├── public/
-│   ├── index.html              # 页面骨架（项目侧栏 / 首页 / 工作台 / 剧集 / 三 Tab 检查器 / 画布步骤条）
-│   ├── styles.css              # 设计系统 + 四态视觉提示 + 项目侧栏 .ps-*
-│   ├── canvas.js               # 无限画布引擎（自研，创作项目层未改动）
+│   │                           # ── 共享层（零依赖 / 无 DOM 副作用，可被 node:test 直接导入）──
+│   ├── utils.js                # 前端唯一一份通用纯工具：esc/escapeHTML、cut、num、fmtNum、fmt、clamp、uid、str、escapeRegExp、$；所有视图与画布引擎统一从这里导入
+│   ├── canvas-scope.js         # 画布范围 UI 规则：EMPTY_CANVAS_PROJECT、groupScopeOptions（按季 optgroup）、scopeOptionsSignature、scopeHint、isScopeReadOnly；app.js 只负责把结果写进 DOM
+│   │                           # ── 入口与视图 ──
+│   ├── index.html              # 页面骨架（项目侧栏 / 首页 / 工作台 / 剧集 / 三 Tab 检查器 / 画布步骤条）；应用级入口统一 .app-only；新增 ··· 更多菜单（#btn-more / #more-menu）与画布范围条（#canvas-scopebar / #canvas-scope）
+│   ├── styles.css              # 设计系统（文件头有分区目录与命名约定）+ 四态视觉提示 + 项目侧栏 .ps-* + 项目会话视图显隐；.more-menu / .cs-* 范围条 / .pv-* 工作台 Tab / .sv-* 原著阅读器 / .sx-* 分季分集 / .ax-* 资源归纳
+│   ├── canvas.js               # 无限画布引擎（自研）；setProject(project, { keepViewport, resetHistory }) 支持切换画布范围时清空撤销栈；clamp / uid 改由 utils.js 提供
+│   ├── project-model.js        # 季/集与画布范围的纯函数模型：seasonOf / seasonGroups / assignEpisodeSeason / addSeason / removeSeason / scopeKeyOf / parseScopeKey / localSourceView（后端 /source 不可达时的前端等价回退）
+│   ├── source-view.js          # 原著阅读视图：renderSourceView() + sourceStatCards()；六项统计、章节目录、全文/按章阅读、搜索高亮、复制/下载/重新导入
+│   ├── canvas-compose.js       # 画布派生纯函数：seedEpisodeCanvas() 播种单集画布、composeOverallCanvas() 按季/集组合总览、canvasScopeLabel() / canvasScopeOptions()
 │   ├── nodes.js                # 节点类型与渲染（新增 episode 分集节点）
 │   ├── wizard.js               # 新建创作项目向导（只有「项目名称」必填 + 可选一句话构想，其余进项目后补）
-│   ├── project-view.js         # 项目工作台：内容区左列漫剧路线图 / 故事来源（上传·AI 生成）/ 资源统计；右列项目信息（AI 补全）+ 步骤操作台 + 分集
-│   ├── project-sidebar.js      # 项目内左侧栏：项目卡与进度 / 导航与剧集快捷入口 / 本项目资源列表（引用归属·筛选·预览）/ 项目设置入口；collectProjectAssets（资源归属）与 projectChrome（会话外壳文案）为可单测纯函数
+│   ├── project-view.js         # 项目工作台（四 Tab）：概览（路线图 / 故事来源 / 项目信息 / 当前步骤）、原著（挂 source-view.js）、分季分集（seasonsHTML：季卡片 / 每集卡片 / 跨季移动 / 本集画布）、资源（assetsHTML：按类型归纳）；setWorkshopTab() 供外部深链
+│   ├── project-sidebar.js      # 项目内左侧栏：项目卡与进度 / .ps-links 四快捷入口 / 按季分组的剧集树（每集带 data-ep-canvas）/ 本项目资源列表 / 项目设置；collectProjectAssets（资源归属）、projectChrome（会话外壳与标签标题，页脚含季数）、collectToolStats 为可单测纯函数
 │   ├── project-manager.js      # 六步面板（第 ① 步内嵌上传小说入口）/ 画布步骤条 / 管理面板（支持指定 Tab）/ 历史项目列表渲染器
 │   ├── asset-manager.js        # 资源库：类型/标签/来源项目筛选 · 搜索 · 改名打标 · 复用选择；支持 files 白名单与 project 动态范围（项目会话内默认「仅本项目」，可一键退出）
 │   ├── link-picker.js          # 拖拽松手后的「选择下一个节点 / 连接关系」浮层
-│   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片
-│   └── app.js                  # 状态机 / API / SSE / 六步执行 / 快捷键；项目会话 closeProject（清空项目态回列表）、updateChrome（整页项目化外壳）与 openProjectAssetLibrary（默认本项目范围）
-├── tests/                      # node:test 单元与 HTTP 闭环验证（npm test）
+│   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片；openSettings / openHelp 接收当前项目，标题与快捷键随项目切换
+│   ├── model-picker.js         # AI 入口模型下拉：按「项目 + 入口」隔离记忆（modelScopeKey / setModelProjectScope），项目会话内显示「本项目默认模型」
+│   └── app.js                  # 状态机 / API / SSE / 六步执行 / 快捷键；项目会话 closeProject、updateChrome、openProjectAssetLibrary、renderCanvasTools、toggleTheme；新增画布范围 activeCanvasGraph / composeGraph / setCanvasScope / updateCanvasScopeUI / openOverallCanvas / openEpisodeCanvas、ensureSourceView（带 localSourceView 回退）、applySeasonMutation、openWorkshopTab、更多菜单绑定与组合画布只读保护 scopeReadOnly()
+├── tests/                      # node:test 单元与 HTTP 闭环验证（npm test，299 项）；结构整理新增 utils(8) / canvas-scope(7) 共 15 项
 └── data/                       # 运行时：projects/*.json、assets/*、snapshots/*、comfyui.json
 ```

@@ -1,9 +1,7 @@
 // 检查器、对话、设置、弹窗、右键菜单、Toast 等 UI 组件
 import { NODE_TYPES, typeOf, STATUS_LABEL, previewHTML } from './nodes.js';
+import { $, esc, fmt } from './utils.js';
 
-const $ = (id) => document.getElementById(id);
-const esc = (s = '') => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const fmt = (v) => (v === undefined || v === null || v === '' ? '—' : String(v));
 
 /* ---------- Toast ---------- */
 export function toast(message, type = '') {
@@ -179,8 +177,10 @@ export async function openSettings(project, onSave) {
     <div id="cf-result" class="cf-result" hidden></div>`;
 
   const modal = showModal({
-    title: '模型、ComfyUI 与最终产物设置',
-    sub: '图片与视频主路径为本地 ComfyUI（直接使用导出的 API 工作流）。连接配置全局保存，项目设置单独保存；所有数据只写入本地 data/ 目录。',
+    title: project ? `「${project.name || '未命名项目'}」· 模型与运行设置` : '模型、ComfyUI 与最终产物设置',
+    sub: project
+      ? '本项目的运行参数随项目单独保存；模型库与 ComfyUI 连接是应用级共享配置。所有数据只写入本地 data/ 目录。'
+      : '图片与视频主路径为本地 ComfyUI（直接使用导出的 API 工作流）。连接配置全局保存，项目设置单独保存；所有数据只写入本地 data/ 目录。',
     body,
     actions: [
       { label: '取消' },
@@ -718,21 +718,49 @@ export function openNewProject(templates, onCreate) {
 }
 
 /* ---------- 快捷键帮助 ---------- */
-export function openHelp() {
-  const rows = [
-    ['空格 + 拖拽 / 中键', '平移画布'], ['滚轮', '以指针为中心缩放'], ['拖拽节点', '移动（支持多选整体移动）'],
+export function openHelp(project = null) {
+  const canvasRows = [
+    ['空格 + 拖拽 / 中键', '平移本项目画布'], ['滚轮', '以指针为中心缩放'], ['拖拽节点', '移动（支持多选整体移动）'],
     ['空白处拖拽', '框选多个节点'], ['从右侧端口拖出并松手', '弹窗选下一个节点：新建 / 连接已有'],
     ['拖到目标节点后松手', '弹窗选 flow / anchor / ref 连接关系'], ['Alt / Shift + 拖线到节点', '跳过弹窗，直接连 anchor / ref'],
-    ['从节点库拖入画布', '弹窗选要连接的上游节点，Esc 跳过'], ['双击节点', '在检查器中编辑'],
+    ['从本项目画布节点拖入', '弹窗选要连接的上游节点，Esc 跳过'], ['双击节点', '在检查器中编辑'],
     ['右键节点', '单节点重跑 / 复制 / 删除'],
     ['Ctrl/Cmd + Z', '撤销'], ['Ctrl/Cmd + Shift + Z', '重做'], ['Ctrl/Cmd + D', '复制选中节点'],
     ['Delete / Backspace', '删除选中节点'], ['Ctrl/Cmd + A', '全选'], ['F', '适应视图'],
-    ['L', '自动布局'], ['R', '运行完整流水线'], ['Esc', '取消选择 / 关闭弹窗'],
-    ['N', '新建创作项目（上传小说 → 分集 → 视频 / 导演包）'],
-    ['S', '执行创作项目的下一步任务'], ['P', '打开项目管理面板（分集 / 产物 / 快照）'],
-    ['右侧「任务步骤」Tab', '六步执行清单、四态视觉提示与对应的论文公式'],
+    ['L', '自动布局'], ['R', '运行本项目流水线'], ['Esc', '从剧集详情返回 / 取消选择'],
+    ['右侧「任务步骤」Tab', '本项目六步执行清单、四态视觉提示'],
   ];
-  showModal({ title: '快捷键与交互', sub: '无限画布完整保留；创作项目在「任务步骤」Tab 逐步执行，画布节点随每一步生长。',
+  let rows;
+  let title = '快捷键与交互';
+  let sub = '无限画布完整保留；创作项目在「任务步骤」Tab 逐步执行，画布节点随每一步生长。';
+  if (project) {
+    const m = project.management || {};
+    const steps = Array.isArray(m.steps) ? m.steps : [];
+    const done = steps.filter((s) => s.status === 'done').length;
+    const eps = Array.isArray(m.episodes) ? m.episodes.length : 0;
+    const nodes = Array.isArray(project.nodes) ? project.nodes.length : 0;
+    rows = [
+      ['V', '本项目工作台 ⇄ 画布视图'],
+      ['S', '执行本项目下一步任务'],
+      ['P', '打开本项目管理面板（分集 / 产物 / 快照）'],
+      ['H 或 ✕', '关闭本项目，返回项目列表'],
+      ['N', '新建创作项目（在项目列表页也可使用）'],
+      ['◐ / T', '切换外观主题'],
+      ['?', '打开本项目操作指引'],
+      ['左侧「项目资源」', `只显示「${project.name || '本项目'}」的资源，可筛选 / 预览 / 进资源库`],
+      ['左侧「项目设置」', '项目信息 / 创作设定 / 角色 / 封面 / 运行参数 / 导出'],
+      ...canvasRows,
+    ];
+    title = `「${project.name || '未命名项目'}」· 操作指引`;
+    sub = `本项目：${done}/${steps.length || 6} 步 · ${eps} 集 · ${nodes} 节点；以下入口与快捷键都作用于当前项目。`;
+  } else {
+    rows = [
+      ['N', '新建创作项目（上传小说 → 分集 → 视频 / 导演包）'],
+      ['S', '执行创作项目的下一步任务'], ['P', '打开项目管理面板（分集 / 产物 / 快照）'],
+      ...canvasRows,
+    ];
+  }
+  showModal({ title, sub,
     body: `<div class="help-grid">${rows.map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('')}</div>`,
     actions: [{ label: '知道了', primary: true }] });
 }

@@ -388,7 +388,8 @@ export function applyManageAction(project, action, value) {
       if (idx >= 0) {
         // 只在本 action 内合并更新；views 产物只由生成端点写入
         const prev = m.characters[idx];
-        const next = normalizeCharacter({ ...prev, ...raw, id: prev.id, source: prev.source, views: prev.views, updatedAt: now() });
+        // 标记为「用户手改」：后续重新提取时不再覆盖这些字段
+        const next = normalizeCharacter({ ...prev, ...raw, id: prev.id, source: prev.source, views: prev.views, edited: true, updatedAt: now() });
         m.characters[idx] = next;
         logHistory(m, 'characters', `更新角色「${next.name}」属性`);
         return { ok: true, message: `角色「${next.name}」已保存`, character: next };
