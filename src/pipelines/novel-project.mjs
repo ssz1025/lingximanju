@@ -12,13 +12,70 @@
  * ==========================================================================*/
 import { buildTemplate } from './templates.mjs';
 import { makeNode, makeEdge } from '../core/agent.mjs';
-import { parseNovel, splitEpisodes, validateNovelInput, extractCharacters } from '../core/novel.mjs';
+import { parseNovel, splitEpisodes, validateNovelInput, extractCharacters, mergeNovelFiles } from '../core/novel.mjs';
 import { createManagement, ensureManagement, finishStep } from '../core/project-steps.mjs';
 import { mergeExtracted } from '../core/characters.mjs';
+import { linkChapters, buildEpisodeRecords, splitSegments, matchEpisodeCharacters } from '../core/episode-model.mjs';
 
 const cut = (s, n) => { const t = String(s || '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
 /** 式(1) 输入归一：各集中部摘录拼接（≤2400 字），覆盖全部分集而非只取第一集 */
 const joinExcerpts = (eps) => cut((eps || []).map((e) => `【${e.title}】${e.excerpt || ''}`).join('\n'), 2400);
+
+/**
+ * 把「解析 + 分集」的结果落成项目里的三类关联数据：
+ *   · management.chapters —— 每章带 episodeNo 与来源文件名
+ *   · management.sources  —— 每个导入文件的章节清单
+ *   · management.episodes —— 每集带原文、章节清单、段落（宫格图槽位）、出场角色
+ * 保留同集同文本下已生成的剧本 / 宫格图 / 导演包 / 视频，重算分集不清空成果。
+ */
+function materializeEpisodes(m, novel, episodes, chapterSources, sources, characters) {
+  const meta = chapterSources.length ? chapterSources
+    : novel.chapters.map((c) => ({ title: c.title, sourceName: novel.filename || '粘贴文本', chars: c.chars }));
+  const linked = linkChapters(novel, episodes, meta);
+  const records = buildEpisodeRecords(episodes, novel, meta, m.episodes);
+  for (const ep of records) {
+    if (!Array.isArray(ep.segments) || !ep.segments.length) ep.segments = splitSegments(ep.text, 6, ep.no);
+    if (!Array.isArray(ep.characterIds) || !ep.characterIds.length) ep.characterIds = matchEpisodeCharacters(ep, characters);
+  }
+  m.episodes = records;
+  m.chapters = linked.chapters;
+  m.sources = sources.length ? sources : [{
+    name: novel.filename || '粘贴文本', chars: novel.totalChars,
+    chapterTitles: novel.chapters.map((c) => c.title),
+  }];
+  return records;
+}
+
+/** 统一的输入解析：单文本 / 粘贴 / 多文件三条入口收敛到同一份原著 + 出处元数据 */
+function resolveSource(opts = {}) {
+  if (Array.isArray(opts.files) && opts.files.length) {
+    const merged = mergeNovelFiles(opts.files);
+    if (!merged.ok) throw new Error(merged.message);
+    return { text: merged.text, filename: merged.filename, sources: merged.sources, chapterSources: merged.chapterSources, message: merged.message };
+  }
+  return {
+    text: opts.text, filename: opts.filename,
+    sources: opts.sources || [], chapterSources: opts.chapterSources || [], message: '',
+  };
+}
+
+/** 分集画布节点：带 episodeNo / 章节 / 段落数，并指向 management 里的原文（不重复塞全文） */
+function episodeNode(ep, i) {
+  return makeNode({
+    type: 'episode', agent: null, status: 'done', title: ep.title,
+    x: 60 + (i % 2) * 150, y: 620 + Math.floor(i / 2) * 150,
+    data: {
+      episode: { no: ep.no, title: ep.title, chars: ep.chars, summary: ep.summary, hook: ep.hook, sourceTitles: ep.sourceTitles },
+      episodeNo: ep.no,
+      chapters: (ep.chapters || []).map((c) => c.title),
+      segmentCount: (ep.segments || []).length,
+      text: cut(ep.text, 120),
+      fullTextRef: `management.episodes[${ep.no - 1}].text`,
+      summary: `${ep.chars} 字｜${ep.summary}`,
+      kind: '分集',
+    },
+  });
+}
 
 /** 交付物 → composer 读取的 outputMode（src/agents/visual.mjs） */
 export function outputModeOf(deliverables = {}) {
@@ -109,7 +166,9 @@ export function attachSource(project, opts = {}) {
   const m = ensureManagement(project);
   if (m.kind !== 'novel') throw new Error('只有创作项目可以上传小说');
   const split = { ...(m.split || {}), ...(opts.split || {}) };
-  const checked = validateNovelInput(opts.text, { filename: opts.filename, split });
+  // 多文件：合并成一份带「文件 → 章节」出处的原著；单文件 / 粘贴保持原行为
+  const input = resolveSource(opts);
+  const checked = validateNovelInput(input.text, { filename: input.filename, split });
   if (!checked.ok) throw new Error(checked.message);
   const { novel, episodes } = checked;
   const characters = extractCharacters(novel.text);
@@ -163,16 +222,10 @@ export function attachSource(project, opts = {}) {
   plan.data = { ...(plan.data || {}), sceneLimit: Math.max(1, Math.min(4, episodes.length)), shotsPerScene: 3, summary: `事件 → 场景 → 镜头 · 按 ${episodes.length} 集建立分集梗概` };
 
   // 分集目录：左侧纵向一列，不干扰主 DAG；每集用 ref 边把数据传给剧本节点
-  const episodeNodes = episodes.map((ep, i) => makeNode({
-    type: 'episode', agent: null, status: 'done',
-    title: ep.title, x: 60 + (i % 2) * 150, y: 620 + Math.floor(i / 2) * 150,
-    data: {
-      episode: { no: ep.no, title: ep.title, chars: ep.chars, summary: ep.summary, hook: ep.hook, sourceTitles: ep.sourceTitles },
-      text: cut(ep.text, 120),
-      summary: `${ep.chars} 字｜${ep.summary}`,
-      kind: '分集',
-    },
-  }));
+  // 先落关联数据（章节 / 剧集 / 段落），画布节点再从同一份数据生成，避免两处口径不一致
+  m.characters = mergeExtracted(m.characters || [], characters, { source: 'heuristic' }).characters;
+  const records = materializeEpisodes(m, novel, episodes, input.chapterSources, input.sources, m.characters);
+  const episodeNodes = records.map((ep, i) => episodeNode(ep, i));
   for (const n of episodeNodes) {
     project.nodes.push(n);
     if (idea) project.edges.push(makeEdge(idea.id, n.id, 'flow'));
@@ -191,19 +244,16 @@ export function attachSource(project, opts = {}) {
     totalChars: novel.totalChars, chapterCount: novel.chapterCount,
     uploadedAt: Date.now(), text: novel.text,
   };
-  m.episodes = episodes.map((e) => ({ no: e.no, title: e.title, chars: e.chars, summary: e.summary, hook: e.hook, sourceTitles: e.sourceTitles || [] }));
   m.split = split;
-  // 上传即播种角色候选（启发式归一）：重复上传只补空字段，不覆盖手动维护的角色属性
-  m.characters = mergeExtracted(m.characters || [], characters, { source: 'heuristic' }).characters;
-
   const t0 = Date.now();
-  finishStep(m, 'upload', { ok: true, note: `已解析 ${novel.chapterCount} 章 · ${novel.totalChars} 字`, durationMs: Date.now() - t0 });
-  finishStep(m, 'episodes', { ok: true, note: `按 ${split.strategy} 策略拆为 ${episodes.length} 集`, durationMs: Date.now() - t0 });
+  finishStep(m, 'upload', { ok: true, note: `已解析 ${input.sources.length || 1} 个来源 · ${novel.chapterCount} 章 · ${novel.totalChars} 字`, durationMs: Date.now() - t0 });
+  finishStep(m, 'episodes', { ok: true, note: `按 ${split.strategy} 策略拆为 ${episodes.length} 集 · 章节已自动关联`, durationMs: Date.now() - t0 });
   m.updatedAt = Date.now();
 
   return {
-    novel, episodes,
-    message: `已上传《${novel.title}》· ${novel.chapterCount} 章 ${novel.totalChars} 字 · 拆为 ${episodes.length} 集`,
+    novel, episodes, records,
+    chapters: m.chapters, sources: m.sources,
+    message: `${input.message ? `${input.message} · ` : ''}已上传《${novel.title}》· ${novel.chapterCount} 章 ${novel.totalChars} 字 · 自动关联并拆为 ${episodes.length} 集`,
   };
 }
 
@@ -213,11 +263,13 @@ export function attachSource(project, opts = {}) {
  *   text 为空 → 极简骨架，六步全待执行，小说延后到第 ① 步上传
  */
 export function buildNovelProject(opts = {}) {
-  const hasText = String(opts.text || '').trim().length > 0;
+  const hasFiles = Array.isArray(opts.files) && opts.files.some((f) => String(f?.text || '').trim());
+  const hasText = String(opts.text || '').trim().length > 0 || hasFiles;
   let name = opts.name;
   if (hasText && !String(name || '').trim()) {
     // 未命名时保持原行为：用书名命名（校验失败则不建项目）
-    const v = validateNovelInput(opts.text, { filename: opts.filename, split: opts.split });
+    const src = hasFiles && !opts.text ? resolveSource({ files: opts.files }) : { text: opts.text, filename: opts.filename };
+    const v = validateNovelInput(src.text, { filename: src.filename, split: opts.split });
     if (!v.ok) throw new Error(v.message);
     name = `${v.novel.title} · 小说分集`;
   }
@@ -248,15 +300,11 @@ export function refreshEpisodes(project, opts = {}) {
   const plan = project.nodes.find((n) => n.type === 'plan');
   const rag = project.nodes.find((n) => n.type === 'rag');
 
-  for (const [i, ep] of episodes.entries()) {
-    const n = makeNode({
-      type: 'episode', agent: null, status: 'done', title: ep.title,
-      x: 60 + (i % 2) * 150, y: 620 + Math.floor(i / 2) * 150,
-      data: {
-        episode: { no: ep.no, title: ep.title, chars: ep.chars, summary: ep.summary, hook: ep.hook, sourceTitles: ep.sourceTitles },
-        text: cut(ep.text, 120), summary: `${ep.chars} 字｜${ep.summary}`, kind: '分集',
-      },
-    });
+  // 复用上传时的关联逻辑：章节重挂到新集、段落重新切分，同集同文本保留已生成产物
+  const chapterSources = (m.chapters || []).map((c) => ({ title: c.title, sourceName: c.sourceName, chars: c.chars }));
+  const records = materializeEpisodes(m, novel, episodes, chapterSources, m.sources || [], m.characters || []);
+  for (const [i, ep] of records.entries()) {
+    const n = episodeNode(ep, i);
     project.nodes.push(n);
     if (idea) project.edges.push(makeEdge(idea.id, n.id, 'flow'));
     if (script) project.edges.push(makeEdge(n.id, script.id, 'ref'));
@@ -272,8 +320,7 @@ export function refreshEpisodes(project, opts = {}) {
   if (rag) rag.data = { ...(rag.data || {}), summary: `待索引原著 ${novel.totalChars} 字（${novel.chapterCount} 章）` };
   if (idea) idea.data = { ...(idea.data || {}), summary: `${novel.title}｜${novel.chapterCount} 章 · ${novel.totalChars} 字 · 拆为 ${episodes.length} 集` };
 
-  m.episodes = episodes.map((e) => ({ no: e.no, title: e.title, chars: e.chars, summary: e.summary, hook: e.hook, sourceTitles: e.sourceTitles }));
   m.split = split;
   m.updatedAt = Date.now();
-  return { episodes, novel, message: `已按 ${split.strategy} 策略重新拆为 ${episodes.length} 集` };
+  return { episodes, records, novel, chapters: m.chapters, message: `已按 ${split.strategy} 策略重新拆为 ${episodes.length} 集 · 章节关联已同步` };
 }

@@ -8,6 +8,8 @@
 
 顶栏 ⚙ 设置 → 第二个 Tab「本地 ComfyUI / 最终产物」：填地址 → 分别「导入 JSON」两份工作流 → 「测试连接」→ 需要时点「⌗ 分析」查看自动识别到的注入点 → 设置尺寸 / 帧率 / 采样 / 产物模式 → 保存。配置写入 `data/comfyui.json`（全局复用，不随项目 JSON 走）。
 
+**逐个工作流独立测试**：出图 / 视频工作流库的每一行都有「▶ 测试」按钮，只向本地 ComfyUI 提交**该工作流一次真实生成**，不牵动其它行。结果框会显示耗时、成功 / 失败原因、`prompt_id`、产物数量与缩略图、提示词实际注入的节点与策略、注入告警；实时进度日志追加在同一结果框中，并把成功 / 失败状态写回该行的 `lastTest` 徽标，可随时点按钮重跑。「▶ 测试全部」则按库顺序串行跑完所有行。同一时间只允许一个试跑任务（单项或批量），避免抢占 ComfyUI 队列。接口也支持可选的自定义测试提示词 `prompt`。
+
 **参数注入分三层，优先级从高到低**：
 
 | 层 | 用法 | 适用 |
@@ -54,6 +56,8 @@ extra/manifest.json / README.md    来源信息与导入步骤
 | POST | `/api/comfyui/analyze` | 分析工作流（可传 `kind` 取当前生效工作流），返回可注入节点清单 + `promptInjection` 干跑计划 |
 | POST | `/api/comfyui/inject-check` | 本地干跑自检：图片 / 视频两份生效工作流的提示词注入位置、策略与告警 |
 | POST | `/api/comfyui/run-test` | 用当前配置试跑一次工作流，响应含 `promptInjection` |
+| POST | `/api/comfyui/test-one` | 设置页每行「▶ 测试」：按 `{kind, id, prompt?}` 单独试跑库中某一个工作流，返回 `result`（成功 / 失败、耗时、prompt_id、产物、提示词注入计划与告警），并只写回该行 `lastTest`；id 不存在返回 404 |
+| POST | `/api/comfyui/test-batch` | 按 `{kind, ids}` 串行批量试跑，逐项写回 `lastTest`，进度经 SSE `wf-test` 日志广播；与 `test-one` 共用同一套试跑逻辑 |
 | GET / POST | `/api/projects/:id/director-pack` | 下载 / 重新生成导演包 |
 | GET | `/api/projects/:id/film` | 下载拼接后的成片 MP4 |
 

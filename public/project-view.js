@@ -49,7 +49,7 @@ const ui = {
   stepId: null,
   info: {},                       // 项目信息编辑稿（bible 字段）
   skipCapture: false,             // AI 补全等服务端改写场景：跳过一次 DOM 捕获，避免旧输入框值盖回新数据
-  upload: { open: false, filename: '', text: '', msg: '', err: false },
+  upload: { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 },
   ai: { open: false, idea: '', chapterCount: 3, chapterChars: 800, outline: null, source: '', message: '', busy: false, busyText: '' },
 };
 
@@ -58,7 +58,7 @@ function resetUi(p) {
   ui.projectId = p.id;
   ui.stepId = null;
   ui.info = {};
-  ui.upload = { open: false, filename: '', text: '', msg: '', err: false };
+  ui.upload = { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 };
   ui.ai = { open: false, idea: String(m.bible?.logline || ''), chapterCount: 3, chapterChars: 800, outline: null, source: '', message: '', busy: false, busyText: '' };
 }
 
@@ -221,6 +221,10 @@ function consoleHeadHTML(def, st, busy) {
 function uploadConsoleHTML(m) {
   const s = m.source || {};
   const has = !!s.text;
+  const sp = m.split || { strategy: 'chapter', targetChars: 1200, maxEpisodes: 4 };
+  const strategy = ui.upload.strategy || sp.strategy || 'chapter';
+  const target = ui.upload.targetChars || sp.targetChars || 1200;
+  const max = ui.upload.maxEpisodes || sp.maxEpisodes || 4;
   return `
   ${has ? `<div class="pv-src-card">
       <div class="pv-src-badge ok">✓ 故事已就绪</div>
@@ -232,14 +236,26 @@ function uploadConsoleHTML(m) {
       </div>
     </div>` : ''}
   ${!has || ui.upload.open ? `<div class="pv-sub-card" id="pv-upload-card">
-      <div class="pv-sub-head"><strong>⇧ 上传小说</strong><span>.txt / .md · 或直接粘贴正文 · 至少 40 字 · 上传后自动完成 ①②</span></div>
+      <div class="pv-sub-head"><strong>⇧ 上传小说（支持多文件）</strong><span>.txt / .md · 可一次选多个文件 · 或直接粘贴正文 · 至少 40 字</span></div>
       <div class="pv-up-actions">
-        <button class="btn sm" data-up="file">选择文件</button>
+        <button class="btn sm" data-up="file">＋ 选择文件（可多选）</button>
         <button class="btn sm" data-up="sample">载入示例小说</button>
+        <button class="btn sm" data-up="clear" ${ui.upload.files.length ? '' : 'disabled'}>清空文件</button>
       </div>
-      <textarea id="pv-up-text" rows="5" placeholder="雨夜来信&#10;&#10;第一章 没有署名的信&#10;雨下了整夜……">${esc(ui.upload.text)}</textarea>
+      <div class="pv-up-files" id="pv-up-files">${ui.upload.files.length
+    ? ui.upload.files.map((f, i) => `<span class="pv-file-chip" title="${esc(f.name)}">📄 ${esc(cut(f.name, 22))}<small>${(f.text || '').length} 字</small><button data-up-remove="${i}" title="移除">✕</button></span>`).join('')
+    : '<span class="pv-up-files-hint">未选择文件 · 也可直接在下方粘贴正文</span>'}</div>
+      <textarea id="pv-up-text" rows="4" placeholder="雨夜来信&#10;&#10;第一章 没有署名的信&#10;雨下了整夜……">${esc(ui.upload.text)}</textarea>
+      <div class="pv-up-rules">
+        <span class="pv-up-rules-title">拆分规则（上传时即按此自动分集）</span>
+        <div class="pv-up-split">${SPLIT_STRATEGIES.map((s) => `<button class="pv-split-card ${strategy === s.id ? 'selected' : ''}" data-up-split="${s.id}"><strong>${s.name}</strong><small>${s.hint}</small></button>`).join('')}</div>
+        <div class="pv-up-rule-nums">
+          <label>每集目标字数 <input type="number" id="pv-up-target" min="300" max="8000" step="100" value="${target}"></label>
+          <label>最多集数 <input type="number" id="pv-up-max" min="1" max="12" value="${max}"></label>
+        </div>
+      </div>
       <div class="pv-up-foot">
-        <span class="pv-up-msg ${ui.upload.err ? 'err' : ''}">${esc(ui.upload.msg || '上传后自动解析章节并分集，可在第 ② 步调整')}</span>
+        <span class="pv-up-msg ${ui.upload.err ? 'err' : ''}">${esc(ui.upload.msg || '上传后自动合并文件、解析章节并按规则关联到对应剧集')}</span>
         <button class="btn primary sm" data-up="submit">⇧ 上传并自动分集</button>
       </div>
     </div>` : ''}
@@ -283,7 +299,7 @@ function episodesConsoleHTML(m, st, busy) {
       <label>最多集数 <input type="number" id="pv-sp-max" min="1" max="12" value="${sp.maxEpisodes}"></label>
       <button class="btn sm primary" data-act="re-split" ${busy ? 'disabled' : ''}>▥ 按新参数重新分集</button>
     </div>
-    <div class="pv-hint">当前 ${(m.episodes || []).length} 集 · 重新分集会替换画板上的分集节点，原著全文保留。</div>
+    <div class="pv-hint">当前 ${(m.episodes || []).length} 集 · 重新分集会替换画板上的分集节点，章节关联同步更新，原著全文保留。</div>
   </div>`;
 }
 
@@ -345,20 +361,50 @@ function deliverConsoleHTML(p, m, stats, busy) {
     </div>`;
 }
 
+/* ------------------------------------------------- 文件 / 章节 → 剧集关联一览 */
+function chapterMapHTML(m) {
+  const sources = m.sources || [];
+  const chapters = m.chapters || [];
+  const eps = m.episodes || [];
+  if (!sources.length && !chapters.length) {
+    if (!eps.length) return '';
+    const strategy = SPLIT_STRATEGIES.find((s) => s.id === m.split?.strategy)?.name || '自定义规则';
+    return `<div class="pv-card pv-linkmap pv-linkmap-empty">
+      <div class="pv-card-head"><span>🔗 文件 / 章节 → 剧集 自动关联</span><span class="pv-hint-inline">${eps.length} 集 · 待补全</span></div>
+      <div class="pv-hint">本项目按「${esc(strategy)}」拆分，创建时未记录文件与章节出处。到第 ① 步「准备故事」重新上传一次小说（支持多文件），系统会自动把每个文件、每一章关联到对应剧集，分集列表与剧集详情会同步出现关联信息。</div>
+    </div>`;
+  }
+  return `<div class="pv-card pv-linkmap">
+    <div class="pv-card-head"><span>🔗 文件 / 章节 → 剧集 自动关联</span><span class="pv-hint-inline">${sources.length} 个来源 · ${chapters.length} 章 · ${eps.length} 集</span></div>
+    ${sources.length ? `<div class="pv-src-list">${sources.map((f) => `<span class="pv-src-chip">📄 ${esc(f.name)} <small>${(f.chars || 0).toLocaleString()} 字 · ${(f.chapterTitles || []).length} 章</small></span>`).join('')}</div>` : ''}
+    ${chapters.length ? `<div class="pv-chapter-list">${chapters.slice(0, 24).map((c) => `<div class="pv-chapter-row">
+        <span class="pv-chapter-title">${esc(cut(c.title, 30))}</span>
+        <span class="pv-chapter-file">${esc(cut(c.sourceName || '原著', 18))}</span>
+        <i class="pv-chapter-line"></i>
+        <button class="pv-chapter-ep" data-ep="${c.episodeNo}">第 ${c.episodeNo} 集 →</button>
+      </div>`).join('')}</div>` : ''}
+    <div class="pv-hint">章节按拆分规则归入对应剧集；点集号可查看该集原文、剧本、角色与宫格分镜。</div>
+  </div>`;
+}
+
 /* ------------------------------------------------------------------ 分集列表 */
 function episodesListHTML(m) {
   const eps = m.episodes || [];
   if (!eps.length) return '';
   return `<div class="pv-card pv-eps">
-    <div class="pv-card-head"><span>▥ 分集 · ${eps.length} 集</span><span class="pv-hint-inline">摘要与结尾钩子由拆解自动生成</span></div>
+    <div class="pv-card-head"><span>▥ 分集 · ${eps.length} 集</span><span class="pv-hint-inline">点击任意一集查看原文 / 剧本 / 角色 / 宫格分镜</span></div>
     <div class="pv-eps-list">${eps.map((e) => `
-      <div class="pv-ep">
+      <button class="pv-ep" data-ep="${e.no}" title="打开第 ${e.no} 集详情">
         <span class="pv-ep-no">${e.no}</span>
         <div class="pv-ep-main"><strong>${esc(e.title)}</strong>
           <p>${esc(e.summary || '')}</p>
           ${e.hook ? `<small>钩子：${esc(e.hook)}</small>` : ''}</div>
-        <span class="pv-ep-chars">${(e.chars || 0).toLocaleString()} 字</span>
-      </div>`).join('')}</div>
+        <span class="pv-ep-side">
+          <span class="pv-ep-chars">${(e.chars || 0).toLocaleString()} 字</span>
+          <span class="pv-ep-tags">${(e.chapters || []).length} 章 · ${(e.segments || []).length} 段${e.script ? ' · 剧本✓' : ''}</span>
+          <span class="pv-ep-go">查看详情 →</span>
+        </span>
+      </button>`).join('')}</div>
   </div>`;
 }
 
@@ -411,6 +457,7 @@ export function renderProjectView(host, ctx = {}) {
         ${consoleBody}
       </div>
       ${episodesListHTML(m)}
+      ${chapterMapHTML(m)}
     </section>
   </div>`;
   bindEvents(host, ctx, { def, m });
@@ -478,53 +525,104 @@ function bindEvents(host, ctx, { def, m }) {
     manage('settings', { [el.dataset.set]: el.value });
   }));
 
-  // ① 上传小说
-  const readFile = (file) => {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      ui.upload.text = String(reader.result || ''); ui.upload.filename = file.name;
-      const ta = q('#pv-up-text'); if (ta) ta.value = ui.upload.text;
-      ui.upload.msg = `已载入「${file.name}」· ${ui.upload.text.trim().length} 字`; ui.upload.err = false;
-      const msgEl = q('.pv-up-msg'); if (msgEl) { msgEl.textContent = ui.upload.msg; msgEl.classList.remove('err'); }
-    };
-    reader.readAsText(file, 'utf-8');
+  // ① 上传小说：单文件 / 多文件 / 粘贴正文三条入口，统一按拆分规则提交
+  const setUploadMsg = (text, err = false) => {
+    ui.upload.msg = text; ui.upload.err = err;
+    const msgEl = q('.pv-up-msg');
+    if (msgEl) { msgEl.textContent = text; msgEl.classList.toggle('err', err); }
   };
+  const paintFiles = () => {
+    const box = q('#pv-up-files');
+    if (!box) return;
+    box.innerHTML = ui.upload.files.length
+      ? ui.upload.files.map((f, i) => `<span class="pv-file-chip" title="${esc(f.name)}">📄 ${esc(cut(f.name, 22))}<small>${(f.text || '').length} 字</small><button data-up-remove="${i}" title="移除">✕</button></span>`).join('')
+      : '<span class="pv-up-files-hint">未选择文件 · 也可直接在下方粘贴正文</span>';
+  };
+  const readFiles = (fileList) => {
+    const files = [...(fileList || [])].filter((f) => /\.(txt|md|markdown|json|text)$/i.test(f.name));
+    if (!files.length) { setUploadMsg('请选择 .txt / .md 文本文件', true); return; }
+    if (ui.upload.files.length + files.length > 12) { setUploadMsg('一次最多导入 12 个文件', true); return; }
+    let pending = files.length;
+    for (const file of files) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        ui.upload.files.push({ name: file.name, text: String(reader.result || '') });
+        pending -= 1;
+        if (pending <= 0) {
+          paintFiles();
+          const total = ui.upload.files.reduce((a, f) => a + f.text.length, 0);
+          setUploadMsg(`已选择 ${ui.upload.files.length} 个文件 · 合计 ${total.toLocaleString()} 字 · 上传后自动关联章节与剧集`);
+          const clearBtn = q('[data-up="clear"]'); if (clearBtn) clearBtn.disabled = false;
+        }
+      };
+      reader.readAsText(file, 'utf-8');
+    }
+  };
+  const readSplit = () => ({
+    strategy: q('[data-up-split].selected')?.dataset.upSplit || m.split?.strategy || 'chapter',
+    targetChars: Number(q('#pv-up-target')?.value) || m.split?.targetChars || 1200,
+    maxEpisodes: Number(q('#pv-up-max')?.value) || m.split?.maxEpisodes || 4,
+  });
+
+  q('#pv-up-files')?.addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-up-remove]');
+    if (!rm) return;
+    e.preventDefault();
+    ui.upload.files.splice(Number(rm.dataset.upRemove), 1);
+    paintFiles();
+    setUploadMsg(ui.upload.files.length ? `已选择 ${ui.upload.files.length} 个文件` : '文件已清空');
+  });
+  host.querySelectorAll('[data-up-split]').forEach((b) => b.addEventListener('click', () => {
+    host.querySelectorAll('[data-up-split]').forEach((x) => x.classList.toggle('selected', x === b));
+    ui.upload.strategy = b.dataset.upSplit;
+  }));
   host.querySelectorAll('[data-up]').forEach((b) => b.addEventListener('click', async () => {
     const act = b.dataset.up;
     if (act === 'file') {
       const input = document.createElement('input');
-      input.type = 'file'; input.accept = '.txt,.md,.markdown,text/plain,text/markdown';
-      input.onchange = () => readFile(input.files?.[0]);
+      input.type = 'file'; input.multiple = true;
+      input.accept = '.txt,.md,.markdown,.text,text/plain,text/markdown';
+      input.onchange = () => readFiles(input.files);
       input.click();
+    } else if (act === 'clear') {
+      ui.upload.files = []; paintFiles(); b.disabled = true;
+      setUploadMsg('文件已清空，可重新选择或粘贴正文');
     } else if (act === 'sample') {
       try {
         const d = await api('/api/novel/sample');
         ui.upload.text = d.text; ui.upload.filename = d.filename;
         const ta = q('#pv-up-text'); if (ta) ta.value = d.text;
-        ui.upload.msg = `示例已载入 · ${d.text.trim().length} 字`; ui.upload.err = false;
-        const msgEl = q('.pv-up-msg'); if (msgEl) msgEl.textContent = ui.upload.msg;
-      } catch (e2) { ui.upload.msg = e2.message; ui.upload.err = true; }
+        setUploadMsg(`示例已载入 · ${d.text.trim().length} 字`);
+      } catch (e2) { setUploadMsg(e2.message, true); }
     } else if (act === 'submit') {
+      const split = readSplit();
+      const files = ui.upload.files.slice();
       const text = String(q('#pv-up-text')?.value || '').trim();
-      if (text.length < 40) {
-        ui.upload.msg = `正文至少需要 40 字（当前 ${text.length} 字）`; ui.upload.err = true;
-        const msgEl = q('.pv-up-msg'); if (msgEl) { msgEl.textContent = ui.upload.msg; msgEl.classList.add('err'); }
+      if (!files.length && text.length < 40) {
+        setUploadMsg(`正文至少需要 40 字（当前 ${text.length} 字）`, true);
         return;
       }
       b.disabled = true;
-      ui.upload.msg = '正在解析与分集…'; ui.upload.err = false;
+      setUploadMsg('正在合并文件、解析章节并自动分集…');
       try {
-        const out = await api(`/api/projects/${p.id}/source`, { text, filename: ui.upload.filename, split: m.split });
-        ui.upload = { open: false, filename: '', text: '', msg: '', err: false };
+        const payload = files.length
+          ? { files, split }
+          : { text, filename: ui.upload.filename, split };
+        const out = await api(`/api/projects/${p.id}/source`, payload);
+        ui.upload = { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 };
         ui.stepId = 'episodes';
         await ctx.onSourceUploaded?.(out);
       } catch (e2) {
         b.disabled = false;
-        ui.upload.msg = e2.message; ui.upload.err = true;
-        rerender();
+        setUploadMsg(e2.message, true);
       }
     }
+  }));
+
+  // 分集列表 / 章节映射：点击集号直达剧集详情
+  host.querySelectorAll('[data-ep]').forEach((b) => b.addEventListener('click', (e) => {
+    e.preventDefault();
+    ctx.onOpenEpisode?.(Number(b.dataset.ep));
   }));
 
   // ① AI 生成小说
@@ -591,4 +689,12 @@ function bindEvents(host, ctx, { def, m }) {
   }));
   q('[data-act="dl-film"]')?.addEventListener('click', () => { window.location.href = `/api/projects/${p.id}/film`; });
   q('[data-act="dl-pack"]')?.addEventListener('click', () => ctx.onDownloadPack?.());
+}
+
+/** 首页流程卡片「进入这一步」：切到工作台并定位对应步骤操作台 */
+export function setWorkshopStep(id) {
+  if (!id) return;
+  ui.stepId = id;
+  // 已有原著的项目默认收起上传表单；从流程卡进来时直接展开，保证「进入这一步」即可操作
+  if (id === 'upload') ui.upload.open = true;
 }

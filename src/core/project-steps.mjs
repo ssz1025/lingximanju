@@ -167,10 +167,20 @@ export function createManagement(opts = {}) {
       chapterCount: Number(opts.source?.chapterCount) || 0,
       uploadedAt: now(), text: opts.source?.text || '',
     },
+    // 剧集详情相关字段（原文 / 章节 / 段落 / 剧本 / 宫格图 / 产物）全部随项目 JSON 持久化；
+    // 用展开保留已有字段，兼容上传时创建与后续按集生成的两种路径。
     episodes: (opts.episodes || []).map((e) => ({
       no: e.no, title: e.title, chars: e.chars, summary: e.summary, hook: e.hook,
       sourceTitles: e.sourceTitles || [],
+      text: e.text || '', excerpt: e.excerpt || '', strategy: e.strategy || '',
+      chapters: e.chapters || [], characterIds: e.characterIds || [],
+      script: e.script || null, segments: e.segments || [],
+      pack: e.pack || null, video: e.video || null,
+      updatedAt: e.updatedAt || now(),
     })),
+    // 章节 / 文件出处：与 episodes[].chapters 双向表达「章节 ↔ 剧集」关联
+    chapters: opts.chapters || [],
+    sources: opts.sources || [],
     // 骨架项目（尚未上传小说）：六步全 pending、当前停在第 ① 步
     steps: freshSteps({ pending: !!opts.skeleton }),
     currentStep: opts.skeleton ? 1 : 3,
@@ -190,6 +200,18 @@ export function ensureManagement(project) {
   // 老项目惰性补角色库并逐项归一
   if (!Array.isArray(project.management.characters)) project.management.characters = [];
   else project.management.characters = project.management.characters.map((c) => normalizeCharacter(c));
+  // 老项目惰性补剧集详情字段，保证单集详情页对历史项目也可用
+  if (!Array.isArray(project.management.chapters)) project.management.chapters = [];
+  if (!Array.isArray(project.management.sources)) project.management.sources = [];
+  if (Array.isArray(project.management.episodes)) {
+    project.management.episodes = project.management.episodes.map((e) => ({
+      ...e,
+      text: e.text || '', excerpt: e.excerpt || '', strategy: e.strategy || '',
+      chapters: e.chapters || [], characterIds: e.characterIds || [],
+      script: e.script || null, segments: e.segments || [],
+      pack: e.pack || null, video: e.video || null,
+    }));
+  }
   return project.management;
 }
 

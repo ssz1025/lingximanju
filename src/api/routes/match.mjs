@@ -13,6 +13,12 @@ export const MATCH = {
   // 角色管理：从小说提取角色 / 生成角色多视图（字面尾段，先于通用模式）
   charExtract: /^\/api\/projects\/([^/]+)\/characters\/extract$/,
   charViews: /^\/api\/projects\/([^/]+)\/characters\/views$/,
+  // 一键生成全部角色（三视图批量，带进度事件）
+  charViewsAll: /^\/api\/projects\/([^/]+)\/characters\/views\/all$/,
+  // 剧集详情域：scripts 批量剧本在前，避免被 :no 分支误吞
+  episodeScripts: /^\/api\/projects\/([^/]+)\/episodes\/scripts$/,
+  episodeItem: /^\/api\/projects\/([^/]+)\/episodes\/(\d+)$/,
+  episodeAction: /^\/api\/projects\/([^/]+)\/episodes\/(\d+)\/(script|grids|characters|director-pack|video)$/,
   // AI 生成小说（大纲 / 整本注入）与 AI 补全项目信息（创作设定）
   novelAi: /^\/api\/projects\/([^/]+)\/novel\/ai$/,
   bibleAi: /^\/api\/projects\/([^/]+)\/bible\/ai$/,

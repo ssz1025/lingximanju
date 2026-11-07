@@ -47,7 +47,8 @@
     <header id="topbar">
       <div class="tb-left">
         <button id="btn-sidebar-expand" class="icon-btn" title="展开侧栏" hidden>›</button>
-        <div class="project-title">
+        <div id="view-crumb" class="view-crumb" hidden></div>
+        <div class="project-title" id="project-title-wrap">
           <input id="project-name" spellcheck="false" aria-label="项目名称">
           <span id="project-mode" class="mode-chip"></span>
         </div>
@@ -55,16 +56,18 @@
       </div>
       <div class="tb-center"><div id="run-status" class="run-status"><span class="rs-dot"></span><span id="run-status-text">就绪</span></div></div>
       <div class="tb-right">
-        <button id="btn-view-toggle" class="btn" title="切换 项目工作台 / 画布视图">⬡ 画布</button>
-        <button id="btn-step-run" class="btn primary canvas-only" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
-        <button id="btn-project-manage" class="btn" title="项目管理：分集 / 产物 / 快照 / 标签">▦ 项目管理</button>
-        <button id="btn-arrange" class="btn canvas-only" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
-        <button id="btn-fit" class="btn canvas-only" title="适应视图 (F)">⤢ 适应</button>
-        <button id="btn-run" class="btn primary canvas-only" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
-        <button id="btn-stop" class="btn danger canvas-only" hidden>■ 停止</button>
-        <button id="btn-director-pack" class="btn canvas-only" title="生成并下载导演包（可导入 ComfyUI 导演工作台）">▤ 导演包</button>
-        <span class="tb-sep"></span>
-        <button id="btn-export" class="icon-btn" title="导出项目 JSON">⇩</button>
+        <button id="btn-config-chip" class="btn config-chip" title="模型尚未配置完整，点击去设置" hidden>⚠ 模型未配置</button>
+        <button id="btn-home" class="btn" title="返回项目列表 (H)">⌂ 项目列表</button>
+        <button id="btn-view-toggle" class="btn project-only" title="切换 项目工作台 / 画布视图">⬡ 画布</button>
+        <button id="btn-step-run" class="btn primary canvas-only project-only" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
+        <button id="btn-project-manage" class="btn project-only" title="项目管理：分集 / 产物 / 快照 / 标签">▦ 项目管理</button>
+        <button id="btn-arrange" class="btn canvas-only project-only" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
+        <button id="btn-fit" class="btn canvas-only project-only" title="适应视图 (F)">⤢ 适应</button>
+        <button id="btn-run" class="btn primary canvas-only project-only" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
+        <button id="btn-stop" class="btn danger canvas-only project-only" hidden>■ 停止</button>
+        <button id="btn-director-pack" class="btn canvas-only project-only" title="生成并下载导演包（可导入 ComfyUI 导演工作台）">▤ 导演包</button>
+        <span class="tb-sep project-only"></span>
+        <button id="btn-export" class="icon-btn project-only" title="导出项目 JSON">⇩</button>
         <button id="btn-asset-lib" class="icon-btn" title="资源库：已生成资源统一管理与复用">▣</button>
         <button id="btn-settings" class="icon-btn" title="模型与运行设置">⚙</button>
         <button id="btn-theme" class="icon-btn" title="切换主题">☀</button>
@@ -74,6 +77,9 @@
     </header>
 
     <div id="workspace">
+      <section id="home-view" hidden></section>
+      <section id="episode-view" hidden></section>
+
       <div id="canvas-wrapper" tabindex="0">
         <div id="grid"></div>
         <div id="canvas-viewport">

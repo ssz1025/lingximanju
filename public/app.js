@@ -7,6 +7,9 @@ import { openAssetLibrary } from './asset-manager.js';
 import { openCreationWizard } from './wizard.js';
 import * as PM from './project-manager.js';
 import * as PV from './project-view.js';
+import * as HV from './home-view.js';
+import * as EV from './episode-view.js';
+import * as SC from './startup-check.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -14,12 +17,19 @@ const state = {
   running: false, logs: [], movedByUser: false, nodeCountBeforeRun: 0,
   steps: [], stats: {}, projectStats: {}, stepBusy: false,
   liveTokens: null,   // 本次运行的实时 token 计数（llm:usage 事件驱动，落库后清空）
-  view: 'canvas',     // 'workshop' = 项目工作台（创作项目默认）；'canvas' = 无限画布（高级编辑）
+  // 'home' 项目列表页（落地页） | 'workshop' 项目工作台 | 'canvas' 无限画布 | 'episode' 剧集详情
+  view: 'home',
+  settings: null,     // 应用级模型配置摘要（/api/bootstrap → settings）
+  comfy: null,        // 本地 ComfyUI 配置摘要（含工作流是否导入）
+  recentId: null,
+  episodeNo: null,
 };
 let saveTimer = null;
 let renderScheduled = false;
 let inspectorScheduled = false;
 let bigGraphHinted = false;
+let homeRefreshTimer = null;
+let episodeRefreshTimer = null;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -222,9 +232,45 @@ function initSSE() {
 
 function handleEvent(e) {
   if (e.type === 'hello') return;
-  if (e.type === 'state' && e.reason === 'created') { refreshProjects(); return; }
+  if (e.type === 'state' && e.reason === 'created') {
+    refreshProjects().then(() => renderHomeView()).catch(() => {});
+    return;
+  }
+  // 落地页没有打开任何项目：项目元数据变化也要刷新列表（合并成一次防抖请求）
+  if (state.view === 'home' && ['state', 'project:meta', 'episode:update'].includes(e.type)) scheduleHomeRefresh();
+
   const p = state.project;
   if (!p || (e.projectId && e.projectId !== p.id)) return;
+
+  // 剧集域产物（剧本 / 宫格图 / 角色 / 导演包 / 视频）落盘：静默刷新详情页，不打断当前标签页
+  if (e.type === 'episode:update') {
+    scheduleEpisodeRefresh();
+    if (state.view === 'workshop') renderProjectView();
+    if (state.view === 'home') renderHomeView();
+    return;
+  }
+  if (e.type === 'episode:progress') {
+    const box = $('log-stream');
+    if (box) {
+      box.className = 'log-stream lv-info';
+      box.textContent = `剧集剧本生成 ${e.done}/${e.total} · 第 ${e.episodeNo || '?'} 集`;
+    }
+    scheduleEpisodeRefresh();
+    return;
+  }
+  if (e.type === 'character:batch') {
+    const box = $('log-stream');
+    if (e.status === 'running' && box) {
+      box.className = 'log-stream lv-info';
+      box.textContent = `角色定妆图 ${Number(e.done) + 1}/${e.total} · ${e.name || ''} · ${e.view || ''}`;
+    }
+    if (e.status !== 'running' && Number(e.done) >= Number(e.total)) {
+      UI.toast(`角色定妆图批量生成结束：${e.total} 张${e.status === 'error' ? '（最后一张失败）' : ''}`,
+        e.status === 'error' ? 'err' : 'ok');
+      scheduleEpisodeRefresh();
+    }
+    return;
+  }
 
   // 项目管理层广播：六步状态、统计与进度，驱动步骤面板 / 侧栏 / 顶栏同步刷新
   if (e.type === 'project:meta') {
@@ -234,6 +280,7 @@ function handleEvent(e) {
     state.liveTokens = null;   // 步骤落库后以持久化数据为准，清实时计数
     renderStepPanel(); renderCanvasStepBar(); updateHeader(); renderProjectListOnly();
     renderProjectView();
+    scheduleEpisodeRefresh();  // 角色 / 分集等管理动作后，剧集详情里的出场名单同步刷新
     return;
   }
 
@@ -303,6 +350,7 @@ function handleEvent(e) {
       renderInspector(); updateStats(); updateHeader();
       renderStepPanel(); renderCanvasStepBar();
       renderProjectView();
+      scheduleEpisodeRefresh();  // 项目全量状态广播时也带上剧集详情，避免原文 / 剧本 / 产物过期
       break;
     }
     case 'run:done':
@@ -326,6 +374,22 @@ function handleEvent(e) {
       break;
     default: break;
   }
+}
+
+/** 项目列表页的 SSE 刷新：合并连续事件，避免每次广播都打一次 /api/bootstrap */
+function scheduleHomeRefresh() {
+  if (state.view !== 'home') return;
+  clearTimeout(homeRefreshTimer);
+  homeRefreshTimer = setTimeout(() => {
+    refreshProjects().then(() => renderHomeView()).catch(() => {});
+  }, 260);
+}
+
+/** 剧集详情页的 SSE 刷新：静默重拉详情，保留当前标签页与滚动上下文 */
+function scheduleEpisodeRefresh() {
+  if (state.view !== 'episode') return;
+  clearTimeout(episodeRefreshTimer);
+  episodeRefreshTimer = setTimeout(() => EV.refreshEpisodeView(), 180);
 }
 
 async function syncProject() {
@@ -355,7 +419,16 @@ function stepVisual() {
 
 function updateHeader() {
   const p = state.project;
-  if (!p) return;
+  if (!p) {
+    // 项目列表页 / 未打开项目：清掉顶栏里的项目态控件，避免残留上一个项目的信息
+    $('project-name').value = '';
+    $('project-mode').textContent = '';
+    $('step-chip').hidden = true;
+    $('top-progress').hidden = true;
+    $('btn-step-run').hidden = true;
+    $('stat-provider').textContent = '—';
+    return;
+  }
   $('project-name').value = p.name;
   $('project-mode').textContent = (state.templates.find((t) => t.id === p.mode)?.name) || p.mode || '';
   const c = state.comfy || {};
@@ -474,48 +547,253 @@ function renderInspector() {
 function escapeHTML(s = '') { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 /* ---------------- 业务动作 ---------------- */
-async function refreshProjects() {
-  const data = await api('/api/bootstrap');
-  state.projects = data.projects; state.templates = data.templates; state.agents = data.agents;
+/** /api/bootstrap 是列表页、步骤定义、模型配置的唯一数据源 */
+function applyBootstrap(data) {
+  state.projects = data.projects || [];
+  state.templates = data.templates || [];
+  state.agents = data.agents || [];
   state.comfy = data.comfy || state.comfy;
   if (data.steps) state.steps = data.steps;
   if (data.stats) state.stats = data.stats;
+  if (data.settings) state.settings = data.settings;
+  if (data.recent) state.recentId = data.recent;
+  updateConfigChip();
+}
+async function refreshProjects() {
+  const data = await api('/api/bootstrap');
+  applyBootstrap(data);
   renderSidebar();
   return data;
 }
-async function loadProject(id) {
+async function loadProject(id, opts = {}) {
   const p = await api(`/api/projects/${id}`);
-  state.project = p; state.selected = []; state.movedByUser = false;
+  state.project = p; state.recentId = id;
+  state.selected = []; state.movedByUser = false;
   const savedViewport = p.viewport && Number.isFinite(p.viewport.zoom) && p.viewport.zoom > 0;
   canvas.setProject(p);
   updateHeader(); updateStats(); updateRunUI(); renderSidebar(); renderInspector();
   renderStepPanel(); renderCanvasStepBar();
   // 创作项目默认进入「项目工作台」（整个页面都是项目信息 + 路线图）；
   // 标准流水线项目留在画布视图。顶栏「▦ 工作台 / ⬡ 画布」随时切换。
-  setView(p.management?.kind === 'novel' ? 'workshop' : 'canvas');
+  setView(opts.view || (p.management?.kind === 'novel' ? 'workshop' : 'canvas'));
   // 有保存过的视口就尊重它：大图强行 fit-all 会把节点缩到几十像素，看起来像空画布。
   // 需要看全图时用画布右下角的「⤢ 适应视图」，节点全在视口外时也会自动出现回到内容按钮。
-  if (!savedViewport) setTimeout(() => canvas.fitView(), 60);
+  if (!savedViewport && state.view === 'canvas') setTimeout(() => canvas.fitView(), 60);
   if (p.nodes.length > 20 && !bigGraphHinted) {
     bigGraphHinted = true;
     UI.toast(`已载入 ${p.nodes.length} 节点的完成示例 · 滚轮放大看细节，⤢ 查看全图`, 'ok');
   }
 }
 
-/* ---------------- 项目工作台（workshop）与画布视图切换 ---------------- */
-function setView(view) {
-  state.view = view === 'workshop' ? 'workshop' : 'canvas';
-  const isW = state.view === 'workshop';
-  document.body.classList.toggle('view-workshop', isW);
-  $('project-view').hidden = !isW;
-  $('canvas-wrapper').hidden = isW;
-  $('inspector').hidden = isW;
-  $('btn-view-toggle').textContent = isW ? '⬡ 画布' : '▦ 工作台';
-  $('btn-view-toggle').title = isW ? '切换到画布视图（高级节点编辑）' : '切换到项目工作台（路线图与项目信息）';
-  if (isW) renderProjectView();
+/* ==========================================================================
+ * 视图切换：home 项目列表 / workshop 工作台 / canvas 无限画布 / episode 剧集详情
+ * 四个视图共用同一个 #workspace，靠 hidden + body class 切换；所有 ctx 在这里组装，
+ * 页面模块只拿回调、不直接改全局状态，保证导航与状态联动是单向的。
+ * ========================================================================*/
+const VIEWS = ['home', 'workshop', 'canvas', 'episode'];
+const GUIDE_STEPS = ['upload', 'episodes', 'script', 'context', 'storyboard', 'deliver'];
+
+/** 从剧集详情返回时落到哪儿：创作项目回工作台，标准流水线回画布 */
+function backView() {
+  return state.project?.management?.kind === 'novel' ? 'workshop' : 'canvas';
+}
+
+function setView(view, opts = {}) {
+  const next = VIEWS.includes(view) ? view : 'home';
+  state.view = next;
+  document.body.classList.toggle('view-home', next === 'home');
+  document.body.classList.toggle('view-workshop', next === 'workshop');
+  document.body.classList.toggle('view-episode', next === 'episode');
+
+  $('home-view').hidden = next !== 'home';
+  $('episode-view').hidden = next !== 'episode';
+  $('project-view').hidden = next !== 'workshop';
+  $('canvas-wrapper').hidden = next !== 'canvas';
+  $('inspector').hidden = next !== 'canvas';
+
+  $('btn-home').hidden = next === 'home';
+  const toggle = $('btn-view-toggle');
+  toggle.textContent = next === 'workshop' ? '⬡ 画布' : '▦ 工作台';
+  toggle.title = next === 'workshop' ? '切换到画布视图（高级节点编辑）' : '切换到项目工作台（路线图与项目信息）';
+
+  updateHeader();
+  updateConfigChip();
+  updateCrumb();
+  if (next === 'home') renderHomeView();
+  else if (next === 'workshop') renderProjectView();
+  else if (next === 'episode') EV.renderEpisodeView($('episode-view'), episodeViewCtx(), !!opts.force);
   else canvas.drawMinimap();
 }
 
+/** 顶栏面包屑：任何项目内页面都能一键回项目列表 / 工作台 */
+function updateCrumb() {
+  const el = $('view-crumb');
+  const p = state.project;
+  if (state.view === 'episode') {
+    el.hidden = false;
+    el.innerHTML = `<button class="vc-link" data-crumb="home">⌂ 项目列表</button><span class="vc-sep">/</span>`
+      + `<button class="vc-link" data-crumb="workshop">${escapeHTML(p?.name || '项目')}</button>`
+      + `<span class="vc-sep">/</span><span>第 ${state.episodeNo || 1} 集</span>`;
+    return;
+  }
+  if (state.view === 'home' || !p) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = `<button class="vc-link" data-crumb="home">⌂ 项目列表</button><span class="vc-sep">/</span>`
+    + `<small>${p.management?.kind === 'novel' ? '漫剧创作' : '流水线'} · ${escapeHTML(p.name)}</small>`;
+}
+
+/** 顶栏「⚠ 模型未配置」：只要跳过过引导，仍保留一个随时可补配的入口 */
+function updateConfigChip() {
+  const chip = $('btn-config-chip');
+  if (!chip) return;
+  const need = SC.configNeedsAttention(state.settings, state.comfy);
+  chip.hidden = !need;
+  if (!need) return;
+  const misses = [];
+  if (!state.settings?.llm?.configured) misses.push('文本大模型');
+  if (!state.comfy?.imageWorkflow || !state.comfy?.videoWorkflow) misses.push('ComfyUI 工作流');
+  chip.textContent = '⚠ 模型未配置';
+  chip.title = `待配置：${misses.join('、')} · 点击打开设置（内置模板仍可完整体验流程）`;
+}
+
+/* ---------------------------------------------------------------- 项目列表页 */
+function homeViewCtx() {
+  return {
+    projects: state.projects, stats: state.stats, steps: state.steps,
+    settings: state.settings, comfy: state.comfy,
+    recentId: state.recentId, currentId: state.project?.id, toast: UI.toast,
+    onOpen: (id) => loadProject(id).catch((e) => UI.toast(`打开项目失败：${e.message}`, 'err')),
+    onCreate: () => openWizard(),
+    onImport: () => importProject(),
+    onSettings: () => openSettingsDialog(),
+    onGuide: (id) => guideToStep(id),
+    onDuplicate: (id) => duplicateProject(id),
+    onDelete: (id) => deleteProject(id),
+    onExport: (id) => exportProjectJson(id),
+    onRefresh: async () => { await refreshProjects(); renderHomeView(); UI.toast('项目列表已刷新', 'ok'); },
+  };
+}
+function renderHomeView() {
+  if (state.view !== 'home') return;
+  HV.renderHomeView($('home-view'), homeViewCtx());
+}
+
+/** 首页六步流程图卡：定位到对应步骤操作台；没有当前项目时先打开最近的 */
+async function guideToStep(id) {
+  const stepId = GUIDE_STEPS.includes(id) ? id : 'upload';
+  if (!state.project) {
+    const target = state.recentId || state.projects[0]?.id;
+    if (!target) {
+      UI.toast('先新建一个漫剧项目，就能进入这一步（只需填一个名字）', 'ok');
+      openWizard();
+      return;
+    }
+    try { await loadProject(target, { view: 'workshop' }); }
+    catch (e) { UI.toast(`打开项目失败：${e.message}`, 'err'); return; }
+  }
+  PV.setWorkshopStep(stepId);
+  PM.setExpandedStep(stepId);
+  if (state.view !== 'workshop') setView('workshop');
+  else renderProjectView();
+  renderStepPanel();
+  const label = state.steps.find((s) => s.id === stepId)?.title || stepId;
+  UI.toast(`已定位到「${label}」操作台`, 'ok');
+}
+
+function importProject() {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = 'application/json,.json';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const p = await api('/api/import', { method: 'POST', body: await file.text() });
+      await refreshProjects();
+      await loadProject(p.id);
+      UI.toast('项目导入成功', 'ok');
+    } catch (e) { UI.toast(`导入失败：${e.message}`, 'err'); }
+  };
+  input.click();
+}
+
+async function exportProjectJson(id) {
+  try {
+    const data = await api(`/api/projects/${id}/export`);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    a.download = `${data.name || 'lingximanju'}.json`;
+    a.click(); URL.revokeObjectURL(a.href);
+    UI.toast('项目 JSON 已导出', 'ok');
+  } catch (e) { UI.toast(`导出失败：${e.message}`, 'err'); }
+}
+
+async function duplicateProject(id) {
+  try {
+    await api(`/api/projects/${id}/duplicate`, { method: 'POST', body: '{}' });
+    await refreshProjects();
+    renderHomeView();
+    UI.toast('已复制项目副本', 'ok');
+  } catch (e) { UI.toast(`复制失败：${e.message}`, 'err'); }
+}
+
+async function deleteProject(id) {
+  const p = state.projects.find((x) => x.id === id);
+  if (!window.confirm(`确定删除项目「${p?.name || id}」？此操作不可撤销。`)) return;
+  try {
+    await api(`/api/projects/${id}`, { method: 'DELETE' });
+    if (state.project?.id === id) { state.project = null; state.episodeNo = null; }
+    await refreshProjects();
+    updateHeader();
+    if (state.view !== 'home') setView('home');
+    else renderHomeView();
+    UI.toast('项目已删除', 'ok');
+  } catch (e) { UI.toast(`删除失败：${e.message}`, 'err'); }
+}
+
+/* ------------------------------------------------------------ 全局模型配置 */
+function openSettingsDialog() {
+  // 项目列表页 / 首次启动引导进入时 project 可能为 null，panels.js 已支持
+  UI.openSettings(state.project, (settings) => {
+    if (state.project) { state.project.settings = settings; persist(true); }
+    refreshAppConfig();
+    UI.toast('设置已保存 · 全局模型对所有项目生效', 'ok');
+  });
+}
+async function refreshAppConfig() {
+  try {
+    const d = await api('/api/settings');
+    state.settings = d.settings || state.settings;
+    state.comfy = d.comfy || state.comfy;
+  } catch { /* 后端暂不可达时保留缓存 */ }
+  updateHeader(); updateConfigChip(); renderHomeView();
+  if (state.view === 'episode') EV.refreshEpisodeView();
+}
+
+/* ---------------------------------------------------------------- 剧集详情 */
+async function openEpisode(no) {
+  if (!state.project) { UI.toast('请先打开一个项目', 'err'); return; }
+  const n = Number(no);
+  const max = state.project.management?.episodes?.length || 0;
+  if (!Number.isFinite(n) || n < 1 || (max && n > max)) { UI.toast('剧集不存在，请先重新分集', 'err'); return; }
+  state.episodeNo = n;
+  setView('episode');
+}
+function episodeViewCtx() {
+  return {
+    projectId: state.project?.id, no: state.episodeNo, toast: UI.toast,
+    onBack: () => setView(backView()),
+    onNavigate: (no) => openEpisode(no),
+    onSettings: () => openSettingsDialog(),
+    onManageCharacters: () => openManagePanel('characters'),
+    onLocateCanvasNode: (nodeId) => {
+      setView('canvas');
+      canvas.select([nodeId]);
+      canvas.focusNode(nodeId);
+    },
+  };
+}
+
+/* ---------------------------------------------------------------- 项目工作台 */
 function projectViewCtx() {
   return {
     project: state.project, steps: state.steps, stats: state.projectStats,
@@ -523,6 +801,7 @@ function projectViewCtx() {
     onRunStep: (id, all, force) => runStep(id, all, force),
     onManage: (tab) => openManagePanel(tab),
     onOpenCanvas: () => setView('canvas'),
+    onOpenEpisode: (no) => openEpisode(no),
     onOpenAssets: () => openAssetLibrary({ mode: 'manage' }),
     onOpenCover: () => PM.openCoverDialog({
       project: state.project, toast: UI.toast, comfy: state.comfy,
@@ -550,7 +829,10 @@ function openWizard() {
     // 极简向导（只填项目名称）创建后直接落到项目工作台，从「准备故事」开始
     onCreated: async (project) => {
       await refreshProjects();
-      await loadProject(project.id);
+      PV.setWorkshopStep('upload');
+      PM.setExpandedStep('upload');
+      await loadProject(project.id, { view: 'workshop' });
+      UI.toast('项目已创建 · 从「准备故事」开始上传小说', 'ok');
     },
   });
 }
@@ -626,6 +908,7 @@ async function openManagePanel(tab) {
     toast: UI.toast,
     onChanged: (deleted) => onProjectsChanged(deleted),
     onRunStep: (id) => runStep(id, false),
+    onOpenEpisode: (no) => openEpisode(no),
     onDownload: (kind) => {
       if (kind === 'pack') return exportPack(false);
       const final = state.project.nodes.find((n) => n.type === 'final');
@@ -639,10 +922,13 @@ async function onProjectsChanged(deleted = false) {
   const data = await refreshProjects();
   const exists = state.project && data.projects.some((p) => p.id === state.project.id);
   if (deleted || !exists) {
-    if (data.projects[0]) await loadProject(data.projects[0].id);
-    else { state.project = null; renderStepPanel(); renderCanvasStepBar(); }
+    state.project = null; state.episodeNo = null;
+    updateHeader(); renderStepPanel(); renderCanvasStepBar();
+    if (data.projects[0] && state.view !== 'home') await loadProject(data.projects[0].id);
+    else setView('home');
   } else {
-    await loadProject(state.project.id);
+    // 保留当前视图：从剧集详情里改项目管理信息，不该把用户弹回工作台
+    await loadProject(state.project.id, { view: state.view === 'home' ? undefined : state.view });
     renderStepPanel(); renderCanvasStepBar(); updateHeader();
   }
 }
@@ -784,25 +1070,21 @@ async function sendChat(text) {
 /* ---------------- 事件绑定 ---------------- */
 function bindUI() {
   $('btn-new-project').addEventListener('click', () => openWizard());
+  $('btn-home').addEventListener('click', () => setView('home'));
+  $('btn-config-chip').addEventListener('click', () => openSettingsDialog());
+  $('view-crumb').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-crumb]');
+    if (!b) return;
+    if (b.dataset.crumb === 'home') setView('home');
+    else if (b.dataset.crumb === 'workshop') setView(backView());
+  });
   $('btn-view-toggle').addEventListener('click', () => setView(state.view === 'workshop' ? 'canvas' : 'workshop'));
   $('btn-project-manage').addEventListener('click', () => openManagePanel());
   $('btn-step-run').addEventListener('click', () => runStep(null, false));
-  $('btn-import').addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file'; input.accept = 'application/json,.json';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      try {
-        const p = await api('/api/import', { method: 'POST', body: await file.text() });
-        await refreshProjects(); await loadProject(p.id);
-        UI.toast('项目导入成功', 'ok');
-      } catch (e) { UI.toast(`导入失败：${e.message}`, 'err'); }
-    };
-    input.click();
-  });
+  $('btn-import').addEventListener('click', () => importProject());
   $('btn-run').addEventListener('click', () => run());
   $('btn-stop').addEventListener('click', async () => {
+    if (!state.project) return;
     try { await api(`/api/projects/${state.project.id}/stop`, { method: 'POST', body: '{}' }); UI.toast('已发送停止指令'); }
     catch (e) { UI.toast(e.message, 'err'); }
   });
@@ -810,23 +1092,10 @@ function bindUI() {
   $('btn-fit').addEventListener('click', () => canvas.fitView());
   $('btn-help').addEventListener('click', UI.openHelp);
   $('btn-asset-lib').addEventListener('click', () => openAssetLibrary({ mode: 'manage' }));
-  $('btn-settings').addEventListener('click', () => UI.openSettings(state.project, (settings) => {
-    state.project.settings = settings;
-    persist(true);
-    updateHeader();
-    api('/api/comfyui/config').then((r) => r.json()).then((d) => { state.comfy = d.summary; updateHeader(); }).catch(() => {});
-    UI.toast('项目设置已保存', 'ok');
-  }));
-  $('btn-director-pack').addEventListener('click', () => exportPack(false));
-  $('btn-export').addEventListener('click', async () => {
-    const data = await api(`/api/projects/${state.project.id}/export`);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${state.project.name || 'lingximanju'}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    UI.toast('项目 JSON 已导出', 'ok');
+  $('btn-settings').addEventListener('click', () => openSettingsDialog());
+  $('btn-director-pack').addEventListener('click', () => { if (state.project) exportPack(false); });
+  $('btn-export').addEventListener('click', () => {
+    if (state.project) exportProjectJson(state.project.id);
   });
   $('btn-theme').addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -884,12 +1153,33 @@ function bindUI() {
     const tag = (e.target.tagName || '').toLowerCase();
     const typing = ['input', 'textarea', 'select'].includes(tag) || e.target.isContentEditable;
     if (e.code === 'Space' && !typing && state.view === 'canvas') { e.preventDefault(); canvas.setSpace(true); return; }
-    if (e.key === 'Escape') { UI.hideContextMenu(); canvas.select([]); return; }
+    if (e.key === 'Escape') {
+      UI.hideContextMenu();
+      if (state.view === 'episode' && !$('modal-root').children.length) { setView(backView()); return; }
+      canvas.select([]);
+      return;
+    }
     if (typing || $('modal-root').children.length) return;
     const cmd = e.metaKey || e.ctrlKey;
+    const k = e.key.toLowerCase();
+    // H：任何项目内视图回到项目列表页（cmd/ctrl+H 让给系统）
+    if (k === 'h' && !cmd) { setView('home'); return; }
+    // 项目列表页：屏蔽画布快捷键，避免误删节点 / 误跑流水线
+    if (state.view === 'home') {
+      if (k === 'n') openWizard();
+      else if (e.key === '?') UI.openHelp();
+      return;
+    }
+    // 剧集详情页：只保留导航与通用操作
+    if (state.view === 'episode') {
+      if (k === 'v') setView(backView());
+      else if (k === 'p') openManagePanel('characters');
+      else if (k === 'n') openWizard();
+      else if (e.key === '?') UI.openHelp();
+      return;
+    }
     // 工作台视图：屏蔽画布快捷键，只保留通用操作；V 在两个视图间切换
     if (state.view === 'workshop') {
-      const k = e.key.toLowerCase();
       if (k === 'n') openWizard();
       else if (k === 's') runStep(null, false);
       else if (k === 'p') openManagePanel();
@@ -897,7 +1187,7 @@ function bindUI() {
       else if (e.key === '?') UI.openHelp();
       return;
     }
-    if (e.key.toLowerCase() === 'v' && state.project?.management?.kind === 'novel') { setView('workshop'); return; }
+    if (k === 'v' && state.project?.management?.kind === 'novel') { setView('workshop'); return; }
     if (cmd && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) canvas.redo(); else canvas.undo(); return; }
     if (cmd && e.key.toLowerCase() === 'a') { e.preventDefault(); canvas.selectAll(); return; }
     if (cmd && e.key.toLowerCase() === 'd') { e.preventDefault(); canvas.duplicateSelection(); return; }
@@ -926,17 +1216,38 @@ async function boot() {
   applyTheme(localStorage.getItem('cc-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
   bindUI();
   const data = await api('/api/bootstrap');
-  state.projects = data.projects; state.templates = data.templates; state.agents = data.agents;
-  state.comfy = data.comfy || state.comfy;
-  state.steps = data.steps || []; state.stats = data.stats || {};
+  applyBootstrap(data);
+  state.recentId = data.recent || state.projects[0]?.id || null;
   renderSidebar();
-  if (data.recent) await loadProject(data.recent);
-  renderStepPanel(); renderCanvasStepBar();
+  // 落地页：项目列表 + 六步图文流程；不再自动打开最近项目，避免新手一进来就掉进画布
+  setView('home');
+  renderStepPanel(); renderCanvasStepBar(); updateRunUI();
   initSSE();
   UI.appendChat('assistant', '你好，我是画布协作者。我可以读整张图、解释依赖、检查一致性、整理布局，也能直接给场景补镜头链。试试下面的快捷指令吧。');
-  setTimeout(() => canvas.fitView(), 200);
-  // 门户卡片 / 书签可用 ?new=1 直达新建创作项目向导
-  if (new URLSearchParams(window.location.search).get('new') === '1') setTimeout(() => openWizard(), 320);
+
+  const qs = new URLSearchParams(window.location.search);
+  // 启动检查：模型未配置且用户没跳过过时弹引导框；「先跳过」写入本地 + 服务端
+  setTimeout(() => {
+    SC.checkModelConfig({
+      settings: state.settings, comfy: state.comfy,
+      onConfigure: () => openSettingsDialog(),
+      onSkip: () => {
+        state.settings = { ...(state.settings || {}), skipConfigCheck: true };
+        updateConfigChip(); renderHomeView();
+        UI.toast('已跳过 · 内置模板可完整体验流程，随时可点顶栏 ⚠ 补配模型', 'ok');
+      },
+    });
+    // 门户卡片 / 书签可用 ?new=1 直达新建创作项目向导
+    if (qs.get('new') === '1') openWizard();
+  }, 360);
+
+  // 深链：?project=<id>[&ep=<no>] —— 从外部直接落到工作台或某一集详情
+  const deepProject = qs.get('project');
+  if (deepProject && state.projects.some((p) => p.id === deepProject)) {
+    await loadProject(deepProject);
+    const ep = Number(qs.get('ep'));
+    if (Number.isFinite(ep) && ep > 0) await openEpisode(ep);
+  }
 }
 
 boot().catch((e) => {

@@ -48,12 +48,25 @@ const WF_HELP = `直接粘贴 ComfyUI 工作流菜单里「导出(API) / Export 
 也可在任意字符串输入里写占位符：{{prompt}} {{negative_prompt}} {{seed}} {{width}} {{height}} {{frames}} {{fps}} {{duration}} {{filename_prefix}} {{title}} {{shot_no}}。`;
 
 export async function openSettings(project, onSave) {
-  const s = project.settings || {};
+  // 从「项目列表 / 首次启动引导」进入时可能还没有打开任何项目
+  const s = (project && project.settings) || {};
   let cfg = {};
+  let globalLlm = {};
   try {
     const r = await fetch('/api/comfyui/config');
     cfg = (await r.json()).config || {};
   } catch { /* 后端不可达时仍允许编辑模型设置 */ }
+  try {
+    const r = await fetch('/api/settings');
+    globalLlm = ((await r.json()).settings || {}).llm || {};
+  } catch { /* 兼容旧后端：全局配置不可用时仍可编辑项目设置 */ }
+  const g = {
+    provider: globalLlm.provider || s.provider || 'mock',
+    model: globalLlm.model || s.model || '',
+    baseUrl: globalLlm.baseUrl || s.baseUrl || '',
+    apiKey: '',   // 出于安全不回传明文 Key；留空表示「沿用已保存的 Key」
+    hasApiKey: Boolean(globalLlm.hasApiKey),
+  };
 
   const num = (v, d) => `<input id="cf-${v}" type="number" value="${esc(cfg[v] ?? d)}">`;
   const body = `
@@ -63,6 +76,19 @@ export async function openSettings(project, onSave) {
     </div>
 
     <div class="settings-pane" id="pane-model">
+      <div class="cf-section global-model">
+        <h4>☁ 全局模型配置 <span class="cf-tag">一次配置 · 所有项目生效</span></h4>
+        <div class="modal-grid">
+          <div class="field"><label>模型模式</label><select id="g-provider">
+            <option value="mock" ${g.provider !== 'openai' ? 'selected' : ''}>Mock · 零 Key 演示</option>
+            <option value="openai" ${g.provider === 'openai' ? 'selected' : ''}>OpenAI 兼容接口</option></select></div>
+          <div class="field"><label>模型名称</label><input id="g-model" value="${esc(g.model)}" placeholder="gpt-4o-mini"></div>
+          <div class="field" style="grid-column:1/-1"><label>Base URL</label><input id="g-base" value="${esc(g.baseUrl)}" placeholder="https://api.example.com/v1"></div>
+          <div class="field" style="grid-column:1/-1"><label>API Key${g.hasApiKey ? '（已保存，留空则不修改）' : '（仅存本地）'}</label><input id="g-key" type="password" value="" placeholder="${g.hasApiKey ? '•••••••• 留空保持原值' : 'sk-...'}"></div>
+        </div>
+        <div class="cf-row"><button class="btn sm" id="g-test">测试全局模型连接</button><span id="g-test-result" class="muted"></span></div>
+        <div class="cf-note">全局配置用于剧本、角色提取、AI 小说等所有文本生成。下方「项目级设置」只在当前项目里覆盖它；两者都留空时使用内置 Mock 模板，全流程依旧可用。</div>
+      </div>
       <div class="modal-grid">
         <div class="field"><label>模型模式</label><select id="set-provider">
           <option value="mock" ${s.provider !== 'openai' ? 'selected' : ''}>Mock · 零 Key 演示</option>
@@ -101,12 +127,13 @@ export async function openSettings(project, onSave) {
           <button class="btn" id="cf-import-image" type="button">⇧ 导入 JSON</button>
           <button class="btn" id="cf-testall-image" type="button">▶ 测试全部</button>
         </div>
+        <div class="cf-note">每行「▶ 测试」只单独试跑该工作流（真实提交一次生成），结果显示产物、耗时与提示词注入位置，并把状态写回这一行；「▶ 测试全部」则按库顺序串行跑完。</div>
         <div class="wf-lib" id="cf-lib-image"></div>
       </div>
 
       <div class="cf-section">
         <h4>视频工作流库（图生视频 / 首尾帧 / 导演台）</h4>
-        <div class="cf-note">选中项即当前生效的工作流，切换即时生效；无选中时该环节使用 Mock 自绘。测试 = 提交本地 ComfyUI 真实串行试跑一次。</div>
+        <div class="cf-note">选中项即当前生效的工作流，切换即时生效；无选中时该环节使用 Mock 自绘。每行「▶ 测试」单独真实试跑该工作流一次（视频生成通常较慢），不影响其它行；也可「▶ 测试全部」串行批量试跑。</div>
         <div class="cf-row" style="margin-top:9px">
           <button class="btn" id="cf-import-video" type="button">⇧ 导入 JSON</button>
           <button class="btn" id="cf-testall-video" type="button">▶ 测试全部</button>
@@ -202,8 +229,24 @@ export async function openSettings(project, onSave) {
           });
           const d = await r.json();
           if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-          onSave({
-            ...project.settings,
+          // 全局模型配置：留空 API Key 时沿用已保存的值（服务端不回传明文）
+          const llm = {
+            provider: q('g-provider').value,
+            model: q('g-model').value.trim(),
+            baseUrl: q('g-base').value.trim(),
+            llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
+            temperature: Number(q('set-temp').value) || 0.7,
+          };
+          const key = q('g-key').value.trim();
+          if (key) llm.apiKey = key;
+          const gr = await fetch('/api/settings', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ llm }),
+          });
+          const gd = await gr.json();
+          if (!gr.ok) throw new Error(gd.error || `全局模型保存失败 HTTP ${gr.status}`);
+          onSave?.({
+            ...(project?.settings || {}),
             provider: q('set-provider').value, model: q('set-model').value.trim(),
             baseUrl: q('set-base').value.trim(), apiKey: q('set-key').value.trim(),
             llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
@@ -230,6 +273,38 @@ export async function openSettings(project, onSave) {
       root.querySelector('#pane-model').hidden = tab.dataset.pane !== 'model';
       root.querySelector('#pane-comfy').hidden = tab.dataset.pane !== 'comfy';
     });
+  });
+
+  /* ---------- 全局模型连接测试：用全局面板当前值发一次微型调用（不落盘） ---------- */
+  root.querySelector('#g-test').addEventListener('click', async (e) => {
+    const q = (id) => root.querySelector(`#${id}`);
+    const out = q('g-test-result');
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    out.textContent = '测试中…（推理模型可能需要 1-3 分钟）';
+    try {
+      const key = q('g-key').value.trim();
+      const r = await fetch('/api/system/llm-test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: q('g-provider').value,
+          model: q('g-model').value.trim(),
+          baseUrl: q('g-base').value.trim(),
+          apiKey: key || undefined,
+          llmTimeoutMs: (Number(q('set-timeout').value) || 300) * 1000,
+          temperature: Number(q('set-temp').value) || 0.7,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      out.innerHTML = d.ok
+        ? `<b class="ok">✓ ${esc(d.mode === 'mock' ? 'Mock 模式可用' : '模型已响应')}</b> ${(d.latencyMs / 1000).toFixed(1)}s`
+        : `<b class="err">✕ 失败</b> ${esc(d.error || '未知错误')}`;
+    } catch (err) {
+      out.innerHTML = `<b class="err">✕</b> ${esc(err.message)}`;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   /* ---------- 测试模型连接：用面板当前值发一次微型 LLM 调用（不落盘） ---------- */
@@ -315,16 +390,21 @@ export async function openSettings(project, onSave) {
   const libItemHTML = (kind, e) => {
     const t = e.lastTest;
     const active = e.id === cfg[activeKey(kind)];
-    const badge = testing.has(e.id)
+    const running = testing.has(e.id);
+    const badge = running
       ? `<span class="wf-badge run"><span class="wf-spin"></span>试跑中</span>`
       : !t ? `<span class="wf-badge none" title="尚未真实试跑">未测</span>`
       : t.ok ? `<span class="wf-badge ok" title="上次试跑：${esc(new Date(t.at || Date.now()).toLocaleString())}">✓ ${(Number(t.durationMs) / 1000).toFixed(1)}s</span>`
       : `<span class="wf-badge err" title="${esc(t.error || '失败')}">✕ ${esc(String(t.error || '失败').slice(0, 18))}</span>`;
+    const testBtn = running
+      ? `<button class="wf-test run" type="button" disabled><span class="wf-spin"></span>试跑中</button>`
+      : `<button class="wf-test" type="button" data-act="test-one" title="只测试这一个工作流：向本地 ComfyUI 真实提交一次生成">▶ 测试</button>`;
     return `<div class="wf-item ${active ? 'active' : ''}" data-id="${esc(e.id)}">
       <input type="radio" name="wf-pick-${kind}" ${active ? 'checked' : ''} data-act="pick" title="选中即当前生效">
       <span class="wf-name" data-act="expand" title="点击查看 / 复制 JSON · 双击重命名">${esc(e.name)}</span>
       <span class="wf-nodes">${Object.keys(e.workflow || {}).length} 节点</span>
       ${badge}
+      ${testBtn}
       <button class="wf-del" type="button" data-act="del" title="删除">✕</button>
       <textarea class="cf-code wf-json" rows="7" readonly hidden>${esc(JSON.stringify(e.workflow, null, 2))}</textarea>
     </div>`;
@@ -425,14 +505,16 @@ export async function openSettings(project, onSave) {
       if (!item) return;
       const entry = (cfg[libKey(kind)] || []).find((e) => e.id === item.dataset.id);
       if (!entry) return;
-      const act = ev.target.dataset.act;
+      const actEl = ev.target.closest('[data-act]');
+      const act = actEl && item.contains(actEl) ? actEl.dataset.act : undefined;
       if (act === 'expand') {
         const ta = item.querySelector('.wf-json');
         if (ta) ta.hidden = !ta.hidden;
         return;
       }
       if (act === 'del') { requestDelete(kind, entry); return; }
-      if (ev.target.matches('input[data-act="pick"]') && cfg[activeKey(kind)] !== entry.id) {
+      if (act === 'test-one') { testOne(kind, entry); return; }
+      if (act === 'pick' && actEl.matches('input[type="radio"]') && cfg[activeKey(kind)] !== entry.id) {
         pickActive(kind, entry);
       }
     });
@@ -444,15 +526,58 @@ export async function openSettings(project, onSave) {
     });
   };
 
-  /* ---------- 批量真实试跑（进度经 SSE log 事件回显） ---------- */
+  /* ---------- 单独测试：把一次试跑的完整结果渲染成可读详情 ---------- */
+  const oneResultHTML = (entry, d) => {
+    const r = d?.result;
+    if (!r) return `<b class="err">✕ 未拿到试跑结果</b>`;
+    const head = r.ok
+      ? `<b class="ok">✓「${esc(entry.name)}」测试通过</b>`
+      : `<b class="err">✕「${esc(entry.name)}」测试失败</b>`;
+    const headLine = `<div class="wf-one-head">${head} · ${(Number(r.durationMs) / 1000).toFixed(1)}s</div>`;
+    if (!r.ok) {
+      return `${headLine}<div class="wf-one-err">${esc(r.error || '未知错误')}</div>
+        <div class="cf-note">排查后可再点该行的「▶ 测试」重试；本次失败状态已写入该行徽标。</div>`;
+    }
+    const plan = r.promptInjection || {};
+    const p = plan.positive;
+    const where = p
+      ? `<code>${esc(p.node)}.${esc(p.input)}</code>${p.title ? `「${esc(p.title)}」` : ''} · ${esc(p.strategy || '')}`
+      : '<b class="err">未找到提示词注入点</b>';
+    const neg = plan.negative ? ` · 负向 → <code>${esc(plan.negative.node)}.${esc(plan.negative.input)}</code>` : '';
+    const warns = Array.isArray(plan.warnings) && plan.warnings.length
+      ? `<div class="cf-note">⚠ ${esc(plan.warnings.join('；'))}</div>` : '';
+    const assets = Array.isArray(r.assets) ? r.assets : [];
+    const thumbs = assets.filter((a) => a.kind === 'image' || a.kind === 'video').slice(0, 3)
+      .map((a) => `<a class="wf-thumb" href="${esc(a.url)}" target="_blank" rel="noopener" title="${esc(a.filename || '')}">${
+        a.kind === 'image'
+          ? `<img src="${esc(a.url)}" alt="试跑产物" loading="lazy">`
+          : `<video src="${esc(a.url)}" muted preload="metadata"></video>`
+      }</a>`).join('');
+    return `${headLine}
+      <div class="wf-one-meta">prompt_id <code>${esc(r.promptId || '—')}</code> · 产物 ${assets.length} 个 · 注入 ${Number(r.applied) || 0} 处参数</div>
+      <div class="wf-one-meta">提示词 → ${where}${neg}</div>${warns}
+      ${thumbs ? `<div class="wf-thumbs">${thumbs}<span class="cf-note">点击缩略图可打开原图 / 原视频</span></div>` : '<div class="cf-note">本次没有可预览的图片或视频产物。</div>'}
+      <div class="cf-note">结果已写入该行的「上次试跑」徽标；点「▶ 测试」可随时重跑。</div>`;
+  };
+
+  /* ---------- 试跑（单项 / 批量共用；进度经 SSE log 事件回显） ---------- */
   let testES = null;
-  const testBatch = async (kind, ids) => {
+  let testBusy = false;   // ComfyUI 队列一次只跑一个任务，避免单项与批量互相抢队列、串日志
+  const testBatch = async (kind, ids, opts = {}) => {
     if (!ids.length) { toast('库为空，先导入工作流', 'err'); return; }
+    if (testBusy) { toast('已有试跑在进行中，请等待当前任务完成', ''); return; }
+    testBusy = true;
+    const one = opts.single || null;
+    const allBtns = ['image', 'video']
+      .map((k) => root.querySelector(`#cf-testall-${k}`)).filter(Boolean);
+    allBtns.forEach((b) => { b.disabled = true; });
     ids.forEach((id) => testing.add(id));
     renderLib(kind);
     const box = root.querySelector('#cf-result');
     box.hidden = false;
-    box.innerHTML = `<div class="wf-run"><span class="wf-spin"></span> 串行试跑 ${ids.length} 项 · 进度实时回显</div>`;
+    box.innerHTML = `<div class="wf-run"><span class="wf-spin"></span> ${one
+      ? `单独试跑「${esc(one.name)}」· 只提交这一个工作流 · 进度实时回显`
+      : `串行试跑 ${ids.length} 项 · 进度实时回显`}</div>`;
     testES?.close();
     testES = new EventSource('/api/events');
     testES.onmessage = (ev) => {
@@ -466,29 +591,39 @@ export async function openSettings(project, onSave) {
       box.scrollTop = box.scrollHeight;
     };
     try {
-      const d = await postJSON('/api/comfyui/test-batch', { kind, ids });
+      const d = await postJSON(one ? '/api/comfyui/test-one' : '/api/comfyui/test-batch',
+        one ? { kind, id: one.id } : { kind, ids });
       if (d.connectionError) throw new Error(d.connectionError);
       applyConfig(d);
-      const ok = d.results.filter((x) => x.ok).length;
-      const fail = d.results.length - ok;
+      const results = Array.isArray(d.results) ? d.results : [];
+      const ok = results.filter((x) => x.ok).length;
+      const fail = results.length - ok;
       box.querySelector('.wf-run')?.remove();
-      box.insertAdjacentHTML('afterbegin',
-        `<b class="${fail ? 'err' : 'ok'}">${fail ? '试跑完成（存在失败项）' : '✓ 试跑全部成功'}</b> 成功 ${ok} · 失败 ${fail}`);
+      if (one) {
+        box.insertAdjacentHTML('afterbegin', oneResultHTML(one, d));
+        toast(fail ? `「${one.name}」测试失败` : `「${one.name}」测试通过`, fail ? 'err' : 'ok');
+      } else {
+        box.insertAdjacentHTML('afterbegin',
+          `<b class="${fail ? 'err' : 'ok'}">${fail ? '试跑完成（存在失败项）' : '✓ 试跑全部成功'}</b> 成功 ${ok} · 失败 ${fail}`);
+        toast(`试跑完成：成功 ${ok} · 失败 ${fail}`, fail ? '' : 'ok');
+      }
       box.scrollTop = 0;
-      toast(`试跑完成：成功 ${ok} · 失败 ${fail}`, fail ? '' : 'ok');
     } catch (e) {
       const conn = /无法连接/.test(e.message);
       box.querySelector('.wf-run')?.remove();
       box.insertAdjacentHTML('afterbegin',
-        `<b class="err">✕ ${conn ? 'ComfyUI 连接失败' : '试跑失败'}</b> ${esc(e.message)}${conn ? ' · 请先启动 ComfyUI（--listen 127.0.0.1 --port 8188）' : ''}`);
+        `<b class="err">✕ ${conn ? 'ComfyUI 连接失败' : (one ? '单独测试失败' : '试跑失败')}</b> ${esc(e.message)}${conn ? ' · 请先启动 ComfyUI（--listen 127.0.0.1 --port 8188）' : ''}`);
       box.scrollTop = 0;
-      toast(`试跑失败：${e.message}`, 'err');
+      toast(`${one ? '单独测试' : '试跑'}失败：${e.message}`, 'err');
     } finally {
       testES?.close(); testES = null;
       ids.forEach((id) => testing.delete(id));
       renderLib(kind);
+      allBtns.forEach((b) => { b.disabled = false; });
+      testBusy = false;
     }
   };
+  const testOne = (kind, entry) => testBatch(kind, [entry.id], { single: entry });
 
   /* ---------- 多选导入：入库 → toast 汇总 → 自动逐个串行试跑 ---------- */
   const importLib = (kind) => {

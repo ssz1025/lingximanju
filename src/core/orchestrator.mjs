@@ -5,6 +5,7 @@ import { topoLayers, descendants, indexEdges } from './graph.mjs';
 import { getAgent, TYPE_AGENT, buildContext } from './agent.mjs';
 import { createProviders } from './providers.mjs';
 import { loadComfyConfig } from './comfy-config.mjs';
+import { effectiveProjectSettings } from './app-settings.mjs';
 import { uid } from './store.mjs';
 
 const activeRuns = new Map();
@@ -54,7 +55,7 @@ export async function runProject(projectId, opts = {}) {
 
   // ComfyUI 连接与 workflow 模板是全局配置；项目 settings 可局部覆盖（例如只改产出模式）
   const settings = {
-    ...(project.settings || {}),
+    ...effectiveProjectSettings(project),
     comfy: { ...loadComfyConfig(), ...(project.settings?.comfy || {}) },
   };
   const concurrency = Math.max(1, Math.min(8, Number(settings.concurrency) || 3));

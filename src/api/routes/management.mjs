@@ -15,6 +15,42 @@ import { extractCharacters } from '../../core/novel.mjs';
 import { CHARACTER_VIEWS, buildExtractVars, buildViewPrompt, mergeExtracted } from '../../core/characters.mjs';
 // 封面智能体（agents 统一目录）：提示词构建 / 参考图解析 / 对话编排都在那里
 import { designCoverPrompt, MAX_COVER_REFS, parseImagePayload, resolveChatRefs, coverChat } from '../../agents/cover-agent.mjs';
+import { effectiveProjectSettings } from '../../core/app-settings.mjs';
+
+/**
+ * 生成单个角色的某个视图，并写回 management.characters + 资源库。
+ * 单视图端点与「一键生成全部角色」共用，保证两条路径字段口径完全一致。
+ */
+async function generateCharacterView(project, m, character, viewKey) {
+  const view = CHARACTER_VIEWS.find((v) => v.key === viewKey);
+  if (!view) throw new Error('视图必须是 front / side / back');
+  const prompt = buildViewPrompt(character, view.key, {
+    style: m.bible?.stylePrompt || project.settings?.style || '',
+    negative: m.bible?.negativePrompt || '',
+  });
+  const providers = createProviders(effectiveProjectSettings(project),
+    (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }));
+  const img = await providers.image({
+    kind: 'character-view', view: view.key,
+    label: `${character.name}·${view.label}`,
+    prompt, palette: character.palette,
+    style: project.settings?.style || 'cinematic',
+    seed: `${project.id}-${character.id}-${view.key}`,
+  });
+  const file = String(img.url || '').split('/').pop();
+  registerAsset({
+    file, kind: 'character', name: `${character.name}·${view.label}`,
+    tags: ['角色', character.name, view.label, ...character.aliases].filter(Boolean),
+    sourceProjectId: project.id, sourceProjectName: project.name,
+  });
+  character.views = {
+    front: null, side: null, back: null, ...character.views,
+    [view.key]: { file, url: img.url, prompt, provider: img.provider, at: Date.now() },
+  };
+  character.updatedAt = Date.now();
+  m.updatedAt = Date.now();
+  return { view: view.key, url: img.url, provider: img.provider, character };
+}
 
 export async function handleManagement(req, res, url) {
   const { pathname } = url;
@@ -284,7 +320,7 @@ export async function handleManagement(req, res, url) {
       message = `启发式提取到 ${extracted.length} 位候选角色`;
     } else {
       try {
-        const providers = createProviders(project.settings, (level, msg) => emit('log', { projectId: id, level, message: `角色提取 · ${msg}` }));
+        const providers = createProviders(effectiveProjectSettings(project), (level, msg) => emit('log', { projectId: id, level, message: `角色提取 · ${msg}` }));
         const out = await providers.generate('charExtract', buildExtractVars(project, m, limit));
         if (out?.__fallback || !Array.isArray(out?.characters) || !out.characters.length) throw new Error('模型未返回有效角色');
         extracted = out.characters;
@@ -316,38 +352,71 @@ export async function handleManagement(req, res, url) {
     const body = await readBody(req);
     const character = (m.characters || []).find((c) => c.id === String(body.characterId || ''));
     if (!character) return json(res, { error: '角色不存在' }, 404), true;
-    const view = CHARACTER_VIEWS.find((v) => v.key === String(body.view || ''));
-    if (!view) return json(res, { error: '视图必须是 front / side / back' }, 400), true;
-    const prompt = buildViewPrompt(character, view.key, {
-      style: m.bible?.stylePrompt || project.settings?.style || '',
-      negative: m.bible?.negativePrompt || '',
-    });
-    const providers = createProviders(project.settings, (level, msg) => emit('log', { projectId: id, level, message: `角色多视图 · ${msg}` }));
     try {
-      const img = await providers.image({
-        kind: 'character-view', view: view.key,
-        label: `${character.name}·${view.label}`,
-        prompt, palette: character.palette,
-        style: project.settings?.style || 'cinematic',
-        seed: `${id}-${character.id}-${view.key}`,
-      });
-      const file = String(img.url || '').split('/').pop();
-      // 登记资源库（类型=角色），其他项目与关键帧 ref 可按角色名复用
-      registerAsset({
-        file, kind: 'character', name: `${character.name}·${view.label}`,
-        tags: ['角色', character.name, view.label, ...character.aliases].filter(Boolean),
-        sourceProjectId: id, sourceProjectName: project.name,
-      });
-      character.views = { front: null, side: null, back: null, ...character.views, [view.key]: { file, url: img.url, prompt, provider: img.provider, at: Date.now() } };
-      character.updatedAt = Date.now();
-      m.updatedAt = Date.now();
+      const out = await generateCharacterView(project, m, character, String(body.view || ''));
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'characters' });
-      return json(res, { ok: true, view: view.key, url: img.url, provider: img.provider, character }), true;
+      return json(res, { ok: true, ...out }), true;
     } catch (err) {
       return json(res, { error: `角色多视图生成失败：${err.message}` }, 502), true;
     }
+  }
+
+  /** 一键生成全部角色：默认每位角色生成「正面」定妆图，可选三视图；逐项落盘 + SSE 进度 */
+  const charViewsAllMatch = pathname.match(MATCH.charViewsAll);
+  if (charViewsAllMatch) {
+    if (method !== 'POST') return json(res, { error: '需要 POST' }, 405), true;
+    const id = decodeURIComponent(charViewsAllMatch[1]);
+    const project = loadProject(id);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    const m = ensureManagement(project);
+    const body = await readBody(req);
+    const all = m.characters || [];
+    if (!all.length) return json(res, { error: '还没有角色：请先在「角色」页从原著提取或手动新增' }, 400), true;
+    const views = body.allViews === true
+      ? CHARACTER_VIEWS.map((v) => v.key)
+      : ['front'];
+    const onlyMissing = body.onlyMissing !== false;
+    const targets = onlyMissing
+      ? all.filter((c) => views.some((v) => !c.views?.[v]?.url))
+      : all;
+    if (!targets.length) return json(res, { ok: true, total: 0, generated: 0, failed: [], message: '所有角色定妆图都已生成' }), true;
+
+    const total = targets.length * views.length;
+    let done = 0;
+    let generated = 0;
+    const failed = [];
+    for (const c of targets) {
+      for (const key of views) {
+        if (onlyMissing && c.views?.[key]?.url) { done += 1; continue; }
+        emit('character:batch', {
+          projectId: id, done, total, characterId: c.id, name: c.name, view: key, status: 'running',
+        });
+        let lastOk = false;
+        try {
+          await generateCharacterView(project, m, c, key);
+          generated += 1;
+          lastOk = true;
+        } catch (err) {
+          failed.push(`${c.name}·${CHARACTER_VIEWS.find((v) => v.key === key)?.label || key}：${err.message}`);
+        }
+        done += 1;
+        // 每张都落盘：中途失败 / 关闭页面也不会丢已完成的定妆图
+        saveProject(project);
+        emit('character:batch', {
+          projectId: id, done, total, characterId: c.id, name: c.name, view: key,
+          status: lastOk ? 'done' : 'error',
+        });
+      }
+    }
+    broadcastMeta(project);
+    emit('state', { projectId: id, project, reason: 'characters' });
+    return json(res, {
+      ok: true, total: targets.length, generated, failed,
+      characters: m.characters,
+      message: `一键生成完成：${targets.length} 位角色 · 成功 ${generated} 张${failed.length ? ` · 失败 ${failed.length} 张` : ''}`,
+    }), true;
   }
 
   // ---------- AI 生成小说：大纲预览 / 整本生成并注入（等价于上传小说，完成 ①② 步） ----------
@@ -361,7 +430,7 @@ export async function handleManagement(req, res, url) {
     if (m.kind !== 'novel') return json(res, { error: '只有创作项目支持 AI 生成小说' }, 400), true;
     if (isRunning(id)) return json(res, { error: '项目正在运行，稍后再生成' }, 409), true;
     const body = await readBody(req);
-    const providers = createProviders(project.settings,
+    const providers = createProviders(effectiveProjectSettings(project),
       (level, msg) => emit('log', { projectId: id, level, message: `AI 小说 · ${msg}` }));
     const idea = String(body.idea || m.bible?.logline || m.bible?.firstEpisodeTheme || project.name || '').trim().slice(0, 600);
     const chapterCount = Math.max(1, Math.min(8, Number(body.chapterCount) || 3));
@@ -454,7 +523,7 @@ export async function handleManagement(req, res, url) {
     const body = await readBody(req);
     const idea = String(body.idea || '').trim().slice(0, 600);
     if (!idea) return json(res, { error: '请先输入一句话故事构想，AI 才能据此补全项目信息' }, 400), true;
-    const providers = createProviders(project.settings,
+    const providers = createProviders(effectiveProjectSettings(project),
       (level, msg) => emit('log', { projectId: id, level, message: `AI 项目信息 · ${msg}` }));
     try {
       const out = await providers.generate('storyIdea', { idea, title: project.name, style: project.settings?.style });

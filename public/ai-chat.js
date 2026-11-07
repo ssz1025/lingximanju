@@ -36,6 +36,21 @@ export function openAIChat(o = {}) {
   const history = [];               // [{role:'user'|'assistant', content}] 文本对话上下文
   let busy = false;
   let busyNote = null;              // 忙等气泡（打字指示 + 说明）
+  let busyHeld = [];                // 忙等期间被临时禁用的按钮（动作 + 建议），结束后原样恢复。
+                                    // 必须置灰：否则「生成封面」等按钮在任务进行中看起来可点，
+                                    // 点击却被 busy 守卫静默吞掉，用户会以为「点了没反应」。
+  const BUTTON_SELS = ['[data-aichat-act]', '[data-aichat-chip]'];
+  const holdBusyButtons = (scope) => {
+    for (const sel of BUTTON_SELS) {
+      scope.querySelectorAll(sel).forEach((b) => {
+        if (!b.disabled) { b.disabled = true; busyHeld.push(b); }
+      });
+    }
+  };
+  /** 消费式禁用一条消息内的全部按钮（动作 + 建议），防止同气泡内重复触发 */
+  const disableMsgButtons = (el) => {
+    for (const sel of BUTTON_SELS) el.querySelectorAll(sel).forEach((b) => (b.disabled = true));
+  };
 
   function close() {
     if (busy) return;
@@ -102,7 +117,7 @@ export function openAIChat(o = {}) {
       // 建议 chips：点击即作为用户消息发送；同气泡内按钮互斥（点击后全部禁用，防重复触发）
       el.querySelectorAll('[data-aichat-chip]').forEach((chip) => chip.addEventListener('click', () => {
         if (busy) return;
-        el.querySelectorAll('button').forEach((b) => (b.disabled = true));
+        disableMsgButtons(el);
         dispatchSend(chip.textContent.trim());
       }));
       // 动作按钮：交给调用方 actions 表处理
@@ -110,18 +125,23 @@ export function openAIChat(o = {}) {
         if (busy) return;
         const act = msg.actions[Number(btn.dataset.aichatAct)];
         if (!act || act.disabled) return;
-        el.querySelectorAll('button').forEach((b) => (b.disabled = true));
+        disableMsgButtons(el);
         runTask(() => actions[act.act]?.(ui, act.data, msg) ?? Promise.resolve());
       }));
+      // 忙等期间新增的消息（如提示词生成中追加的回复）：按钮同样先置灰，忙等结束后恢复
+      if (busy) holdBusyButtons(el);
       return el;
     },
-    /** 忙等态：输入禁用 + 打字指示（note 为进度说明，如「ComfyUI 正在生成封面…」） */
+    /** 忙等态：输入禁用 + 打字指示（note 为进度说明，如「ComfyUI 正在生成封面…」）。
+     * 同时把所有动作按钮与建议 chips 置灰（结束时任一忙等开始前可用的恢复），
+     * 让「任务进行中、按钮暂不可点」成为可见状态，而不是点击被静默吞掉。 */
     setBusy(v, note = '') {
       busy = !!v;
       input.disabled = busy;
       sendBtn.disabled = busy;
       closeBtn.disabled = busy;
-      backdrop.querySelectorAll('.aichat-chip').forEach((c) => (c.disabled = c.disabled || busy));
+      if (busy) holdBusyButtons(backdrop);
+      else { busyHeld.forEach((b) => (b.disabled = false)); busyHeld = []; }
       if (busy) {
         busyNote?.remove();
         busyNote = document.createElement('div');

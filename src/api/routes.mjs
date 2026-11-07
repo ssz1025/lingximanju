@@ -5,6 +5,7 @@ import { handleComfy } from './routes/comfy.mjs';
 import { handleManagement } from './routes/management.mjs';
 import { handleMedia } from './routes/media.mjs';
 import { handleProjects } from './routes/projects.mjs';
+import { handleEpisodes } from './routes/episodes.mjs';
 import { handleAssets } from './routes/assets.mjs';
 
 // 跨源白名单：默认空（浏览器/Electron 都是同源访问，不需要任何 CORS 头）。
@@ -34,6 +35,7 @@ export async function handleApi(req, res, url) {
   if (await handleComfy(req, res, url)) return true;
   if (await handleManagement(req, res, url)) return true;
   if (await handleMedia(req, res, url)) return true;
+  if (await handleEpisodes(req, res, url)) return true;
   if (await handleProjects(req, res, url)) return true;
   if (await handleAssets(req, res, url)) return true;
 

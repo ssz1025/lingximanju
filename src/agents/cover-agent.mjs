@@ -2,6 +2,7 @@
 // 路由层（api/routes/management.mjs）只做 HTTP 编排，不承载封面业务。
 import { readAsset } from '../core/store.mjs';
 import { createProviders } from '../core/providers.mjs';
+import { effectiveProjectSettings } from '../core/app-settings.mjs';
 
 /** 参考图上限：与 ComfyUI LoadImage 插槽数量同量级，防止把整个资源库都上传一遍 */
 export const MAX_COVER_REFS = 6;
@@ -89,7 +90,7 @@ export function resolveChatRefs(refs) {
  * LLM 未配置 / 调用失败时自动落到完整句模板兜底（providers 内置）。
  */
 export async function designCoverPrompt({ project, m, requirement = '', refs = [], providers, log = () => {} }) {
-  const p = providers || createProviders(project.settings, log);
+  const p = providers || createProviders(effectiveProjectSettings(project), log);
   const vars = {
     ...buildCoverVars(project, m, String(requirement || '').trim()),
     requirement: String(requirement || '').trim().slice(0, 400),
@@ -121,7 +122,7 @@ export async function coverChat({ project, m, messages = [], refs = [], log = ()
     .slice(-12)
     .map((x) => ({ role: x.role, content: String(x.content).slice(0, 1000) }));
   const lastUser = [...history].reverse().find((x) => x.role === 'user')?.content || '';
-  const providers = createProviders(project.settings,
+  const providers = createProviders(effectiveProjectSettings(project),
     (level, msg) => log(level, msg));
   const talkVars = {
     ...buildCoverVars(project, m, ''),

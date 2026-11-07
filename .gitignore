@@ -5,6 +5,7 @@ data/projects/*.json
 data/assets/*
 data/knowledge/*
 data/comfyui.json
+data/app-settings.json
 data/.port
 data/snapshots/*
 *.log

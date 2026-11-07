@@ -1,9 +1,106 @@
-// ComfyUI 接入域：配置 / 探测 / 工作流测试 / 工作流库 / 批量试跑
+// ComfyUI 接入域：配置 / 探测 / 工作流测试 / 工作流库 / 单项与批量试跑
 import { json, readBody } from '../http.mjs';
 import { MATCH } from './match.mjs';
 import { loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems } from '../../core/comfy-config.mjs';
 import { parseWorkflow, analyzeWorkflow, describeWorkflow, testConnection, runWorkflow } from '../../core/comfyui.mjs';
 import { emit } from '../../core/events.mjs';
+
+const TEST_PROMPT = 'cinematic test shot, consistent character, soft light';
+const PROBE_TIMEOUT_MS = 8000;   // 连接探测上限：地址被代理吞掉时不能让面板无限转圈
+
+/** 把一次 runWorkflow 的结果压成前端可读的详情（不回传二进制内容） */
+function testResultDetails(r) {
+  const plan = r?.promptInjection || {};
+  const brief = (p) => (p ? {
+    node: p.node, input: p.input, strategy: p.strategy || '',
+    title: p.title || '', preview: String(p.preview || '').slice(0, 80),
+  } : null);
+  return {
+    promptId: r?.promptId || null,
+    applied: Array.isArray(r?.applied) ? r.applied.length : 0,
+    assets: (r?.assets || []).map((a) => ({
+      url: a.url, kind: a.kind, bytes: a.bytes, filename: a.filename,
+    })),
+    promptInjection: {
+      ok: Boolean(plan.ok ?? plan.positive),
+      positive: brief(plan.positive),
+      negative: brief(plan.negative),
+      warnings: Array.isArray(plan.warnings) ? plan.warnings : [],
+    },
+  };
+}
+
+/**
+ * 串行试跑指定的库项：连接探测 → 逐项 runWorkflow → 每项即时写回 lastTest。
+ * 「单独测试」与「测试全部」共用本函数，保证判定、日志、落盘行为完全一致。
+ * @returns {Promise<{connectionError?:string, clientGone?:boolean, results?:Array, config?:Object}>}
+ */
+async function executeLibraryTests({ res, config, kind, ids, prompt, scope = 'batch' }) {
+  try {
+    await testConnection(config.baseUrl, AbortSignal.timeout(PROBE_TIMEOUT_MS));
+  } catch (err) {
+    // 连不上整批返回，不让每一项空等到 15 分钟超时
+    return {
+      connectionError: /abort|timeout/i.test(err.message)
+        ? `无法连接 ${config.baseUrl}：探测 ${PROBE_TIMEOUT_MS / 1000}s 超时，请确认 ComfyUI 已启动且地址正确`
+        : err.message,
+    };
+  }
+  const libKey = `${kind}WorkflowLib`;
+  const lib = config[libKey] || [];
+  const log = (level, message, extra = {}) =>
+    emit('log', { source: 'wf-test', scope, level, message, ...extra });
+  const ac = new AbortController();
+  let clientGone = false;
+  res.on('close', () => { if (!res.writableEnded) { clientGone = true; ac.abort(); } });
+
+  // 每项完成即写回 lastTest：重新读盘再改，避免覆盖试跑期间用户的其它修改
+  const writeLastTest = (id, lastTest) => {
+    try {
+      const fresh = loadComfyConfig();
+      const cur = fresh[libKey] || [];
+      const target = cur.find((e) => e.id === id);
+      if (!target) return;
+      target.lastTest = lastTest;
+      saveComfyConfig({ [libKey]: cur });
+    } catch (err) { console.warn('[comfy] lastTest 写回失败：', err.message); }
+  };
+
+  const results = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    if (clientGone) break;   // 客户端断开 → 当前项被 signal 取消后停止后续项
+    const entry = lib.find((e) => e.id === ids[i]);
+    if (!entry) continue;
+    log('info', `▶ 试跑 ${i + 1}/${ids.length} ·「${entry.name}」`, { entryId: entry.id });
+    const t0 = Date.now();
+    let lastTest;
+    try {
+      const r = await runWorkflow(config, entry.workflow, {
+        prompt: prompt || TEST_PROMPT,
+        filenamePrefix: 'lingximanju_test', cfg: config,
+      }, {
+        bindings: config.bindings?.[kind] || [],
+        signal: ac.signal,
+        log: (lv, msg) => log(lv, `「${entry.name}」${msg}`, { entryId: entry.id }),
+      });
+      lastTest = { ok: true, durationMs: r.durationMs, at: Date.now(), error: null };
+      results.push({ id: entry.id, name: entry.name, ok: true, durationMs: r.durationMs, error: null, ...testResultDetails(r) });
+      log('info', `✓「${entry.name}」 ${(r.durationMs / 1000).toFixed(1)}s`, { entryId: entry.id });
+    } catch (err) {
+      if (clientGone) {
+        // 面板被关掉 / 请求断开导致的取消不算工作流失败，不污染该行的「上次试跑」徽标
+        log('warn', `「${entry.name}」试跑已取消，保留原有测试状态`, { entryId: entry.id });
+        break;
+      }
+      const error = /执行超时/.test(err.message) ? '超时' : err.message;
+      lastTest = { ok: false, durationMs: Date.now() - t0, at: Date.now(), error };
+      results.push({ id: entry.id, name: entry.name, ok: false, durationMs: lastTest.durationMs, error });
+      log('error', `✕「${entry.name}」 ${error}`, { entryId: entry.id });
+    }
+    writeLastTest(entry.id, lastTest);
+  }
+  return { results, clientGone, config: loadComfyConfig() };
+}
 
 export async function handleComfy(req, res, url) {
   const { pathname } = url;
@@ -131,68 +228,41 @@ export async function handleComfy(req, res, url) {
     return json(res, { ok: true, config, summary: comfySummary(config) }), true;
   }
 
+  // ---------- 单个库项独立试跑：设置页每行「▶ 测试」 ----------
+  if (pathname === '/api/comfyui/test-one' && method === 'POST') {
+    const body = await readBody(req);
+    const kind = body.kind === 'video' ? 'video' : 'image';
+    const config = loadComfyConfig();
+    const entry = (config[`${kind}WorkflowLib`] || []).find((e) => e.id === body.id);
+    if (!entry) return json(res, { error: '库项不存在' }, 404), true;
+    const prompt = String(body.prompt || '').trim().slice(0, 2000) || undefined;
+    const out = await executeLibraryTests({ res, config, kind, ids: [entry.id], prompt, scope: 'one' });
+    if (out.connectionError) {
+      return json(res, { ok: false, connectionError: out.connectionError, results: [] }), true;
+    }
+    if (out.clientGone) return true;
+    return json(res, {
+      ok: true, result: out.results[0] || null, results: out.results,
+      config: out.config, summary: comfySummary(out.config),
+    }), true;
+  }
+
+  // ---------- 批量串行试跑：设置页「▶ 测试全部」 ----------
   if (pathname === '/api/comfyui/test-batch' && method === 'POST') {
     const body = await readBody(req);
     const kind = body.kind === 'video' ? 'video' : 'image';
     const config = loadComfyConfig();
-    const libKey = `${kind}WorkflowLib`;
-    const lib = config[libKey] || [];
+    const lib = config[`${kind}WorkflowLib`] || [];
     const ids = (Array.isArray(body.ids) ? body.ids : []).filter((id) => lib.some((e) => e.id === id));
     if (!ids.length) return json(res, { error: '没有匹配的库项' }, 400), true;
-    try {
-      await testConnection(config.baseUrl);
-    } catch (err) {
-      // 连不上整批返回，不让每一项空等到 15 分钟超时
-      return json(res, { ok: false, connectionError: err.message, results: [] }), true;
+    const out = await executeLibraryTests({ res, config, kind, ids });
+    if (out.connectionError) {
+      return json(res, { ok: false, connectionError: out.connectionError, results: [] }), true;
     }
-    const log = (level, message) => emit('log', { source: 'wf-test', level, message });
-    const ac = new AbortController();
-    let clientGone = false;
-    res.on('close', () => { if (!res.writableEnded) { clientGone = true; ac.abort(); } });
-
-    // 每项完成即写回 lastTest：重新读盘再改，避免覆盖试跑期间用户的其它修改
-    const writeLastTest = (id, lastTest) => {
-      try {
-        const fresh = loadComfyConfig();
-        const cur = fresh[libKey] || [];
-        const target = cur.find((e) => e.id === id);
-        if (!target) return;
-        target.lastTest = lastTest;
-        saveComfyConfig({ [libKey]: cur });
-      } catch (err) { console.warn('[comfy] lastTest 写回失败：', err.message); }
-    };
-
-    const results = [];
-    for (let i = 0; i < ids.length; i += 1) {
-      if (clientGone) break;   // 客户端断开 → 当前项被 signal 取消后停止后续项
-      const entry = lib.find((e) => e.id === ids[i]);
-      if (!entry) continue;
-      log('info', `▶ 试跑 ${i + 1}/${ids.length} ·「${entry.name}」`);
-      const t0 = Date.now();
-      let lastTest;
-      try {
-        const r = await runWorkflow(config, entry.workflow, {
-          prompt: 'cinematic test shot, consistent character, soft light',
-          filenamePrefix: 'lingximanju_test', cfg: config,
-        }, {
-          bindings: config.bindings?.[kind] || [],
-          signal: ac.signal,
-          log: (lv, msg) => log(lv, `「${entry.name}」${msg}`),
-        });
-        lastTest = { ok: true, durationMs: r.durationMs, at: Date.now(), error: null };
-        results.push({ id: entry.id, ok: true, durationMs: r.durationMs, error: null });
-        log('info', `✓「${entry.name}」 ${(r.durationMs / 1000).toFixed(1)}s`);
-      } catch (err) {
-        const error = clientGone ? '已取消' : (/执行超时/.test(err.message) ? '超时' : err.message);
-        lastTest = { ok: false, durationMs: Date.now() - t0, at: Date.now(), error };
-        results.push({ id: entry.id, ok: false, durationMs: lastTest.durationMs, error });
-        log('error', `✕「${entry.name}」 ${error}`);
-      }
-      writeLastTest(entry.id, lastTest);
-    }
-    if (clientGone) return true;   // 对端已断开，无需再写响应
-    const final = loadComfyConfig();
-    return json(res, { ok: true, results, config: final, summary: comfySummary(final) }), true;
+    if (out.clientGone) return true;   // 对端已断开，无需再写响应
+    return json(res, {
+      ok: true, results: out.results, config: out.config, summary: comfySummary(out.config),
+    }), true;
   }
 
   return false;

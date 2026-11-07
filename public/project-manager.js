@@ -936,6 +936,12 @@ export function openProjectManager(ctx = {}) {
           <button class="btn" id="pmm-char-add">＋ 新增角色</button>
           <span class="cf-note" style="margin:0" id="pmm-char-status">${hasNovel ? '' : '请先上传小说后再提取角色'}</span>
         </div>
+        <div class="cf-row pmm-char-batch">
+          <button class="btn primary" id="pmm-char-gen-all" ${chars.length ? '' : 'disabled'}>✦ 一键生成全部角色定妆图</button>
+          <label class="cf-check"><input type="checkbox" id="pmm-char-all-views"> 每人生成三视图（正面 / 侧面 / 背面）</label>
+          <label class="cf-check"><input type="checkbox" id="pmm-char-only-missing" checked> 只补缺失的图</label>
+          <span class="cf-note" style="margin:0">${chars.length ? `共 ${chars.length} 位角色 · 逐张落盘，可随时中断` : ''}</span>
+        </div>
         ${chars.length
         ? `<div class="pmm-chars">${chars.map((c) => charCardHTML(c, viewGen)).join('')}</div>`
         : '<div class="cf-note">还没有角色。可从小说自动提取（LLM 优先、启发式兜底），或手动新增角色。</div>'}
@@ -963,6 +969,30 @@ export function openProjectManager(ctx = {}) {
       body.querySelector('#pmm-char-extract').addEventListener('click', () => extract('llm'));
       body.querySelector('#pmm-char-heur').addEventListener('click', () => extract('heuristic'));
     }
+    /** 一键生成全部角色：一次请求批量出图，SSE 进度由 app.js 写回 #pmm-char-status */
+    body.querySelector('#pmm-char-gen-all')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const status = $('pmm-char-status');
+      btn.disabled = true;
+      btn.textContent = '✦ 批量生成中…';
+      if (status) status.textContent = '正在准备批量生成…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views/all`, {
+          allViews: body.querySelector('#pmm-char-all-views')?.checked === true,
+          onlyMissing: body.querySelector('#pmm-char-only-missing')?.checked !== false,
+        });
+        toast(d.message || '批量生成完成', d.failed?.length ? 'warn' : 'ok');
+        if (status) status.textContent = d.message || '';
+        await refresh();
+        await ctx.onChanged?.();
+      } catch (err) {
+        toast(`批量生成失败：${err.message}`, 'err');
+        if (status) status.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '✦ 一键生成全部角色定妆图';
+      }
+    });
     body.querySelectorAll('[data-char-edit]').forEach((b) => b.addEventListener('click', () => {
       const c = chars.find((x) => x.id === b.dataset.charEdit);
       if (c) openCharacterEditor(c, (obj) => manage('char-upsert', obj));
@@ -1128,11 +1158,15 @@ export function openProjectManager(ctx = {}) {
     };
     const eps = (m.episodes || []);
     body.innerHTML = `${strip}<div class="pmm-section-head"><strong>分集表 · ${eps.length} 集</strong><span>来自 ${esc(m.source?.filename || '粘贴文本')} · 共 ${m.source?.totalChars || 0} 字</span></div>
-      <div class="pmm-eps">${eps.map((e, i) => `<div class="pmm-ep">
+      <div class="pmm-eps">${eps.map((e, i) => `<button class="pmm-ep" data-ep-open="${e.no}" title="打开第 ${e.no} 集详情">
         <span class="pmm-ep-no">${e.no}</span>
-        <span class="pmm-ep-main"><strong>${esc(e.title)}${epTag(e, i, eps)}</strong><small>${esc(e.summary)}</small><em>结尾钩子：${esc(e.hook)}</em><span class="pmm-ep-src">来源：${esc((e.sourceTitles || []).join(' / '))}</span></span>
-        <span class="pmm-ep-chars">${e.chars} 字</span></div>`).join('')}</div>
-      <div class="cf-note">每集在无限画布上对应一个 <code>episode</code> 节点，并以 <code>ref</code> 边把本集梗概传给剧本节点；原著全文由 RAG 节点索引（式(6)）。分集目标集数来自「创作设定 · 总集数」。</div>`;
+        <span class="pmm-ep-main"><strong>${esc(e.title)}${epTag(e, i, eps)}</strong><small>${esc(e.summary)}</small><em>结尾钩子：${esc(e.hook)}</em><span class="pmm-ep-src">来源：${esc((e.sourceTitles || []).join(' / '))} · ${(e.chapters || []).length} 章 / ${(e.segments || []).length} 段</span></span>
+        <span class="pmm-ep-chars">${e.chars} 字<i>查看详情 →</i></span></button>`).join('')}</div>
+      <div class="cf-note">点击任意一集可查看拆分原文、本集剧本、出场角色、每段宫格图、资源链接画布，并可单独导出导演包或调用本地 ComfyUI 生成视频。</div>`;
+    body.querySelectorAll('[data-ep-open]').forEach((b) => b.addEventListener('click', () => {
+      close();
+      ctx.onOpenEpisode?.(Number(b.dataset.epOpen));
+    }));
   }
 
   function renderDeliverables(body, m, s) {

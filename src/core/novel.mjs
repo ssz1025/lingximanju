@@ -187,6 +187,68 @@ export function extractCharacters(text, limit = 4) {
     }));
 }
 
+/* ---------------------------------------------------------------------------
+ * 多文件导入：把若干 .txt/.md 合成一份可解析的原著，同时保留「章节 ↔ 文件」出处。
+ *
+ * 单文件：原文直用（不改写标题），只为每章补 sourceName。
+ * 多文件：每章标题重写为「第N章：《文件名》原标题」，保证全局唯一且可被
+ *         CHAPTER_RE 识别；这样 splitEpisodes 的 sourceTitles 能精确回溯到文件。
+ * 纯函数，不落盘、不读文件（读文件由浏览器 FileReader 完成）。
+ * -------------------------------------------------------------------------*/
+export function mergeNovelFiles(files = []) {
+  const list = (Array.isArray(files) ? files : [])
+    .map((f) => ({ name: clean(f?.name) || '未命名文件.txt', text: String(f?.text ?? '') }))
+    .filter((f) => f.text.trim());
+  if (!list.length) return { ok: false, message: '没有可导入的文件内容', text: '', filename: '', sources: [], chapterSources: [] };
+  if (list.length > 12) return { ok: false, message: '一次最多导入 12 个文件，请分批上传', text: '', filename: '', sources: [], chapterSources: [] };
+
+  const stem = (name) => cut(name.replace(/\.(txt|md|markdown|json)$/i, ''), 12) || '文件';
+  const sources = [];
+  const chapterSources = [];
+  const blocks = [];
+  let chapterNo = 0;
+
+  if (list.length === 1) {
+    const f = list[0];
+    const parsed = parseNovel(f.text, f.name);
+    const chapters = parsed.chapters.length ? parsed.chapters : [{ no: 1, title: '正文', text: parsed.text, chars: parsed.text.length }];
+    for (const c of chapters) chapterSources.push({ title: c.title, sourceName: f.name, chars: clean(c.text).length });
+    sources.push({ name: f.name, chars: clean(f.text).length, chapterTitles: chapters.map((c) => c.title) });
+    return {
+      ok: true, text: f.text, filename: f.name, sources, chapterSources,
+      message: `已载入「${f.name}」· ${chapterSources.length} 章`,
+    };
+  }
+
+  for (const f of list) {
+    const parsed = parseNovel(f.text, f.name);
+    const own = parsed.chapters.length ? parsed.chapters : [{ title: '正文', text: parsed.text, lines: [] }];
+    const hasRealChapters = own.length > 1 || !/^(正文|开篇)$/.test(own[0].title);
+    const units = hasRealChapters
+      ? own.map((c) => ({ title: c.title, text: clean(c.text) }))
+      : [{ title: '正文', text: clean(own.map((c) => c.text).join('\n')) }];
+    const titles = [];
+    for (const u of units) {
+      if (!clean(u.text)) continue;
+      chapterNo += 1;
+      // 「：」是 CHAPTER_RE 允许的标题分隔符，长度控制在 46 字内确保可被识别
+      const title = `第${chapterNo}章：《${stem(f.name)}》${cut(u.title, 22)}`;
+      titles.push(title);
+      blocks.push(`${title}\n${clean(u.text)}`);
+      chapterSources.push({ title, sourceName: f.name, chars: clean(u.text).length });
+    }
+    sources.push({ name: f.name, chars: clean(f.text).length, chapterTitles: titles });
+  }
+  if (!blocks.length) return { ok: false, message: '文件内容为空，无法导入', text: '', filename: '', sources: [], chapterSources: [] };
+  return {
+    ok: true,
+    text: blocks.join('\n\n'),
+    filename: `${list.length} 个文件合辑.txt`,
+    sources, chapterSources,
+    message: `已合并 ${list.length} 个文件 · ${chapterNo} 章 · ${clean(blocks.join('')).length} 字`,
+  };
+}
+
 /** 只返回轻量预览（不含全文），避免向导预览把整本小说塞进 DOM */
 export function novelPreview(novel, episodes) {
   return {

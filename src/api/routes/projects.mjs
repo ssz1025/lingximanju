@@ -28,6 +28,7 @@ export async function handleProjects(req, res, url) {
       project = (body.kind === 'novel' || body.novel)
         ? buildNovelProject({
           text: body.text || body.novel, filename: body.filename, name: body.name,
+          files: Array.isArray(body.files) ? body.files : undefined,
           idea: body.idea,
           split: body.split, deliverables: body.deliverables,
           style: body.style, aspect: body.aspect,
@@ -60,7 +61,10 @@ export async function handleProjects(req, res, url) {
     if (isRunning(id)) return json(res, { error: '项目正在运行，稍后再上传' }, 409), true;
     const body = await readBody(req);
     try {
-      const r = attachSource(project, { text: body?.text, filename: body?.filename, split: body?.split });
+      const r = attachSource(project, {
+        text: body?.text, filename: body?.filename, split: body?.split,
+        files: Array.isArray(body?.files) ? body.files : undefined,
+      });
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'source' });
@@ -69,6 +73,11 @@ export async function handleProjects(req, res, url) {
         ok: true, message: r.message,
         novel: { title: r.novel.title, chapterCount: r.novel.chapterCount, totalChars: r.novel.totalChars },
         episodeCount: r.episodes.length,
+        chapters: r.chapters || [], sources: r.sources || [],
+        episodes: (project.management?.episodes || []).map((e) => ({
+          no: e.no, title: e.title, chars: e.chars, summary: e.summary,
+          chapters: e.chapters || [], segmentCount: (e.segments || []).length,
+        })),
         management: project.management,
         progress: stepProgress(project.management),
       }), true;
