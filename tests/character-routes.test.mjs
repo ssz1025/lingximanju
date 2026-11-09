@@ -99,7 +99,7 @@ test('POST /characters/views → 三视图依次生成，侧面/背面提示词�
   assert.ok(c.views.side?.url);
   assert.ok(c.views.back?.url);
   assert.ok(c.views.front.prompt.includes('正面'), '正面提示词应声明朝向');
-  assert.ok(c.views.side.prompt.includes('正面定妆图'), '侧面应声明以正面定妆图为外观依据');
+  assert.ok(c.views.side.prompt.includes('参考图（正面）'), '侧面应声明以正面图为唯一外观依据');
   assert.ok(c.views.back.prompt.includes('背面不可见五官'));
   assert.ok(!c.views.side.prompt.includes('固定特征'), '侧面不重复特征描述，避免与正面图漂移');
 });

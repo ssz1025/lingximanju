@@ -135,3 +135,37 @@
 | 真机验证 | Electron 33 offscreen 连隔离服务 `LINGXIMANJU_DATA_DIR=/tmp/lxm-e2e-data-5 PORT=45423`，复跑既有「项目重组」E2E **35/35 断言通过、0 JS 运行时错误**；`GET /utils.js`、`GET /canvas-scope.js`、`GET /api/projects/:id/source` 均 200 |
 | 视觉复核 | 概览 / 原著两张深色主题截图：Tab 栏、统计卡、章节目录、全文阅读区、侧栏均正常，无 `&amp;` / `&#39;` 之类转义残留，无异常截断与布局溢出 |
 | 用户数据 | 真实 `data/` 未写入；隔离副本 `/tmp/lxm-e2e-data-5` 为改动前的干净副本（初始 `seasons=null`、`ep.canvas=0`），E2E 写入仅落副本，验证后清理 |
+
+## 2026-11-08 · 项目退出出口统一
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 从项目列表进入项目工作台后，统一退出出口；只有「项目设置 → 退出项目」和右上角退出按钮可以退出工作台 |
+| 收敛前 | 6 条能退出 / 清理会话的路径：顶栏 `✕ 关闭项目`、侧栏项目卡 `✕`、`⌂ 项目列表`、剧集面包屑「✕ 关闭项目」、`H` 快捷键，以及删除 / 外部移除的自动收尾；而「项目设置」里反而没有退出项 |
+| 两处保留出口 | ① 顶栏右上角 `#btn-close-project`，从 `tb-left` 的小 ✕ 图标移到 `tb-right` 最右侧并改为明确文字「⇦ 退出项目」（`.exit-project`）；② 左侧「项目设置」末行新增 `data-act="exit-project"`（`.ps-exit`，`grid-column: 1 / -1`，偏红样式） |
+| 唯一出口函数 | `app.js` 新增 `requestExitProject()`（守卫无项目 / 已在列表页、收起更多菜单）→ `closeProject()`；两处 UI 分别通过 `addEventListener('click', requestExitProject)` 与 `onExitProject: requestExitProject` 绑定。无参 `closeProject()` 全文件仅出现一次 |
+| 移除的旧出口 | 删除 `index.html #btn-home`、`project-sidebar.js .ps-home-btn / data-act="home" / onHome`、`updateCrumb()` 的 `data-crumb="home"`、keydown 的 `k === 'h'`；`setView()` 与 `bindUI()` 里的对应显隐 / 监听同步清理；`styles.css` 删除 `.close-project` / `.ps-home-btn` 规则 |
+| 保留的内部清理 | 项目删除 / 外部移除的 `closeProject({ silent: true })` 两处不变，它们不经过 `requestExitProject()`，不属于用户出口；剧集面包屑只保留「项目名 / 第 N 集」，项目名链接回工作台 / 画布 |
+| 帮助与文档 | `panels.js` 帮助表把「H 或 ✕」改成两处出口说明；README 四视图表、项目会话段、能力表、示意图、快捷键表与测试表同步；ARCHITECTURE 新增 §14.13；结构文档补齐新模块与测试数 |
+| 结构契约测试 | 新增 `tests/project-exit.test.mjs` 5 项，直接读源码断言：右上角按钮唯一且位于 `.tb-right`、页面骨架无旧出口、设置区退出项唯一且走 `onExitProject`、`requestExitProject` 是唯一用户出口（旧 `H` / `onHome` / `btn-home` 全消失）、帮助与样式同步 |
+| 回归基线 | `npm run check` **98 文件**通过；`npm test` **304/304**（新增 `project-exit` 5 项） |
+| 真机验证 | Electron 33 offscreen 连隔离服务 `LINGXIMANJU_DATA_DIR=/tmp/lxm-e2e-data-6 PORT=45423`，扩展后的 E2E **42/42 断言通过、0 JS 运行时错误**；新增覆盖右上角按钮在 `.tb-right` 且文字含「退出项目」、设置区出口唯一、旧出口计数全 0、`H` 按下后仍停在 `view-workshop`、剧集面包屑无关闭项、两处出口各自都能回列表且 `closeHidden === true`、刷新后季 / 画布持久化仍正常 |
+| 视觉复核 | 深色主题截图放大复核：顶栏最右「⬡ 画布 / 本项目默认模型 / ··· / ⇦ 退出项目」无重叠；侧栏设置区退出项独占整行、文字完整、与「导出项目」明显区分；项目卡右上角不再有 ✕ |
+| 用户数据 | 真机验证全程连 `/tmp/lxm-e2e-data-6`（`data/` 的干净副本，初始 `seasons=null`、`ep.canvas=0`），真实 `data/` 未写入；验证后清理副本与隔离服务 |
+
+## 2026-11-09 · 30s 短剧（每片段 3s）全流程生成与验证
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 生成一个 30s 短剧、每片段 3s，跑完最终产物的全部流程；不通过则定位并修复 |
+| 基线（修复前） | 不改代码先跑完整流程：**12 个片段**、时长 `4/5/6s` 循环、**总 60s**、导演包 12 组镜头、验收清单 7 项里没有时长检查 → 被误判「全流程已达成」 |
+| 根因 | 片段时长散落在 5 处硬编码：分镜 mock `4+(i%3)`、`video` Agent 默认 5s、`composer` 时间线默认 5s、`stitchClips` 默认 5s、单集导演包 `timeline.json` 固定 5s；且缺少项目级时长规格 |
+| 修复 | 新增 `core/runtime-spec.mjs`（规格归一 / 片段时间线 / 镜头预算 / 时长验收）与 `core/preview-film.mjs`（零 Key 关键帧预览成片）；项目状态 `management.runtime`；`orchestrator` 下发 `settings.runtime`；`decomposer` 按 `clipCount` 精确分配镜头预算并给全局序号；`providers` / `visual` / `director-pack` / `episode-service` / `film` 全链路同源；`verifyDirectorDeliverables` 新增「成片时长规格」项 |
+| 修复后全流程 | 10 个片段 × 3s = 30s；62 节点、6/6 步完成、导演包 35 文件 / 10 组镜头；`timeline.json` 10 段 × `durationSec=3` / `totalFrames=720` @24fps；成片 MP4 经 ffprobe **实测 30.00s**；验收清单 **8 项全达成、降级 0、缺失 0** |
+| 诚实化 | 零 Key 成片标 `source='preview-frames'`，报告明确写「关键帧预览成片（非 AI 视频）」；`film.measured=true` 表示时长来自 ffprobe 实测，而非把元数据相加 |
+| 单元测试 | `npm test` **346/346**（新增 `tests/runtime-spec.test.mjs` 9 项：真实 ffmpeg 成片实测 30s、`stitchClips` 实测时长、镜头预算恒等、还原「12 片段 / 60s」旧缺陷、管理动作与路由）；`npm run check` **116 文件** |
+| 真实 HTTP 冒烟 | 隔离服务 45998：**51/51**（bootstrap 默认规格、项目创建、规格 GET / POST / 非法拒绝 / 部分提交不丢值、一键全流程 20.8s、服务端落盘、`/film` 下载后 ffprobe 30s、`/director-pack` 解包校验 timeline） |
+| 无头浏览器 | Playwright + Chromium `/tmp/pwtest/short30.mjs` **27/27**：规格面板 `30s ÷ 3s = 10 个片段 · 24fps · 720 帧`、8 项全绿验收报告、工作台改 12s/2s → 6 片段且落盘、改回 30s/3s → 10 片段、窄屏单列、0 JS 运行时报错 |
+| 视觉复核 | `short30-basic-full.png` / `short30-report-full.png`（收起浮层完整页）、`short30-basic.png` / `short30-report.png`（展开态）、`short30-narrow.png`：规格面板与验收报告无遮挡、错位、溢出 |
+| 交付产物 | 项目「30s 短剧 · 雨夜便利店」已落到 `data/`（62 节点 / 40 个资产引用全部存在）；成片 `short-30s.mp4`、导演包 `short-30s.mmxpack.zip` |
+| 环境说明 | 验证在隔离数据目录进行：本机全局 `app-settings.json` 配置了外部 LLM（mimo-v2.6-pro），真实目录下全流程会等待 5 分钟超时；隔离目录为零 Key mock。真实目录仅追加成品项目与其资产，未改动任何全局配置，也未覆盖既有项目 |

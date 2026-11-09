@@ -8,8 +8,10 @@
 //
 // 两种包都会额外携带 extra/（人可读分镜、来源信息、原始 API 工作流），不影响导演台读取。
 import { createZip } from './zip.mjs';
-import { placeholderFrame } from './raster.mjs';
+import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { readAsset, writeAssetBinary, uid } from './store.mjs';
+import { resolveRuntimeSpec } from './runtime-spec.mjs';
+import { resolveCharacterRefs, refsManifest, describeRefs } from './character-refs.mjs';
 
 const PACK_FORMAT = 'minimax-h3-director-pack';
 const PACK_VERSION = 1;
@@ -18,15 +20,32 @@ function asciiSlug(text = '') {
   return String(text).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'project';
 }
 
-/** 画布资产 URL → 可放进包的二进制；SVG / 缺失时生成等价 PNG 占位 */
+/**
+ * 画布资产 URL → 可放进包的二进制（槽位只接受位图）。
+ * 缺失 / 非位图时生成等价 PNG 占位：
+ *  - 角色视图按 view 语义画成人形（正面/3-4 侧/侧面/背面/特写），保住「这是谁、哪个角度」
+ *  - 其余（首帧 / 锚点 / 海报）用分镜占位帧
+ * 旧实现把角色 SVG 也换成风景占位图，下游因此拿到与角色无关的参考图。
+ */
 function media(url, opts = {}) {
-  const fallback = () => ({ data: placeholderFrame(opts), ext: '.png', synthetic: true });
+  const isCharacter = opts.kind === 'character' || opts.kind === 'character-view';
+  const fallback = () => ({
+    data: isCharacter
+      ? characterViewFrame({
+        view: opts.view || 'front', palette: opts.palette || [], style: opts.style,
+        seed: opts.seed, label: opts.label || '',
+      })
+      : placeholderFrame(opts),
+    ext: '.png', synthetic: true,
+  });
   if (!url) return fallback();
   const m = String(url).match(/\/assets\/([A-Za-z0-9_.-]+)/);
   if (!m) return fallback();
   const buf = readAsset(m[1]);
   if (!buf) return fallback();
   const ext = (m[1].match(/\.[A-Za-z0-9]{1,6}$/) || ['.png'])[0].toLowerCase();
+  // SVG 无法被导演台/ComfyUI 的图片槽位直接读取，按语义栅格化（而不是丢弃成风景图）
+  if (ext === '.svg') return fallback();
   if (!/\.(png|jpe?g|webp|bmp)$/.test(ext)) return fallback();
   return { data: buf, ext, synthetic: false };
 }
@@ -40,8 +59,10 @@ function incomingNode(project, nodeId, predicate) {
 
 /** 收集每个镜头组的完整制作信息 */
 export function collectShotPackages(project) {
+  const runtime = resolveRuntimeSpec(project);
   const videos = project.nodes.filter((n) => n.type === 'video' && n.data?.clip);
-  videos.sort((a, b) => (a.data?.shot?.shotNo || 0) - (b.data?.shot?.shotNo || 0));
+  const seq = (n) => Number(n.data?.sequence ?? n.data?.shot?.sequence ?? n.data?.shot?.shotNo ?? 0);
+  videos.sort((a, b) => seq(a) - seq(b));
   const transitions = project.nodes.filter((n) => n.type === 'transition' && n.data?.transition?.url);
   return videos.map((n, i) => {
     const shot = n.data?.shot || {};
@@ -61,21 +82,66 @@ export function collectShotPackages(project) {
       index: i + 1, shotNo, nodeId: n.id,
       title: n.title || `镜头 ${shotNo}`,
       prompt, shot, clip, keyframeUrl, endUrl,
-      duration: Number(n.data?.duration || clip.duration || shot.duration) || 5,
+      duration: Number(n.data?.duration || clip.duration || shot.duration) || runtime.clipSeconds,
       realVideo: Boolean(clip.file && clip.provider === 'comfyui'),
     };
   });
 }
 
+/**
+ * 收集导演包用的角色参考。
+ *
+ * 过去只扫画布 `character` 节点上的一张三视图合图，管理面板精修的 5 张定妆图
+ * 完全没进包 —— 交接包里角色参考还是早期那张草图，下游导演台当然还原不出定妆。
+ * 现在统一走 resolveCharacterRefs：管理面板定妆多视图优先，画布节点补位。
+ */
 function collectCharacters(project) {
-  const node = project.nodes.find((n) => n.type === 'character' && Array.isArray(n.data?.characters) && n.data.characters.length);
-  const list = (node?.data?.characters || []).slice(0, 3);
-  if (!list.length) return [];
-  return list.map((c, i) => ({
-    name: c.name || `角色 ${i + 1}`,
-    role: c.role || '', appearance: c.appearance || '',
-    url: c.portraitUrl || null, slot: i + 1,
-  }));
+  // 每个角色取最多 4 张（正面 / 面部特写 / 3/4 侧 / 侧面），导演台槽位仍是 3 个角色，
+  // 多出来的视图作为同槽位的附加参考落盘，由 character_sheet.json 指明用法。
+  const resolved = resolveCharacterRefs(project, { perCharacter: 4, maxTotal: 16 });
+  return resolved.characters
+    .filter((c) => c.refs.length || c.appearance)
+    .slice(0, 3)
+    .map((c, i) => ({
+      name: c.name || `角色 ${i + 1}`,
+      role: c.role || '',
+      appearance: c.appearance || '',
+      url: c.refs[0]?.url || null,
+      refs: c.refs.map((r) => ({ url: r.url, view: r.view, label: r.label })),
+      refCount: c.refs.length,
+      refSummary: describeRefs(c),
+      palette: c.palette || [],
+      origin: c.origin, styleLock: c.styleLock || '',
+      slot: i + 1,
+    }));
+}
+
+/**
+ * 把一个角色的多视图逐张落盘，返回该角色在包内的参考图清单。
+ * 首张（最权威视图，通常为正面）写成 `{base}{ext}`（导演台槽位命名），
+ * 其余角度写成 `{base}-{view}{ext}`，既保留工具链可识别的命名，
+ * 又能让下游按 view 标签取到对应角度。
+ */
+function putCharacterViews(put, character, prefix, base) {
+  const views = character.refs?.length
+    ? character.refs
+    : [{ url: character.url || null, view: 'sheet', label: '定妆图' }];
+  const out = [];
+  views.forEach((ref, i) => {
+    const viewKey = ref.view || (i === 0 ? 'front' : `view${i + 1}`);
+    const m = media(ref.url, {
+      seed: `char-${character.name}-${viewKey}`, shotNo: character.slot || i + 1,
+      style: character.styleLock || '', kind: 'character', view: viewKey,
+      palette: character.palette || [], label: character.name,
+    });
+    const name = i === 0 ? `${base}${m.ext}` : `${base}-${viewKey}${m.ext}`;
+    put(`${prefix}/${name}`, m.data);
+    out.push({
+      view: viewKey, label: ref.label || '', imageFile: `${prefix}/${name}`,
+      fileName: name, synthetic: m.synthetic, primary: i === 0,
+    });
+  });
+  return out;
 }
 
 function shotPromptExtra(project, characters, style) {
@@ -97,14 +163,24 @@ function buildMiniMaxEntries(project, cfg, ctx) {
   const putJSON = (name, obj) => put(name, JSON.stringify(obj, null, 2) + '\n');
 
   // ---- 公共参数：角色造型图占 Picture1..3 ----
+  // 兼容性约束：导演台插件按 index 0/1/2 对应三个参考槽位，多塞条目会挤掉真实槽位，
+  // 因此 shared_params.json 的 refs 仍严格 3 条（每个角色取最权威的一张），
+  // 其余视图落盘到 shared_params/ 并以 characters 明细 + character_sheet.json 告知用法。
   const sharedRefs = [];
+  const sharedCharacters = [];
   for (const c of characters) {
-    const m = media(c.url, { seed: `char-${c.name}`, shotNo: c.slot, style, kind: 'character' });
-    const name = `Picture${c.slot}${m.ext}`;
-    put(`shared_params/${name}`, m.data);
+    const views = putCharacterViews(put, c, 'shared_params', `Picture${c.slot}`);
+    c.viewFiles = views; // 回写：manifest / README / extra 都靠它说明包内到底有哪些图
+    const primary = views[0];
     sharedRefs.push({
-      index: c.slot - 1, imageFile: `shared_params/${name}`, fileName: name,
+      index: c.slot - 1, imageFile: primary.imageFile, fileName: primary.fileName,
       type: 'input', subfolder: 'shared_params', character: c.name,
+    });
+    sharedCharacters.push({
+      ...c,
+      primaryView: primary.view,
+      imageFile: primary.imageFile,
+      viewFiles: views,
     });
   }
   const commonPrompt = shotPromptExtra(project, characters, style);
@@ -112,8 +188,27 @@ function buildMiniMaxEntries(project, cfg, ctx) {
     commonEnabled: true, commonCollapsed: false,
     prompt: commonPrompt,
     refs: sharedRefs, refAudios: [], refVideos: [],
+    // 附加字段：导演台会原样保存，不会被误认成槽位
+    characters: sharedCharacters.map((c) => ({
+      slot: c.slot, name: c.name, role: c.role, primaryView: c.primaryView,
+      imageFile: c.imageFile, viewFiles: c.viewFiles, refSummary: c.refSummary,
+      styleLock: c.styleLock || '',
+    })),
   };
   putJSON('shared_params/shared_params.json', sharedJSON);
+  // 角色定妆参考清单：人可读 + 可程序化消费，明确「每个角色有哪几张视图、分别是什么角度」
+  putJSON('shared_params/character_sheet.json', {
+    format: 'lingximanju-character-sheet', version: 1,
+    generatedAt: new Date().toISOString(),
+    style, styleLock: characters[0]?.styleLock || '',
+    note: '每个角色的多视图定妆参考。PictureN 为首选（正面）槽位图，PictureN-<view> 为同角色的其他角度。'
+      + '把 PictureN 接到参考图槽位即可；需要更严格的身份约束时再追加同角色的特写/侧身图。',
+    characters: refsManifest(sharedCharacters).map((c, i) => ({
+      ...c, primaryView: sharedCharacters[i].primaryView,
+      imageFile: sharedCharacters[i].imageFile,
+      viewFiles: sharedCharacters[i].viewFiles,
+    })),
+  });
 
   // ---- 每个镜头一个素材组 ----
   const segments = [];
@@ -208,8 +303,9 @@ function buildGenericEntries(project, cfg, ctx) {
   const put = (name, data) => entries.push({ name, data });
   const putJSON = (name, obj) => put(name, JSON.stringify(obj, null, 2) + '\n');
   for (const c of characters) {
-    const m = media(c.url, { seed: `char-${c.name}`, shotNo: c.slot, style, kind: 'character' });
-    put(`images/character-${String(c.slot).padStart(2, '0')}${m.ext}`, m.data);
+    const views = putCharacterViews(put, c, 'images', `char-${String(c.slot).padStart(2, '0')}`);
+    c.genericFiles = views;
+    c.viewFiles = views;
   }
   for (const s of shots) {
     const m = media(s.keyframeUrl, { seed: `shot-${s.shotNo}`, shotNo: s.shotNo, style, kind: 'start' });
@@ -265,7 +361,16 @@ export function buildDirectorPack(project, cfg = {}) {
     script: script ? { title: script.title, genre: script.genre, logline: script.logline } : null,
     output: extra.output || { width: ctx.width, height: ctx.height, frameRate: ctx.fps },
     shotCount: ctx.shots.length,
-    characterRefs: ctx.characters.length,
+    characterRefs: ctx.characters.reduce((n, c) => n + (c.refs?.length || 0), 0),
+    characterCount: ctx.characters.length,
+    // 角色定妆明细：哪些角色进了包、每个角色带了几张哪几个角度，验收时可核对
+    characterSheets: refsManifest(ctx.characters).map((c, i) => ({
+      ...c,
+      primaryView: ctx.characters[i]?.refs?.[0]?.view || null,
+      refSummary: ctx.characters[i]?.refSummary || '',
+      files: ctx.characters[i]?.viewFiles || ctx.characters[i]?.genericFiles || [],
+    })),
+    styleLock: ctx.characters.find((c) => c.styleLock)?.styleLock || '',
     realVideoClips: ctx.shots.filter((s) => s.realVideo).length,
     groups: extra.groupSummaries,
     note: ctx.shots.some((s) => s.realVideo)
@@ -274,16 +379,22 @@ export function buildDirectorPack(project, cfg = {}) {
   };
 
   const entries = [...extra.entries];
+  const charLines = ctx.characters.map((c) => {
+    const views = (c.viewFiles || c.genericFiles || []).map((v) => v.fileName).join('、');
+    return `- ${c.name}${c.role ? `（${c.role}）` : ''}：${views || '无定妆图，仅文字描述'}`;
+  });
   const readme = [
     `# ${target === 'generic' ? 'lingximanju 通用 ComfyUI 导演包' : 'lingximanju → MiniMax H3 Director 导演包'}`,
     '',
     `- 项目：${project.name || '未命名'}`,
-    `- 镜头组：${ctx.shots.length}　角色参考图：${ctx.characters.length}　输出：${ctx.width}×${ctx.height} @ ${ctx.fps}fps`,
+    `- 镜头组：${ctx.shots.length}　角色：${ctx.characters.length}（${manifest.characterRefs} 张定妆参考图）　输出：${ctx.width}×${ctx.height} @ ${ctx.fps}fps`,
+    manifest.styleLock ? `- 风格锁定：${manifest.styleLock}` : '',
+    charLines.length ? ['', '角色定妆参考：', ...charLines].join('\n') : '',
     '',
     target === 'generic' ? [
       '用法：',
       '1. 将 workflows/ 下的 *_api.json 拖入 ComfyUI 画布（这是「导出(API)」格式，可直接运行）。',
-      '2. images/ 中为各镜头首帧与角色定妆图，可作为 LoadImage 节点输入。',
+      '2. images/ 中为各镜头首帧与角色定妆图（`char-01.png` 为首选视图，`char-01-closeup.png`、`char-01-threeQuarter.png` 等同角色其他角度），可作为 LoadImage 节点输入。',
       '3. shots.json 提供每个镜头的提示词、景别、运镜与时长。',
     ].join('\n') : [
       '用法：',
@@ -292,7 +403,8 @@ export function buildDirectorPack(project, cfg = {}) {
       '3. 导入会覆盖当前节点时间轴（插件会先确认）；公共参考图、每组首帧与提示词会自动还原。',
       '4. 按 taskType fl2v 选用 fl2va UNET；如需参考图模式 r2v 请改用 ref2va UNET。',
       '',
-      '目录：pack.json（格式与采样参数）、shared_params/（公共角色参考与一致性提示词）、',
+      '目录：pack.json（格式与采样参数）、shared_params/（公共角色参考与一致性提示词，',
+      'character_sheet.json 列出每个角色的多视图定妆明细：PictureN 为首选正面，PictureN-<view> 为其他角度）、',
       'asset_groups/NN/group.json（逐镜头提示词 / 首帧 / 时长）、timeline.json（无损时间线）、extra/（人可读分镜与原始工作流）。',
       '模型权重不包含在包内。',
     ].join('\n'),
@@ -312,7 +424,14 @@ export function buildDirectorPack(project, cfg = {}) {
         keyframeUrl: s.keyframeUrl, endUrl: s.endUrl,
         clipFile: s.clip?.file || null, realVideo: s.realVideo,
       })),
-      characters: ctx.characters,
+      characters: refsManifest(ctx.characters).map((c, i) => ({
+        ...c,
+        appearance: ctx.characters[i]?.appearance || '',
+        refSummary: ctx.characters[i]?.refSummary || '',
+        primaryView: ctx.characters[i]?.refs?.[0]?.view || null,
+        viewFiles: ctx.characters[i]?.viewFiles || [],
+      })),
+      styleLock: manifest.styleLock,
       script,
     }, null, 2) + '\n' });
     for (const [key, label] of [['imageWorkflow', 'image'], ['videoWorkflow', 'video']]) {

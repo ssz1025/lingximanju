@@ -2,6 +2,10 @@
 import { defineAgent } from '../core/agent.mjs';
 import { stitchClips } from '../core/film.mjs';
 import { exportDirectorPack } from '../core/director-pack.mjs';
+import { resolveRuntimeSpec } from '../core/runtime-spec.mjs';
+import { renderPreviewFilm } from '../core/preview-film.mjs';
+import { isRealClip, evaluateFilm, normalizeFilmPolicy } from '../core/film-policy.mjs';
+import { resolveShotCharacterRefs, describeRefs } from '../core/character-refs.mjs';
 
 function incomingSources(ctx, kind) {
   return ctx.project.edges
@@ -17,6 +21,15 @@ defineAgent({
     const shot = ctx.node.data.shot || ctx.inputs.find((i) => i.shot)?.shot || {};
     const k = Math.max(1, Math.min(4, Number(ctx.settings.k) || Number(ctx.node.data.k) || 2));
     const refs = [];
+    // ① 角色定妆多视图：按镜头出场角色解析，正面 + 面部特写 + 3/4 侧优先
+    //    （过去只取画布节点上的单张合图，管理与流水线两条链路互不知道对方存在）
+    const chars = resolveShotCharacterRefs(ctx.project, shot.characters || []);
+    refs.push(...chars.urls);
+    if (chars.characters.length) {
+      ctx.log('think', `镜头 ${shot.shotNo || '?'} 角色参考：${chars.characters.map((c) => describeRefs(c)).join('｜')}`);
+      for (const note of chars.notes || []) ctx.log('warn', note);
+    }
+    // ② 画布 ref 边上的角色头像与锚点图作为补充（去重，避免同一张图重复上传）
     for (const src of incomingSources(ctx, 'ref')) {
       const portraits = (src.data?.characters || []).map((c) => c.portraitUrl).filter(Boolean);
       refs.push(...portraits);
@@ -25,7 +38,8 @@ defineAgent({
       if (src.data?.keyframeUrl) refs.push(src.data.keyframeUrl);
       if (src.data?.transition?.url) refs.push(src.data.transition.url);
     }
-    ctx.log('think', `镜头 ${shot.shotNo || '?'} 继承 ${refs.length} 个视觉锚点，生成 ${k} 张候选`);
+    const uniqueRefs = [...new Set(refs)].slice(0, 8);   // 与 ComfyUI LoadImage 插槽上限对齐
+    ctx.log('think', `镜头 ${shot.shotNo || '?'} 继承 ${uniqueRefs.length} 张参考图（角色定妆 ${chars.urls.length} 张 + 锚点/资产 ${uniqueRefs.length - chars.urls.length} 张），生成 ${k} 张候选`);
     const candidates = [];
     for (let i = 0; i < k; i++) {
       const prompt = `${shot.ffDesc || ''}｜候选 ${i + 1}：${i === 0 ? '严格遵循机位与构图' : '在光照与景深上做轻微变体'}`;
@@ -33,12 +47,17 @@ defineAgent({
         kind: 'keyframe', label: `${shot.size || '镜头'} · ${shot.shotNo || i}`,
         shotNo: shot.shotNo || i + 1, size: shot.size, angle: shot.angle, movement: shot.movement,
         prompt, characters: shot.characters || [], style: ctx.settings.style,
-        seed: `${ctx.node.id}-${i}`, refs,
+        seed: `${ctx.node.id}-${i}`, refs: uniqueRefs,
       }, ctx.signal);
-      candidates.push({ url: img.url, prompt, refs, provider: img.provider, width: img.width, height: img.height });
+      candidates.push({ url: img.url, prompt, refs: uniqueRefs, provider: img.provider,
+        refsUsed: img.refsUsed ?? null, width: img.width, height: img.height });
       ctx.progress(0.15 + ((i + 1) / k) * 0.75);
     }
-    ctx.patch({ candidates, shot, refs, k, summary: `${k} 张候选 · ${refs.length} 个锚点引用` });
+    ctx.patch({
+      candidates, shot, refs: uniqueRefs, k,
+      characterRefs: chars.characters.map((c) => ({ name: c.name, refs: c.refs })),
+      summary: `${k} 张候选 · ${uniqueRefs.length} 张参考（角色定妆 ${chars.urls.length}）`,
+    });
   },
 });
 
@@ -85,9 +104,14 @@ defineAgent({
     const frames = [...new Set([keyframeUrl, transition].filter(Boolean))];
     if (!frames.length) throw new Error('缺少关键帧，无法生成视频片段');
     ctx.progress(0.3);
-    const clip = await ctx.providers.video({ frames, duration: shot.duration || 5, prompt: shot.motionDesc }, ctx.signal);
+    // 单片段时长由项目成片规格统一决定，不再用 shot 里散落的 4/5/6 或默认 5s
+    const runtime = ctx.settings?.runtime?.schema === 1 ? ctx.settings.runtime : resolveRuntimeSpec(ctx.project);
+    const clipSeconds = Number(ctx.node.data?.clipSeconds) || runtime.clipSeconds;
+    const clip = await ctx.providers.video({ frames, duration: clipSeconds, prompt: shot.motionDesc }, ctx.signal);
     ctx.progress(0.9);
-    ctx.patch({ clip, poster: clip.poster, duration: clip.duration, frames, shot, summary: `${clip.duration}s · ${frames.length} 帧预览` });
+    ctx.patch({ clip, poster: clip.poster, duration: clipSeconds, clipSeconds,
+      sequence: ctx.node.data?.sequence ?? shot.sequence ?? null,
+      frames, shot, summary: `${clipSeconds}s · ${frames.length} 帧预览` });
   },
 });
 
@@ -141,34 +165,65 @@ defineAgent({
   id: 'composer', label: '成片组装', group: '交付', icon: '✦', color: '#facc15',
   description: '汇总所有镜头片段，生成时间线、封面与一致性报告',
   async run(ctx) {
-    const videos = ctx.project.nodes.filter((n) => n.type === 'video' && n.data?.clip);
+    const runtime = ctx.settings?.runtime?.schema === 1 ? ctx.settings.runtime : resolveRuntimeSpec(ctx.project);
+    // 按全局镜头序号排序，而不是按波次完成的数组顺序，保证成片播放顺序正确
+    const seq = (n) => Number(n.data?.sequence ?? n.data?.shot?.sequence ?? n.data?.shot?.shotNo ?? 0);
+    const videos = ctx.project.nodes.filter((n) => n.type === 'video' && n.data?.clip)
+      .sort((a, b) => seq(a) - seq(b));
     const camera = ctx.project.nodes.find((n) => n.type === 'camera');
     const script = ctx.project.nodes.find((n) => n.type === 'script')?.data?.script;
     const title = script?.title || ctx.project.name || '未命名影片';
     const timeline = videos.map((n, i) => ({
       index: i + 1, nodeId: n.id, title: n.title,
-      poster: n.data.poster, duration: n.data.duration || 5,
+      poster: n.data.poster, duration: Number(n.data.duration) || runtime.clipSeconds,
       shotNo: n.data.shot?.shotNo || i + 1,
+      sequence: seq(n) || i + 1,
     }));
-    const duration = timeline.reduce((a, t) => a + t.duration, 0);
+    const duration = Math.round(timeline.reduce((a, t) => a + t.duration, 0) * 100) / 100;
     ctx.progress(0.55);
     const poster = await ctx.providers.image({
       kind: 'poster', label: title, shotCount: timeline.length,
       duration, style: ctx.settings.style, seed: ctx.project.id,
     }, ctx.signal);
 
-    // 两条交付路径：① 本地 ComfyUI 片段 → ffmpeg 成片；② 导演包 → 导入 ComfyUI 导演工作台
+    // 两条交付路径：① ComfyUI 真实片段 → ffmpeg 成片；② 导演包 → 导入 ComfyUI 导演工作台
+    // filmPolicy='real'（默认）时，只要有一个片段不是 ComfyUI 真实产物就不生成成片，
+    // 绝不用「关键帧预览 MP4」冒充 AI 短剧；只有显式切到 preview 才允许降级产物。
     const cfg = ctx.settings?.comfy || {};
     const outputMode = cfg.outputMode || 'both';
-    const realClips = videos.filter((n) => n.data?.clip?.file && n.data.clip?.provider === 'comfyui');
+    const policy = normalizeFilmPolicy(runtime.filmPolicy);
+    const realClipNodes = videos.filter((n) => isRealClip(n.data?.clip));
+    const allReal = realClipNodes.length > 0 && realClipNodes.length === runtime.clipCount;
+    const promptIds = realClipNodes.map((n) => n.data.clip.promptId).filter(Boolean);
     let film = null;
+    let filmNote = '';
     let directorPack = null;
-    if (outputMode !== 'director-pack' && cfg.stitch !== false && realClips.length) {
-      film = stitchClips(realClips.map((n) => n.data.clip));
-      ctx.log('info', film
-        ? `成片已由 ${film.clips} 个 ComfyUI 片段拼接（${film.method}）`
-        : '未能拼接成片：本机 ffmpeg 不可用或片段编码不一致，已保留逐镜头片段');
+    if (outputMode !== 'director-pack' && cfg.stitch !== false) {
+      if (policy === 'real') {
+        if (allReal) {
+          film = stitchClips(realClipNodes.map((n) => n.data.clip), { clipSeconds: runtime.clipSeconds });
+          filmNote = film
+            ? `真实成片：${film.clips} 个 ComfyUI 片段拼接（${film.method}）· ffprobe ${film.measured ? `实测 ${film.duration}s` : '不可用'}`
+            : '真实片段已就绪，但 ffmpeg 拼接失败，未产出成片';
+        } else {
+          filmNote = `真实成片未达成：${realClipNodes.length}/${runtime.clipCount} 个片段由 ComfyUI 真实生成，未产出 MP4（不拿关键帧预览冒充）`;
+        }
+      } else if (allReal) {
+        film = stitchClips(realClipNodes.map((n) => n.data.clip), { clipSeconds: runtime.clipSeconds });
+        filmNote = film ? `真实片段拼接成片（${film.method}）` : 'ffmpeg 拼接失败';
+      } else {
+        film = renderPreviewFilm(ctx.project, runtime);
+        filmNote = film
+          ? `关键帧预览成片（非 AI 视频）：${film.clips} 段 × ${runtime.clipSeconds}s = ${film.duration}s`
+          : '本机 ffmpeg 不可用，未产出预览成片';
+      }
+      ctx.log('info', filmNote);
+    } else {
+      filmNote = outputMode === 'director-pack' ? '本次只导出导演包，成片由 ComfyUI 导演工作台生成' : '未开启片段拼接';
     }
+    const filmReality = evaluateFilm({
+      project: ctx.project, film, policy, clipCount: runtime.clipCount,
+    });
     ctx.progress(0.8);
     if (outputMode !== 'video') {
       const pack = exportDirectorPack(ctx.project, cfg);
@@ -176,30 +231,50 @@ defineAgent({
         url: pack.url, file: pack.file, filename: pack.filename, bytes: pack.bytes,
         target: pack.format, shotCount: pack.shotCount, fileCount: pack.fileCount,
         groups: pack.groups, note: pack.note,
+        // 角色定妆入包明细：让「包里有几个角色、各带几张哪几个角度」在节点上就能核对，
+        // 而不是下载 zip 解开才知道定妆到底进没进包
+        characterCount: pack.characterCount || 0,
+        characterRefs: pack.characterRefs || 0,
+        characterSheets: pack.characterSheets || [],
+        styleLock: pack.styleLock || '',
       };
-      ctx.log('info', `导演包已生成：${pack.filename} · ${pack.shotCount} 组镜头 · ${pack.fileCount} 个文件`);
+      const charNote = pack.characterCount
+        ? ` · ${pack.characterCount} 位角色 ${pack.characterRefs} 张定妆参考图`
+        : ' · 尚无角色定妆图（每位角色只有文字描述）';
+      ctx.log('info', `导演包已生成：${pack.filename} · ${pack.shotCount} 组镜头 · ${pack.fileCount} 个文件${charNote}`);
     }
     ctx.progress(0.95);
     const deliverables = {
       outputMode,
-      video: film ? { url: film.url, file: film.file, clips: film.clips, method: film.method, bytes: film.bytes }
-        : outputMode === 'director-pack' ? { clips: 0, note: '本次只导出导演包，视频由 ComfyUI 导演工作台生成' }
-          : realClips.length ? { clips: realClips.length, note: '逐镜头片段已生成，未合并为单文件' }
-            : { clips: 0, note: 'Mock 模式为帧序列预览；导入 ComfyUI 视频工作流后产出真实片段' },
+      filmPolicy: policy,
+      video: film
+        ? { url: film.url, file: film.file, clips: film.clips, method: film.method, bytes: film.bytes,
+          source: film.source || null, isRealVideo: film.isRealVideo === true }
+        : { clips: realClipNodes.length, note: filmNote, blocked: !film },
       directorPack: directorPack ? { url: directorPack.url, filename: directorPack.filename, bytes: directorPack.bytes } : null,
     };
     ctx.patch({
       timeline, duration, shotCount: timeline.length, poster: poster.url,
+      runtime: {
+        totalSeconds: runtime.totalSeconds, clipSeconds: runtime.clipSeconds,
+        clipCount: runtime.clipCount, fps: runtime.fps,
+        actualClipCount: timeline.length, actualTotalSeconds: duration,
+      },
       film, directorPack, deliverables, outputMode,
+      filmPolicy: policy, filmNote, filmReality,
+      // 真实调用留痕：每个 ComfyUI 片段的 prompt_id 落盘，供对话记录与复刻指南引用
+      comfyPromptIds: promptIds,
       cameraReport: camera?.data || null,
       report: {
         clips: timeline.length, anchors: ctx.project.edges.filter((e) => e.kind === 'anchor').length,
         refs: ctx.project.edges.filter((e) => e.kind === 'ref').length,
         cameras: camera?.data?.cameras?.length || 0,
-        realClips: realClips.length,
+        realClips: realClipNodes.length,
+        filmPolicy: policy,
+        filmSource: film?.source || null,
       },
-      summary: `${timeline.length} 个片段 · ${duration}s · ${film ? '成片已生成' : '预览已生成'}${directorPack ? ' · 导演包已导出' : ''}`,
+      summary: `${timeline.length} 个片段 · ${duration}s · ${film ? (film.isRealVideo ? '真实 AI 成片已生成' : '关键帧预览成片（非 AI 视频）') : '未产出成片'}${directorPack ? ' · 导演包已导出' : ''}`,
     });
-    ctx.log('info', `交付完成：产物模式 ${outputMode}${film ? ' / 成片 MP4' : ''}${directorPack ? ' / 导演包' : ''}`);
+    ctx.log('info', `交付完成：产物模式 ${outputMode}${film ? (film.isRealVideo ? ' / ComfyUI 真实成片' : ' / 预览成片') : ' / 未产出成片'}${directorPack ? ' / 导演包' : ''}`);
   },
 });

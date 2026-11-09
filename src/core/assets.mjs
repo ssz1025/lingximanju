@@ -8,13 +8,14 @@ import { ASSET_DIR, uid } from './store.mjs';
 
 const INDEX_FILE = path.join(ASSET_DIR, 'index.json');
 
-/** 资源类型：封面 / 角色定妆 / 通用图片 / 视频片段 / 导演包 / 其他 */
-export const ASSET_KINDS = ['cover', 'character', 'image', 'video', 'pack', 'other'];
-const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '其他' };
+/** 资源类型：封面 / 角色定妆 / 通用图片 / 视频片段 / 音频（音色抽卡）/ 导演包 / 其他 */
+export const ASSET_KINDS = ['cover', 'character', 'image', 'video', 'audio', 'pack', 'other'];
+const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', audio: '音色', pack: '导演包', other: '其他' };
 export const kindLabel = (k) => KIND_LABEL[k] || KIND_LABEL.other;
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);
 const VIDEO_EXT = new Set(['.mp4', '.webm', '.mov']);
+const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus']);
 const PACK_EXT = new Set(['.zip']);
 
 /** 按文件名推断类型（未收录的新文件的初始 kind） */
@@ -22,6 +23,7 @@ export function inferKind(name) {
   const ext = path.extname(String(name || '')).toLowerCase();
   if (PACK_EXT.has(ext)) return 'pack';
   if (VIDEO_EXT.has(ext)) return 'video';
+  if (AUDIO_EXT.has(ext)) return 'audio';
   if (!IMAGE_EXT.has(ext)) return 'other';
   const n = String(name).toLowerCase();
   if (n.startsWith('cover_')) return 'cover';
@@ -80,7 +82,8 @@ function entryOf(file, existing) {
     bytes: st.size,
     ext: path.extname(file).toLowerCase().slice(1),
     type: IMAGE_EXT.has(path.extname(file).toLowerCase()) ? 'image'
-      : VIDEO_EXT.has(path.extname(file).toLowerCase()) ? 'video' : 'other',
+      : VIDEO_EXT.has(path.extname(file).toLowerCase()) ? 'video'
+        : AUDIO_EXT.has(path.extname(file).toLowerCase()) ? 'audio' : 'other',
   };
 }
 

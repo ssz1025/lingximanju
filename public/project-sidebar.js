@@ -2,10 +2,12 @@
  * 项目侧栏（Project Sidebar）—— 打开项目后左侧只讲「当前项目」
  *
  * 与旧版的区别：进入项目后不再显示「项目管理 / 全部项目卡片」，
- * 改为：项目卡与六步进度 → 项目导航（工作台 / 画布 / 剧集）
- *      → 本项目资源列表（封面 / 角色 / 分镜图 / 视频 / 导演包）
- *      → 项目设置（创作设定 / 角色 / 交付物 / 封面 / 模型 / 导出）
- * 点项目卡上的 ✕ / 顶栏 × / ⌂ 项目列表 / H 会真正关闭项目会话（清空项目态），
+ * 改为：项目卡与六步进度 → 项目导航（工作台 / 画布 / 管理）
+ *      → 资源入口 → 项目设置（创作设定 / 角色 / 交付物 / 封面 / 模型 / 导出 / 退出项目）
+ * 侧栏只保留功能按钮，不再罗列分季清单与资源清单：
+ * 「▥ 分季」「▣ 资源」点击后跳转到工作台的「分集 / 资源」页查看完整列表。
+ * 项目会话只有两处退出出口：顶栏右上角「退出项目」与「项目设置 → 退出项目」，
+ * 二者都走 app.js 的 requestExitProject()；项目卡上不再放 ✕，避免误触退出。
  * 回到项目列表页后才能切换、新建、导入项目。
  * 画布工具（模板 / 节点库 / 智能体）仍由 index.html 的 #side-canvas-tools
  * 承载，仅在画布视图显示，不占用工作台 / 剧集详情的侧栏空间。
@@ -18,17 +20,7 @@
 import { seasonGroups } from './project-model.js';
 import { esc, cut } from './utils.js';
 
-const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
-const fmtTime = (ts) => ts ? new Date(Number(ts)).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '';
 const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '文件' };
-const FILTERS = [
-  { key: 'all', label: '全部' },
-  { key: 'image', label: '图片' },
-  { key: 'video', label: '视频' },
-  { key: 'pack', label: '导演包' },
-  { key: 'other', label: '其他' },
-];
-const PAGE_SIZE = 3;   // 首屏给「项目设置」留位置；完整资源统一到工作台「资源」Tab
 
 function typeFromExt(file) {
   const ext = String(file).split('.').pop().toLowerCase();
@@ -167,24 +159,10 @@ export function collectToolStats(project, nodeTypes = {}) {
 }
 
 /* ---------------------------------------------------------------- 模块状态 */
-const ui = { projectId: null, filter: 'all', showAll: false };
 let latestCtx = {};
-let currentAssets = [];
-let indexCache = { at: 0, list: [] };
-let renderSeq = 0;
 
 /** 产物落盘（SSE）后调用：让下一次渲染强制重取资产索引 */
-export function invalidateAssets() { indexCache.at = 0; }
-
-async function fetchIndex(force = false) {
-  if (!force && indexCache.list.length && Date.now() - indexCache.at < 10000) return indexCache.list;
-  try {
-    const res = await fetch('/api/assets');
-    const d = await res.json();
-    indexCache = { at: Date.now(), list: Array.isArray(d.assets) ? d.assets : [] };
-  } catch { indexCache = { at: Date.now(), list: [] }; }
-  return indexCache.list;
-}
+export function invalidateAssets() { /* 侧栏不再缓存资产索引，保留导出以兼容既有调用方 */ }
 
 /* ---------------------------------------------------------------- 结构渲染 */
 function coverHTML(p) {
@@ -201,7 +179,6 @@ function shellHTML(p, ctx) {
   const done = steps.filter((s) => s.status === 'done').length;
   const percent = total ? Math.round(done / total * 100) : 0;
   const eps = Array.isArray(m.episodes) ? m.episodes : [];
-  const groups = seasonGroups(p);
   const kindLabel = m.kind === 'novel' ? '小说分集创作' : '标准流水线';
   const v = ctx.view || 'workshop';
   return `
@@ -211,7 +188,6 @@ function shellHTML(p, ctx) {
         <strong title="${esc(p.name)}">${esc(cut(p.name || '未命名项目', 12))}</strong>
         <small>${kindLabel} · ${eps.length} 集</small>
       </div>
-      <button class="ps-home-btn" data-act="home" title="关闭当前项目，返回项目列表（切换 / 新建 / 导入项目）" aria-label="关闭项目">✕</button>
     </div>
     <div class="ps-progress"><i style="width:${percent}%"></i></div>
     <div class="ps-progress-label"><span>六步进度</span><b>${done}/${total}</b></div>
@@ -229,27 +205,12 @@ function shellHTML(p, ctx) {
         <button data-act="tab-assets" title="归纳本项目全部资源">▣ 资源</button>
         <button data-act="overall-canvas" title="打开全部组合画布">🌐 组合</button>
       </div>
-      ${eps.length ? `<div class="ps-eps">
-        <div class="ps-eps-head"><span>季 / 集 · ${groups.length} 季</span><button data-act="episodes">全部 ${eps.length} 集 ›</button></div>
-        ${groups.map((g) => `<div class="ps-season">
-          <div class="ps-season-head"><span>S${g.no} ${esc(cut(g.title, 10))}</span><em>${g.episodes.length} 集</em></div>
-          <div class="ps-season-eps">${g.episodes.slice(0, 3).map((e) => {
-            const no = Number(e.no) || 0;
-            return `<div class="ps-ep-row">
-              <button class="ps-ep-open ${v === 'episode' && Number(ctx.episodeNo) === no ? 'on' : ''}" data-ep="${no}" title="${esc(e.title || `第 ${no} 集`)}"><i>${no || '·'}</i><span>${esc(cut(e.title || `第 ${no} 集`, 10))}</span></button>
-              <button class="ps-ep-canvas" data-ep-canvas="${no}" title="打开第 ${no} 集独立画布">⬡</button>
-            </div>`;
-          }).join('')}${g.episodes.length > 3 ? `<button class="ps-season-more" data-act="episodes">还有 ${g.episodes.length - 3} 集 ›</button>` : ''}</div>
-        </div>`).join('')}
-      </div>` : ''}
     </section>
 
     <section class="side-section ps-section">
-      <div class="section-head"><span>项目资源</span><span class="section-hint" id="ps-count">…</span></div>
-      <div class="ps-filters" id="ps-filters"></div>
-      <div class="ps-assets" id="ps-assets"></div>
+      <div class="section-head"><span>资源</span></div>
       <div class="ps-asset-acts">
-        <button class="mini-btn" data-act="assets">▣ 在资源库中管理</button>
+        <button class="mini-btn" data-act="assets">▣ 打开资源库</button>
         <button class="mini-btn" data-act="refresh-assets" title="重新扫描本项目资源">↻ 刷新</button>
       </div>
     </section>
@@ -267,78 +228,14 @@ function shellHTML(p, ctx) {
         <button data-act="cover" title="设置项目封面"><b>🖼</b>项目封面</button>
         <button data-act="settings" title="本项目运行参数（模型库与连接配置为应用级共享）"><b>⚙</b>模型与运行</button>
         <button data-act="export" title="导出当前项目 JSON"><b>⇩</b>导出项目</button>
+        <button class="ps-exit" data-act="exit-project" title="退出当前项目，返回项目列表"><b>⇦</b>退出项目</button>
       </div>
     </section>`;
 }
 
-function paintAssets(host, assets) {
-  if (!host || !host.isConnected) return;
-  currentAssets = assets;
-  const count = host.querySelector('#ps-count');
-  const filters = host.querySelector('#ps-filters');
-  const box = host.querySelector('#ps-assets');
-  if (!count || !filters || !box) return;
-  count.textContent = `${assets.length} 项`;
-  const of = (key) => key === 'all' ? assets.length : assets.filter((a) => a.type === key).length;
-  filters.innerHTML = FILTERS.filter((f) => f.key === 'all' || of(f.key))
-    .map((f) => `<button data-kind="${f.key}" class="${ui.filter === f.key ? 'on' : ''}">${f.label} ${of(f.key)}</button>`).join('');
-  const shown = ui.filter === 'all' ? assets : assets.filter((a) => a.type === ui.filter);
-  const visible = ui.showAll ? shown : shown.slice(0, PAGE_SIZE);
-  if (!shown.length) {
-    box.innerHTML = `<div class="ps-empty">${assets.length ? '该类型暂无资源' : '还没有项目资源<br><small>生成封面、角色定妆图或运行流水线后会自动出现在这里</small>'}</div>`;
-  } else {
-    box.innerHTML = visible.map((a) => {
-      const thumb = a.type === 'image'
-        ? `<img src="${esc(a.url)}" alt="" loading="lazy">`
-        : `<i class="t-${a.type}">${a.type === 'video' ? '▶' : a.type === 'pack' ? '▤' : '◇'}</i>`;
-      return `<button class="ps-asset" data-file="${esc(a.file)}" title="${esc(a.name)} · ${fmtBytes(a.bytes)}">
-        <span class="ps-asset-thumb">${thumb}</span>
-        <span class="ps-asset-main"><strong>${esc(cut(a.name, 15))}</strong>
-          <small>${KIND_LABEL[a.kind] || '文件'}${a.bytes ? ` · ${fmtBytes(a.bytes)}` : ''}${a.createdAt ? ` · ${fmtTime(a.createdAt)}` : ''}</small></span>
-      </button>`;
-    }).join('') + (shown.length > visible.length
-      ? `<button class="ps-more" data-act="more">展开其余 ${shown.length - visible.length} 项 ▾</button>` : '');
-  }
-}
-
-/* ---------------------------------------------------------------- 预览弹窗 */
-function openAssetPreview(a) {
-  if (!a) return;
-  const root = document.getElementById('modal-root');
-  if (!root) return;
-  const back = document.createElement('div');
-  back.className = 'modal-backdrop';
-  const media = a.type === 'image'
-    ? `<img class="ps-preview-media" src="${esc(a.url)}" alt="${esc(a.name)}">`
-    : a.type === 'video'
-      ? `<video class="ps-preview-media" src="${esc(a.url)}" controls playsinline preload="metadata"></video>`
-      : `<div class="ps-preview-file"><b>${esc(String(a.file).split('.').pop().toUpperCase())}</b><span>${esc(a.name)}</span><small>此类型请在资源库中下载后查看</small></div>`;
-  back.innerHTML = `<div class="modal ps-preview" role="dialog" aria-label="资源预览">
-    <div class="pmm-head"><div><h2>${esc(cut(a.name, 30))}</h2>
-      <div class="sub">${KIND_LABEL[a.kind] || '文件'} · ${fmtBytes(a.bytes)}${a.createdAt ? ` · ${fmtTime(a.createdAt)}` : ''}${a.tags?.length ? ` · ${esc(a.tags.slice(0, 3).join(' / '))}` : ''}</div></div>
-      <button class="icon-btn" data-close aria-label="关闭">✕</button></div>
-    <div class="ps-preview-body">${media}</div>
-    <div class="modal-actions">
-      <button class="btn" data-lib>▣ 在资源库中查看</button>
-      <a class="btn" href="${esc(a.url)}" download="${esc(a.file)}">⇩ 下载</a>
-      <button class="btn primary" data-close>关闭</button>
-    </div>
-  </div>`;
-  const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } };
-  back.addEventListener('pointerdown', (e) => { if (e.target === back) close(); });
-  back.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
-  back.querySelector('[data-lib]')?.addEventListener('click', () => {
-    close();
-    latestCtx.onOpenAssets?.([a.file]);
-  });
-  root.appendChild(back);
-  document.addEventListener('keydown', onKey);
-}
-
 /* ---------------------------------------------------------------- 事件委托 */
 function onClick(e) {
-  const el = e.target.closest('[data-act], [data-nav], [data-kind], [data-file], [data-ep], [data-ep-canvas]');
+  const el = e.target.closest('[data-act], [data-nav]');
   if (!el) return;
   const c = latestCtx;
   const host = document.getElementById('project-sidebar');
@@ -349,24 +246,18 @@ function onClick(e) {
     else c.onView?.(el.dataset.nav);
     return;
   }
-  if (el.dataset.ep) { c.onEpisode?.(Number(el.dataset.ep)); return; }
-  if (el.dataset.epCanvas) { c.onEpisodeCanvas?.(Number(el.dataset.epCanvas)); return; }
-  if (el.dataset.kind) { ui.filter = el.dataset.kind; ui.showAll = false; paintAssets(host, currentAssets); return; }
-  if (el.dataset.file) { openAssetPreview(currentAssets.find((a) => a.file === el.dataset.file)); return; }
 
   switch (el.dataset.act) {
-    case 'home': c.onHome?.(); break;
-    case 'episodes': c.onWorkshopTab?.('episodes'); break;
+    case 'exit-project': c.onExitProject?.(); break;
     case 'tab-source': c.onWorkshopTab?.('source'); break;
     case 'tab-episodes': c.onWorkshopTab?.('episodes'); break;
     case 'tab-assets': c.onWorkshopTab?.('assets'); break;
     case 'overall-canvas': c.onOverallCanvas?.(); break;
-    case 'assets': c.onOpenAssets?.(currentAssets.map((a) => a.file)); break;
-    case 'more': ui.showAll = true; paintAssets(host, currentAssets); break;
+    case 'assets': c.onOpenAssets?.(); break;
     case 'refresh-assets':
       invalidateAssets();
-      fetchIndex(true).then((index) => paintAssets(host, collectProjectAssets(c.project, index)))
-        .then(() => c.toast?.('项目资源已刷新', 'ok'));
+      c.onRefreshAssets?.();
+      c.toast?.('项目资源已刷新', 'ok');
       break;
     case 'overview': c.onManage?.('overview'); break;
     case 'bible': c.onManage?.('bible'); break;
@@ -383,25 +274,13 @@ function onClick(e) {
 
 /**
  * 渲染项目侧栏。ctx 由 app.js 组装，模块只拿回调，不直接改应用状态。
- * 资源索引异步加载：先用缓存同步出结构，拿到索引后只重绘资源区（不打断其它交互）。
+ * 侧栏只保留功能按钮：分季 / 资源等清单统一到工作台对应页查看。
  */
 export function renderProjectSidebar(host, ctx = {}) {
   if (!host) return;
   latestCtx = ctx;
   const p = ctx.project;
-  const seq = ++renderSeq;
   if (!p) { host.innerHTML = ''; return; }
-  if (ui.projectId !== p.id) {
-    ui.projectId = p.id; ui.filter = 'all'; ui.showAll = false;
-  }
   host.innerHTML = shellHTML(p, ctx);
   host.onclick = onClick;
-  paintAssets(host, collectProjectAssets(p, indexCache.list));
-  const needFetch = ctx.forceAssets === true || !indexCache.list.length || Date.now() - indexCache.at >= 10000;
-  if (!needFetch) return;
-  fetchIndex(ctx.forceAssets === true).then((index) => {
-    // 期间可能切换了项目 / 视图：丢弃过期结果，避免把别的项目的资源画上来
-    if (seq !== renderSeq || !host.isConnected || latestCtx.project?.id !== p.id) return;
-    paintAssets(host, collectProjectAssets(latestCtx.project, index));
-  });
 }

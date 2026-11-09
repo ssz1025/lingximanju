@@ -5,13 +5,15 @@
  * 与项目 JSON 全量覆盖写的既有约定保持一致。
  * ==========================================================================*/
 import { createZip } from './zip.mjs';
-import { placeholderFrame } from './raster.mjs';
+import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { storyboardGridSVG, gridShotList } from './grid-art.mjs';
 import { readAsset, writeAsset, writeAssetBinary, uid } from './store.mjs';
 import { createProviders } from './providers.mjs';
 import { effectiveProjectSettings, resolveModelSettings } from './app-settings.mjs';
+import { resolveRuntimeSpec } from './runtime-spec.mjs';
 import { parseWorkflow } from './comfyui.mjs';
 import { splitSegments, matchEpisodeCharacters, reconstructEpisodeText } from './episode-model.mjs';
+import { resolveCharacterRefs, refsManifest, describeRefs } from './character-refs.mjs';
 
 const cut = (s, n) => { const t = String(s ?? '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const dateTag = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -157,6 +159,14 @@ function imageEntry(url, opts) {
       if (buf && /\.(png|jpe?g|webp|bmp)$/i.test(m[1])) return buf;
     }
   }
+  // 导演台槽位只收位图：角色槽位即使缺图也画成人物轮廓（而非风景），
+  // 避免「空槽位」被下游误读成某个角色的定妆参考。
+  if (opts?.kind === 'character') {
+    return characterViewFrame({
+      view: opts.view || 'front', palette: opts.palette || [], style: opts.style,
+      seed: opts.seed || String(url || ''), label: opts.label || '',
+    });
+  }
   return placeholderFrame(opts);
 }
 
@@ -192,14 +202,76 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
     return { group: i + 1, segmentNo: seg.no, title: seg.title, shotCount: shots.length };
   });
 
-  // 公共参考图：本集出场角色（MiniMax H3 导演台 Picture1..3 槽位）
+  // 公共参考图：本集出场角色的多视图定妆（MiniMax H3 导演台 Picture1..3 槽位）
+  // 槽位本身只有 3 个（index 0/1/2），所以每个槽位只放该角色最权威的一张（正面优先），
+  // 其余视图作为同槽位附加参考落盘，并在 character_sheet.json 里指明角度与用法 ——
+  // 旧实现只取 views.front 一张，中近景镜头没有面部参考，身份一样会漂。
+  const episodeChars = chars.map((c, i) => {
+    const one = resolveCharacterRefs(project, {
+      names: [c.name], perCharacter: 4, maxTotal: 12, includeSheet: true,
+    });
+    const entry = one.characters[0];
+    return {
+      slot: i + 1, name: c.name, role: c.role || '', appearance: c.appearance || '',
+      refs: entry?.refs?.length ? entry.refs : [],
+      origin: entry?.origin || 'management', styleLock: c.styleLock || '',
+      palette: Array.isArray(c.palette) ? c.palette : [],
+      refSummary: entry ? describeRefs(entry) : `${c.name}：无定妆图（纯文字）`,
+    };
+  });
+
   const shared = [];
   for (let i = 0; i < 3; i += 1) {
-    const c = chars[i];
-    const buf = imageEntry(c?.views?.front?.url || null, { style, shotNo: i + 1, kind: 'character' });
-    put(`shared_params/Picture${i + 1}.png`, buf);
-    if (c) shared.push({ slot: i + 1, name: c.name, role: c.role || '', appearance: c.appearance || '' });
+    const c = episodeChars[i];
+    const refs = c?.refs?.length
+      ? c.refs
+      : [{ url: null, view: 'front', label: '定妆图（缺失）' }];
+    // 首张占公开槽位 PictureN.png；其余角度写 PictureN-<view>.png
+    refs.forEach((ref, j) => {
+      const viewKey = ref.view || (j === 0 ? 'front' : `view${j + 1}`);
+      const name = j === 0 ? `Picture${i + 1}.png` : `Picture${i + 1}-${viewKey}.png`;
+      const buf = imageEntry(ref.url, {
+        style: project.settings?.style, kind: 'character', view: viewKey,
+        palette: c?.palette, label: c?.name, seed: `ep${no}-char${i + 1}-${viewKey}`,
+      });
+      put(`shared_params/${name}`, buf);
+    });
+    if (c) {
+      shared.push({
+        slot: i + 1, name: c.name, role: c.role, appearance: c.appearance,
+        primaryView: refs[0]?.view || 'front',
+        imageFile: `shared_params/Picture${i + 1}.png`,
+        viewFiles: refs.map((ref, j) => ({
+          view: ref.view || 'front',
+          label: ref.label || '',
+          imageFile: `shared_params/${j === 0 ? `Picture${i + 1}.png` : `Picture${i + 1}-${ref.view || `view${j + 1}`}.png`}`,
+          primary: j === 0,
+        })),
+        refSummary: c.refSummary,
+      });
+    } else {
+      // 本集出场角色不足 3 位时仍占住槽位，避免导演台读到空 index
+      shared.push({ slot: i + 1, name: '', role: '', placeholder: true });
+    }
   }
+  putJSON('shared_params/character_sheet.json', {
+    format: 'lingximanju-character-sheet', version: 1,
+    scope: 'episode', episodeNo: no, generatedAt: new Date().toISOString(),
+    note: '本集出场角色的多视图定妆参考。PictureN 为首选（正面）槽位图，PictureN-<view> 为同角色其他角度。',
+    characters: refsManifest(episodeChars.map((c) => ({
+      ...c, refs: c.refs.length ? c.refs : [],
+    }))).map((c, i) => ({
+      ...c,
+      primaryView: episodeChars[i]?.refs?.[0]?.view || null,
+      imageFile: `shared_params/Picture${i + 1}.png`,
+      refSummary: episodeChars[i]?.refSummary || '',
+      viewFiles: episodeChars[i]?.refs?.map((ref, j) => ({
+        view: ref.view, label: ref.label,
+        imageFile: `shared_params/${j === 0 ? `Picture${i + 1}.png` : `Picture${i + 1}-${ref.view}.png`}`,
+        primary: j === 0,
+      })) || [],
+    })),
+  });
   putJSON('shared_params/shared_params.json', {
     style, negative_prompt: neg, width, height, fps,
     characters: shared, episodeNo: no,
@@ -211,9 +283,15 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
     scope: 'episode', source: 'lingximanju',
     createdAt: Date.now(), groups: groups.length,
   });
+  // 单集导演包时间线与项目成片规格同源，不再写死 5s / start = i*5
+  const runtime = resolveRuntimeSpec(project);
   putJSON('timeline.json', {
-    episodeNo: no, fps, groups: groups.map((g, i) => ({
-      group: g.group, start: i * 5, duration: 5, segmentNo: g.segmentNo, title: g.title,
+    episodeNo: no, fps,
+    clipSeconds: runtime.clipSeconds,
+    totalSeconds: Math.round(groups.length * runtime.clipSeconds * 100) / 100,
+    groups: groups.map((g, i) => ({
+      group: g.group, start: Math.round(i * runtime.clipSeconds * 100) / 100,
+      duration: runtime.clipSeconds, segmentNo: g.segmentNo, title: g.title,
     })),
   });
   putJSON('extra/shots.json', (ep.segments || []).flatMap((seg) => gridShotList(seg, no)));
@@ -221,7 +299,12 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
   putJSON('extra/script.json', ep.script || { episodeNo: no, note: '本集尚未生成剧本' });
   putJSON('extra/manifest.json', {
     project: project.name, projectId: project.id, episodeNo: no, episodeTitle: ep.title,
-    scope: 'episode', groups, characters: shared.map((c) => c.name),
+    scope: 'episode', groups, characters: shared.map((c) => c.name).filter(Boolean),
+    characterSheets: shared.filter((c) => !c.placeholder).map((c) => ({
+      slot: c.slot, name: c.name, primaryView: c.primaryView,
+      imageFile: c.imageFile, viewFiles: c.viewFiles, refSummary: c.refSummary,
+    })),
+    characterRefs: shared.reduce((n, c) => n + (c.viewFiles?.length || 0), 0),
     segmentCount: (ep.segments || []).length, gridCount: (ep.segments || []).filter((s) => s.gridUrl).length,
     hasScript: Boolean(ep.script), hasVideo: Boolean(ep.video),
     note: '本包只包含第 ' + no + ' 集内容；整项目导演包请用顶栏「▤ 导演包」。',

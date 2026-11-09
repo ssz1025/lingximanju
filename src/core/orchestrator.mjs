@@ -6,6 +6,8 @@ import { getAgent, TYPE_AGENT, buildContext } from './agent.mjs';
 import { createProviders } from './providers.mjs';
 import { resolveComfyConfig } from './comfy-config.mjs';
 import { resolveModelSettings } from './app-settings.mjs';
+import { resolveProjectAesthetic } from './director-styles.mjs';
+import { resolveRuntimeSpec } from './runtime-spec.mjs';
 import { uid } from './store.mjs';
 
 const activeRuns = new Map();
@@ -58,6 +60,11 @@ export async function runProject(projectId, opts = {}) {
   const settings = {
     ...resolveModelSettings(project, opts.modelId),
     comfy: resolveComfyConfig(project),
+    // 短剧时长规格随上下文下发：分镜预算、单片段时长、成片时间线全部同源
+    runtime: resolveRuntimeSpec(project),
+    // 导演风格随上下文下发：Provider 据此改写正负提示词与 Mock 调色板，
+    // 分镜智能体据此写入主色 / 光线 / 媒介。没选风格技能时为 null（行为不变）。
+    aesthetic: resolveProjectAesthetic(project),
   };
   const concurrency = Math.max(1, Math.min(8, Number(settings.concurrency) || 3));
   const scopeTypes = new Set(opts.scope || []);

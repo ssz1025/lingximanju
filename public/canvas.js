@@ -7,7 +7,8 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 export class CanvasController {
   constructor(cb = {}) {
     this.cb = cb;
-    this.wrapper = document.getElementById('canvas-wrapper');
+    // 舞台 = 画布可视区（不含左侧 #canvas-side），坐标 / 拖拽 / 缩放都以它为基准
+    this.wrapper = document.getElementById('canvas-stage');
     this.viewport = document.getElementById('canvas-viewport');
     this.nodeLayer = document.getElementById('node-layer');
     this.edgeLayer = document.getElementById('edge-layer');
@@ -480,7 +481,7 @@ export class CanvasController {
           from: d.from, to: to && to !== d.from ? to : null,
           clientX: e.clientX, clientY: e.clientY,
           world: this.screenToWorld(e.clientX, e.clientY),
-          overCanvas: !!hit?.closest('#canvas-wrapper'),
+          overCanvas: !!hit?.closest('#canvas-stage'),
           altKey: e.altKey, shiftKey: e.shiftKey,
         };
         // 交给 UI 层弹「选择下一个节点 / 连接关系」浮层；未挂回调时沿用直接连线的旧行为

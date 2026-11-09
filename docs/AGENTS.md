@@ -15,7 +15,7 @@
 
 ---
 
-## 2. 智能体清单（11 个）
+## 2. 智能体清单（11 个节点型 + 3 个项目级业务 / 流程型 + 1 个对话型）
 
 | # | id | 角色 | 输入 | 输出（`node.data`） | 依赖 |
 |---|---|---|---|---|---|
@@ -31,10 +31,15 @@
 | 10 | `transition` | 转场空间锚点 | 两机位关键帧 | `transition`: `{url, fromCam, toCam, spatialNotes}` | 式(8) |
 | 11 | `composer` | 成片组装 / 双产物交付 | 所有 `clip` + 全图节点 | `timeline[]`、`duration`、`poster`、`film`、`directorPack`、`deliverables` | 拼接 + 交接 |
 | 12 | `canvas-agent` | 画布助手 | 画布全图 + 用户指令 | 对话回复 + 可选图操作（整理/新增/解释） | Toonflow 浮动 Agent |
+| 13 | `voice-assigner` | 音色分配 | `management.characters` + 全局音色库 | 角色对象的 `voiceId / voiceName / voiceReason`；LLM 优先，零 Key 启发式兜底 | 项目级业务 Agent |
 
-> 注：编号 12 为对话型 Agent，不参与 DAG 调度，由 `/api/projects/:id/chat` 单独驱动。
+> `voice-assigner` 只负责「从已有音色库里挑一个最合适的」。若要库里**没有**合适的音色，走音色抽卡（`POST /api/projects/:id/voices/draw`）：调用本地 ComfyUI TTS 工作流跑 N 次产出候选音频，进 `data/voice-drafts.json` 候选池（24h TTL）。抽卡不经过 Agent——它是用户驱动的交互动作，不是自动化决策；候选转正后（`/voices/[drafts/:id/]save`）才成为 Agent 可选的库内音色。
+| 14 | `character-extractor` | 角色提取 | 原著全文检索片段（BM25 + 原文证据窗口） | 候选角色（含 `evidence` / 静态动态特征），证据校验后合并进 `management.characters` | 项目级业务 Agent |
+| 15 | `director` | 导演智能体（流程型） | 项目选择的导演技能 + 一句话构想 | 不产出单个节点：编排能力 Agent → `executeSteps()` 六步 → 导演包 → `management.director.lastRun` 验收报告 | 项目级流程 Agent |
 
-**分组**：叙事组（1–3）、资产组（4）、镜头组（5–6）、生成组（7–10）、交付组（11）、交互组（12）。
+> 注：12 为对话型 Agent，由 `/api/projects/:id/chat` 单独驱动；13–15 为项目级 Agent，注册在同一 registry（`/api/bootstrap` 可见），可被画布节点或 REST 直接调用，但**不直接产出画布节点**。其中 `director` 是「编排的编排」，主流程仍走 §4 的拓扑调度与六步状态机，详见 [`THEORY.md`](THEORY.md) §5.3；全片时长规格与成片验收见 §5.4。
+
+**分组**：叙事组（1–3）、资产组（4、13、14）、镜头组（5–6）、生成组（7–10）、交付组（11）、交互组（12）、导演组（15）。
 
 ---
 
@@ -214,21 +219,26 @@ clip.frames[0]（选中关键帧）
 `composer` 仍是 DAG 的汇聚节点（等待所有 `video` 节点完成），在原有 `timeline[] / duration / poster` 之外新增两段：
 
 ```
+runtime = ctx.settings.runtime               // 项目成片规格：30s / 3s → 10 片段
 outputMode = ctx.settings.comfy.outputMode   // both | video | director-pack
 
-if (mode !== 'director-pack' && stitch && realClips.length)
-    film = stitchClips(clips)                // ffmpeg concat，失败返回 null 并写日志
+if (mode !== 'director-pack' && stitch)
+    film = realClips.length
+        ? stitchClips(clips, { clipSeconds: runtime.clipSeconds })   // ffmpeg concat + ffprobe 实测
+        : renderPreviewFilm(ctx.project, runtime)                    // 零 Key：关键帧 → 等长片段 → 30s MP4
 if (mode !== 'video')
     directorPack = exportDirectorPack(ctx.project, cfg)   // mmxpack / generic
 
-ctx.patch({ film, directorPack, deliverables: { outputMode, video, directorPack }, outputMode })
+ctx.patch({ film, directorPack, runtime, deliverables: { outputMode, video, directorPack }, outputMode })
 ```
 
-`deliverables` 是给前端检查器的**展示契约**：成片卡片显示片段数 / 拼接方式 / 下载按钮，导演包卡片显示文件名 / 组数 / 文件数 / 重新导出按钮。二者都为空时明确写「Mock 模式为帧序列预览」，不伪造产物。
+`runtime` 是时长规格的单一事实来源：`decomposer` 按 `clipCount` 分配镜头预算，`video` Agent 用 `clipSeconds` 定片段时长，`composer` 时间线与导演包 `timeline.json` 同源（见 [`THEORY.md`](THEORY.md) §5.4）。零 Key 的 `renderPreviewFilm()` 产物标 `source='preview-frames'`，**可播放但明确不是 AI 生成视频**；ffmpeg 不可用则返回 `null`，绝不伪造产物。
+
+`deliverables` 是给前端检查器的**展示契约**：成片卡片显示片段数 / 拼接方式 / 下载按钮，导演包卡片显示文件名 / 组数 / 文件数 / 重新导出按钮。二者都为空时明确写「帧序列预览」，不伪造产物。
 
 ### 11.4 导演包与画布元素的映射
 
-`director-pack.mjs` 只读画布，不改画布：遍历 `video` 节点按 `shotNo` 排序 → 找上游 `review` 取选中关键帧 → 从 `character` 节点取定妆图 → 从 `transition` 节点取空间锚点 → 组装 `shared_params/` 与 `asset_groups/NN/` → `createZip()` 落盘。因此**用户在画布上改连线、改提示词、删镜头，重新导出即反映到导演包**，不需要重跑生成模型。
+`director-pack.mjs` 只读画布，不改画布：遍历 `video` 节点按全局 `sequence`（回退 `shotNo`）排序 → 找上游 `review` 取选中关键帧 → 从 `character` 节点取定妆图 → 从 `transition` 节点取空间锚点 → 组装 `shared_params/` 与 `asset_groups/NN/` → `createZip()` 落盘。因此**用户在画布上改连线、改提示词、删镜头，重新导出即反映到导演包**，不需要重跑生成模型。
 
 ### 11.5 可观测性
 

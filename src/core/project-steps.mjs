@@ -6,6 +6,11 @@
  * 理论依据与消融数据见 docs/THEORY.md；论文原文见 docs/paper/。
  * ==========================================================================*/
 import { normalizeCharacter, MAX_CHARACTERS } from './characters.mjs';
+import { normalizeRuntimeSpec } from './runtime-spec.mjs';
+import { normalizeStyleId, getDirectorStyle, resolvePalette } from './director-styles.mjs';
+
+/** 四份流程策略 id（字面量镜像 core/director-skills.mjs 的 FLOW_SKILLS，避免循环依赖） */
+const FLOW_SKILL_IDS = ['full', 'script', 'visual', 'pack'];
 
 export const STEP_STATUS = {
   pending: { label: '待执行', color: 'muted' },
@@ -102,6 +107,9 @@ const zeroTokens = () => ({ prompt: 0, completion: 0, total: 0, calls: 0 });
  * opts.pending = true → 骨架项目：六步全部待执行（连① 上传小说也要用户后续完成），
  * 与「上传后立即创建」的既有行为（auto 步骤直接 done）保持兼容。
  */
+/** 单步运行明细上限：保留最近 30 次，够回溯又不会把项目 JSON 撑爆 */
+export const STEP_RUN_LOG_LIMIT = 30;
+
 function freshSteps(opts = {}) {
   const pending = !!opts.pending;
   return STEPS.map((s) => ({
@@ -112,7 +120,12 @@ function freshSteps(opts = {}) {
     durationMs: 0,
     note: pending ? '' : s.auto ? '新建创作项目时由服务端完成' : '',
     runs: pending || !s.auto ? 0 : 1,
-    tokens: zeroTokens(), lastTokens: null,
+    // tokens = 执行本步的累计消耗（含对话里触发的重跑）；
+    // chatTokens = 在本步「和 Agent 对话」中产生的 LLM 消耗（改写 / 解释 / 生成文案）。
+    // 两者分开记是为了让「重跑花的」和「聊天花的」都能解释清楚，合计才是该步总账。
+    tokens: zeroTokens(), lastTokens: null, chatTokens: zeroTokens(),
+    // 每次运行的明细：谁触发的、花了多少 token、耗时多少 —— 「查看每一步 token 消耗」的数据源
+    runLog: pending || !s.auto ? [] : [{ at: now(), action: 'auto', ok: true, durationMs: 0, tokens: zeroTokens(), note: '新建创作项目时由服务端完成' }],
   }));
 }
 
@@ -146,6 +159,14 @@ export function createManagement(opts = {}) {
     // 封面：空 url + source:'name' 时前端渲染「项目名称封面」；
     // source:'upload' / 'comfyui' 时 url 指向 /assets/ 下的图片
     cover: { url: '', source: 'name', updatedAt: now(), prompt: '' },
+    // 导演 Agent 技能（项目级制片策略）：选择、导演阐述与最近一次全流程验收报告随项目持久化。
+    // 技能清单定义在 core/director-skills.mjs；这里只用字面量默认值，避免两个模块循环依赖。
+    director: { schema: 1, skillId: 'full', treatment: null, lastRun: null },
+    // 短剧成片规格（总时长 / 每片段时长 → 片段数 → 镜头预算 → 时间线）。
+    // 默认 30s / 3s；具体推导在 core/runtime-spec.mjs，这里只用字面量避免语义重复。
+    // filmPolicy='real' 是默认值：只认 ComfyUI 真实视频片段拼出的成片，
+    // 关键帧预览成片必须显式切到 'preview' 才允许，且验收记为降级。
+    runtime: { schema: 1, enabled: true, totalSeconds: 30, clipSeconds: 3, fps: 24, filmPolicy: 'real' },
     createdAt: now(), updatedAt: now(), version: 1,
     history: [{ id: uid(), at: now(), action: 'create', detail: kind === 'novel' ? (opts.skeleton ? '新建创作项目骨架（待上传小说）' : '新建创作项目（小说分集）') : '标准流水线项目' }],
   };
@@ -183,6 +204,8 @@ export function createManagement(opts = {}) {
     sources: opts.sources || [],
     // 骨架项目（尚未上传小说）：六步全 pending、当前停在第 ① 步
     steps: freshSteps({ pending: !!opts.skeleton }),
+    // 每步独立对话记录（工作台「和 Agent 对话修改」）：{ [stepId]: { messages[], tokens } }
+    stepChats: {},
     currentStep: opts.skeleton ? 1 : 3,
     theory: { paper: 'ViMax · arXiv:2606.07649v2', doc: 'docs/THEORY.md', defaults: { k: 2, anchorRequired: true, ragRequired: true, eventChainRequired: true } },
   };
@@ -197,12 +220,29 @@ export function ensureManagement(project) {
   if (!project.management.cover) project.management.cover = { url: '', source: 'name', updatedAt: Date.now(), prompt: '' };
   // 老项目惰性补创作设定
   if (!project.management.bible) project.management.bible = defaultBible();
+  // 老项目惰性补导演技能状态（ensureDirectorState 会进一步把非法 id 归一为默认技能）
+  if (!project.management.director || project.management.director.schema !== 1) {
+    project.management.director = { schema: 1, skillId: 'full', treatment: null, lastRun: null };
+  }
+  // 短剧时长规格始终归一后写回：老项目补齐、新项目补出 clipCount 等推导字段
+  project.management.runtime = normalizeRuntimeSpec(project.management.runtime || {});
   // 老项目惰性补角色库并逐项归一
   if (!Array.isArray(project.management.characters)) project.management.characters = [];
   else project.management.characters = project.management.characters.map((c) => normalizeCharacter(c));
   // 老项目惰性补剧集详情字段，保证单集详情页对历史项目也可用
   if (!Array.isArray(project.management.chapters)) project.management.chapters = [];
   if (!Array.isArray(project.management.sources)) project.management.sources = [];
+  // 老项目惰性补「每步 token 账目」与「每步对话记录」容器（升级兼容，不覆盖已有内容）
+  if (Array.isArray(project.management.steps)) {
+    for (const s of project.management.steps) {
+      if (!s.tokens) s.tokens = zeroTokens();
+      if (!s.chatTokens) s.chatTokens = zeroTokens();
+      if (!Array.isArray(s.runLog)) s.runLog = [];
+    }
+  }
+  if (!project.management.stepChats || typeof project.management.stepChats !== 'object') {
+    project.management.stepChats = {};
+  }
   if (Array.isArray(project.management.episodes)) {
     project.management.episodes = project.management.episodes.map((e) => ({
       ...e,
@@ -238,13 +278,18 @@ function logHistory(m, action, detail) {
   m.updatedAt = now();
 }
 
-export function startStep(m, id) {
+export function startStep(m, id, meta = {}) {
   const s = m.steps?.find((x) => x.id === id);
   if (!s) return null;
   s.status = 'running'; s.startedAt = now(); s.finishedAt = null; s.note = '智能体执行中…';
   s.runs = (s.runs || 0) + 1;
   if (!s.tokens) s.tokens = zeroTokens();
+  if (!s.chatTokens) s.chatTokens = zeroTokens();
+  if (!Array.isArray(s.runLog)) s.runLog = [];
   s.lastTokens = null;                       // 本次运行明细从零开始，完成时写入
+  // 记录「谁触发的这次运行」：面板手动 / 对话框指令 / 导演能力 / 全流程
+  s.pendingAction = meta.action || 'manual';
+  s.pendingTrigger = meta.trigger || '';
   m.currentStep = s.no;
   m.status = 'running';
   logHistory(m, 'step:start', `第 ${s.no} 步 · ${STEP_BY_ID[id]?.title || id}`);
@@ -268,17 +313,70 @@ function addTokens(step, usage) {
 export function finishStep(m, id, { ok = true, note = '', durationMs = 0, tokens = null } = {}) {
   const s = m.steps?.find((x) => x.id === id);
   if (!s) return null;
+  // 自动步骤（① 上传 / ② 分集）走 attachSource 直接 finishStep，没经过 startStep，
+  // 这里补计一次运行，保证 runs 与 runLog 条数一致（否则面板上会出现「跑过 0 次但有明细」）。
+  const viaStart = Boolean(s.pendingAction);
+  if (!viaStart) s.runs = (s.runs || 0) + 1;
   s.status = ok ? 'done' : 'error';
   s.finishedAt = now(); s.durationMs = durationMs;
   s.note = note || (ok ? '执行完成' : '执行失败，可重试');
   if (!s.tokens) s.tokens = zeroTokens();
   addTokens(s, tokens);
+  // 运行明细：把本次消耗单独留档，供「每步 token 消耗」逐次回看
+  if (!Array.isArray(s.runLog)) s.runLog = [];
+  s.runLog.unshift({
+    at: s.finishedAt,
+    action: s.pendingAction || 'manual',
+    trigger: s.pendingTrigger || '',
+    ok: !!ok,
+    durationMs: Number(durationMs) || 0,
+    tokens: tokens ? { ...s.lastTokens } : zeroTokens(),
+    note: String(note || '').slice(0, 240),
+  });
+  if (s.runLog.length > STEP_RUN_LOG_LIMIT) s.runLog.length = STEP_RUN_LOG_LIMIT;
+  s.pendingAction = null; s.pendingTrigger = null;
   const p = stepProgress(m);
   m.currentStep = p.currentNo;
   m.status = p.failed ? 'error' : p.allDone ? 'done' : 'draft';
   const tokNote = s.tokens.total ? ` · ${fmtTokens(s.tokens.total)} tokens` : '';
   logHistory(m, ok ? 'step:done' : 'step:error', `第 ${s.no} 步 · ${STEP_BY_ID[id]?.title || id} · ${s.note}${tokNote}`);
   return s;
+}
+
+/**
+ * 记录「在本步对话框里」产生的 LLM 消耗。
+ * 与 finishStep 的 tokens 分开：重跑步骤的消耗记在 tokens（那是执行），
+ * 只有对话本身（解释 / 改写文案 / 生成建议）才记这里，避免两处重复计账。
+ */
+export function addChatTokens(m, id, usage) {
+  const s = m.steps?.find((x) => x.id === id);
+  if (!s || !usage) return null;
+  if (!s.chatTokens) s.chatTokens = zeroTokens();
+  for (const k of ['prompt', 'completion', 'total', 'calls']) {
+    s.chatTokens[k] = (s.chatTokens[k] || 0) + (Number(usage[k]) || 0);
+  }
+  return s.chatTokens;
+}
+
+/** 每步 token 账目：执行 + 对话 = 合计；附运行明细，前端据此画占比条 */
+export function stepTokenReport(m) {
+  const steps = m?.steps || [];
+  const blank = () => ({ prompt: 0, completion: 0, total: 0, calls: 0 });
+  const total = blank();
+  const rows = steps.map((s) => {
+    const exec = s.tokens || blank();
+    const chat = s.chatTokens || blank();
+    const sum = blank();
+    for (const k of ['prompt', 'completion', 'total', 'calls']) sum[k] = (exec[k] || 0) + (chat[k] || 0);
+    for (const k of ['prompt', 'completion', 'total', 'calls']) total[k] += sum[k];
+    return {
+      id: s.id, no: s.no, title: STEP_BY_ID[s.id]?.title || s.id, status: s.status,
+      exec, chat, sum, lastTokens: s.lastTokens || null,
+      runs: s.runs || 0, runLog: Array.isArray(s.runLog) ? s.runLog : [],
+    };
+  });
+  for (const r of rows) r.share = total.total ? Math.round((r.sum.total / total.total) * 100) : 0;
+  return { total, steps: rows, anyUsage: total.total > 0 || total.calls > 0 };
 }
 
 /** token 数字格式化：≥1000 显示 x.xk（前端同规则） */
@@ -290,7 +388,9 @@ export function resetStep(m, id) {
   const s = m.steps?.find((x) => x.id === id);
   if (!s || STEP_BY_ID[id]?.auto) return null;
   s.status = 'pending'; s.startedAt = null; s.finishedAt = null; s.note = '已重置，等待重新执行'; s.durationMs = 0;
-  s.tokens = zeroTokens(); s.lastTokens = null;
+  // 重置只清「本步执行账目」，对话框里的历史消息与对话消耗不丢：
+  // 用户要的是「所有对话记录保留」，重置状态 ≠ 抹掉讨论过程。
+  s.tokens = zeroTokens(); s.lastTokens = null; s.runLog = [];
   m.currentStep = s.no; m.status = 'draft';
   logHistory(m, 'step:reset', `第 ${s.no} 步已重置`);
   return s;
@@ -427,6 +527,63 @@ export function applyManageAction(project, action, value) {
       logHistory(m, 'settings', `画面设置：风格 ${project.settings.style || '默认'} · 画幅 ${project.settings.aspect || '默认'}`);
       return { ok: true, message: '画面设置已保存' };
     }
+    case 'director-skill': {
+      // 技能清单由 core/director-skills.mjs 单点维护；这里只做形状校验，
+      // 具体 id 是否合法由 normalizeStyleId / 技能清单归一，避免两个模块循环依赖。
+      const raw = String(value?.skillId ?? value ?? '').trim().slice(0, 32);
+      if (!raw) return { ok: false, message: '导演技能 id 不合法' };
+      // 中文名 / 片名 / 英文写法都先归一（「张艺谋」→ zhangyimou），
+      // 归一后仍必须是合法 id 形状，避免把任意脏字符串写进项目。
+      const styleId = normalizeStyleId(raw);
+      const id = styleId || raw.toLowerCase();
+      if (!/^[a-z0-9_-]+$/.test(id)) return { ok: false, message: '导演技能 id 不合法' };
+      // 只认「风格技能」或四份流程策略（字面量，与 director-skills.mjs 的 FLOW_SKILLS 对齐，
+      // 不 import 它以免循环依赖）。未知 id 明确拒绝，而不是悄悄写进项目。
+      if (!styleId && !FLOW_SKILL_IDS.includes(id)) {
+        return { ok: false, message: `未知导演技能：${raw}` };
+      }
+      if (!m.director || m.director.schema !== 1) m.director = { schema: 1, skillId: id, treatment: null, lastRun: m.director?.lastRun || null };
+      m.director.skillId = id;
+      // 导演风格技能：顺手把 styleId 记到项目上，让「只选技能、还没跑全流程」
+      // 时画面生成也已经按该导演的美学走（director-styles 无反向依赖，不会成环）。
+      m.director.styleId = styleId || null;
+      // 主色只属于某一位导演：换导演一律清空，回到新档案的默认主色。
+      // 否则「北野武 + 竹林绿」这种跨档案残留会写进项目，虽然解析会回落默认，
+      // 但落盘数据本身就是脏的，前端也会显示上一个导演的色号。
+      m.director.paletteKey = null;
+      logHistory(m, 'director:skill', `已选择导演技能「${id}」${styleId ? ' · 含画面风格' : ''}`);
+      return { ok: true, message: `导演技能已切换为「${id}」`, skillId: id, styleId: styleId || null };
+    }
+    case 'director-palette': {
+      // 主色调切换：只改 paletteKey（张艺谋四色 / 王家卫四色…），导演风格本身不变。
+      // 必须已选风格技能，且 paletteKey 必须是该档案里真实存在的一项——
+      // 否则宁可否掉，也不要让项目带上一个不存在的色号。
+      const d = m.director && m.director.schema === 1 ? m.director : null;
+      const style = getDirectorStyle(d?.styleId || '');
+      const key = String(value?.paletteKey ?? value ?? '').trim();
+      if (!style) return { ok: false, message: '尚未选择导演风格，无法切换主色调' };
+      const pal = resolvePalette(style, key);
+      // resolvePalette 对非法 key 会回落默认主色，这里必须核对用户要的就是这一色，
+      // 否则「切了个不存在的颜色」会悄悄变成默认色，用户以为改成功了。
+      if (!pal || (key && pal.key !== key)) {
+        return { ok: false, message: `「${style.label}」没有主色调 ${key}，可选：${style.palettes.map((p) => p.key).join(' / ')}` };
+      }
+      d.paletteKey = pal.key;
+      logHistory(m, 'director:palette', `主色调切换为「${pal.name}」${pal.hex}`);
+      return { ok: true, message: `主色调已切换为「${pal.name}」`, paletteKey: pal.key, name: pal.name, hex: pal.hex };
+    }
+    case 'runtime': {
+      if (m.kind !== 'novel') return { ok: false, message: '标准流水线项目不参与短剧时长规格' };
+      const patch = Object.fromEntries(Object.entries(value || {}).filter(([, v]) => v !== undefined));
+      const next = normalizeRuntimeSpec({ ...(m.runtime || {}), ...patch });
+      m.runtime = next;
+      logHistory(m, 'runtime', `成片规格：${next.totalSeconds}s / ${next.clipSeconds}s × ${next.clipCount} 段 @ ${next.fps}fps · ${next.filmPolicy === 'real' ? '真实 AI 视频' : '关键帧预览'}`);
+      return {
+        ok: true,
+        message: `成片规格已保存：${next.clipCount} 个片段 × ${next.clipSeconds}s = ${next.totalSeconds}s · ${next.filmPolicy === 'real' ? '真实 AI 视频模式（必须调用 ComfyUI）' : '关键帧预览模式（非 AI 视频，验收降级）'}${next.aligned ? '（总时长已按片段时长对齐）' : ''}`,
+        runtime: next,
+      };
+    }
     case 'reset-steps':
       resetAllSteps(m);
       return { ok: true, message: '六步任务状态已重置' };
@@ -503,6 +660,11 @@ export function projectIndex(p) {
     stepDone: prog.done, stepTotal: prog.total, progress: prog.percent,
     tokens,
     deliverables: m.deliverables || { video: true, pack: true },
+    directorSkillId: m.director?.skillId || 'full',
+    directorComplete: !!m.director?.lastRun?.complete,
+    clipSeconds: m.runtime?.clipSeconds || 3,
+    clipCount: m.runtime?.clipCount || 10,
+    totalSeconds: m.runtime?.totalSeconds || 30,
     cover: m.cover || { url: '', source: 'name', updatedAt: 0, prompt: '' },
     hasPack: !!(p.nodes || []).find((n) => n.type === 'final')?.data?.directorPack?.file,
     // LLM 配置摘要（绝不含明文 Key）：「已配置模型清单」据此免解析完整项目 JSON

@@ -10,11 +10,14 @@ import {
   verifyEvidence,
 } from '../src/core/characters.mjs';
 
-test('CHARACTER_VIEWS 定义正面/侧面/背面三视图', () => {
-  assert.deepEqual(CHARACTER_VIEWS.map((v) => v.key), ['front', 'side', 'back']);
+test('CHARACTER_VIEWS 定义五视图：4 个全身机位 + 1 个面部特写', () => {
+  assert.deepEqual(CHARACTER_VIEWS.map((v) => v.key), ['front', 'threeQuarter', 'side', 'back', 'closeup']);
   for (const v of CHARACTER_VIEWS) {
     assert.ok(v.label && v.angle, `${v.key} 应有 label 与 angle`);
+    assert.equal(v.kind, v.key === 'closeup' ? 'face' : 'body', `${v.key} 的 kind 与视图类型一致`);
   }
+  // 4 个全身视图是「核心组」，面部特写是可选增强（core: false）
+  assert.deepEqual(CHARACTER_VIEWS.filter((v) => v.core).map((v) => v.key), ['front', 'threeQuarter', 'side', 'back']);
   assert.equal(MAX_CHARACTERS, 12);
   assert.equal(EXTRACT_CAP, 12000);
 });
@@ -34,7 +37,7 @@ test('normalizeCharacter 补齐缺字段并给出稳定默认值', () => {
   assert.equal(c.source, 'manual');
   assert.deepEqual(c.palette, []);
   assert.deepEqual(c.relations, []);
-  assert.deepEqual(c.views, { front: null, side: null, back: null });
+  assert.deepEqual(c.views, { front: null, threeQuarter: null, side: null, back: null, closeup: null });
   assert.equal(c.hits, 0);
 });
 
@@ -111,18 +114,39 @@ test('buildViewPrompt 正面显式写出静态/动态特征二分', () => {
   assert.ok(front.includes('可变特征：月白广袖袍配青玉佩'));
 });
 
-test('buildViewPrompt 侧面/背面以正面定妆图为依据，不重复特征描述', () => {
+test('buildViewPrompt 侧面/背面以正面图为唯一外观依据，不重复特征描述', () => {
   const c = { name: '沈默', appearance: '冷峻', staticFeatures: '眉骨高而轮廓分明' };
-  const side = buildViewPrompt(c, 'side');
-  assert.ok(side.includes('90度侧面'), '侧面视图应含角度');
-  assert.ok(side.includes('正面定妆图'), '侧面应声明以正面图为外观依据');
+  const frontRef = [{ view: 'front', url: '/assets/p/f.svg' }];
+
+  const side = buildViewPrompt(c, 'side', { refs: frontRef });
+  assert.ok(side.includes('90 度侧面'), '侧面视图应含角度');
+  assert.ok(side.includes('参考图（正面）'), '侧面应声明以正面图为唯一外观依据');
   assert.ok(!side.includes('眉骨高而轮廓分明'), '侧面不重复特征描述，避免与正面图不一致');
   assert.ok(!side.includes('冷峻'));
 
-  const back = buildViewPrompt(c, 'back');
+  const back = buildViewPrompt(c, 'back', { refs: frontRef });
   assert.ok(back.includes('背面'));
-  assert.ok(back.includes('正面定妆图'));
+  assert.ok(back.includes('参考图（正面）'));
   assert.ok(back.includes('背面不可见五官'));
+
+  const tq = buildViewPrompt(c, 'threeQuarter', { refs: frontRef });
+  assert.ok(tq.includes('45 度的 3/4 侧身'), '3/4 侧应写明转身幅度');
+  assert.ok(tq.includes('参考图（正面）'));
+  assert.ok(!tq.includes('眉骨高而轮廓分明'));
+});
+
+test('buildViewPrompt 面部特写走齐胸构图，仍锚定正面参考图', () => {
+  const c = { name: '沈默', staticFeatures: '眉骨高而轮廓分明' };
+  const face = buildViewPrompt(c, 'closeup', { refs: [{ view: 'front', url: '/assets/p/f.svg' }] });
+  assert.ok(face.includes('面部特写'));
+  assert.ok(face.includes('齐胸以上构图'), '面部特写不走全身构图');
+  assert.ok(face.includes('参考图（正面）'));
+  assert.ok(face.includes('沈默'));
+});
+
+test('buildViewPrompt 无 refs 时退化为「以文字描述为准」', () => {
+  const p = buildViewPrompt({ name: '林晚' }, 'side');
+  assert.ok(p.includes('以文字描述为准'));
 });
 
 test('normalizeCharacter 缺静态/动态特征时按语义派生', () => {

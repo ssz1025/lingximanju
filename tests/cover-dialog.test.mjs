@@ -83,18 +83,18 @@ test('缺少 file/url 的生成结果不弹确认窗（返回 null）', () => {
   assert.equal(openGeneratedConfirm({ project: { id: 'p1' }, generated: { url: '/assets/a.png' } }), null);
 });
 
-test('打开确认弹窗：大图放大展示 + 保存/放弃按钮，不自动发保存请求', () => {
+test('打开确认页：大图放大展示 + 保存/放弃按钮，不自动发保存请求', () => {
   fetchCalls.length = 0;
   const r = openGeneratedConfirm({
     project: { id: 'p1' }, generated: { file: 'gen_1.png', url: '/assets/gen_1.png' },
   });
-  assert.ok(r, '应返回 { wrap, generated }');
+  assert.ok(r, '应返回 { wrap, generated, page }');
   assert.equal(r.generated.file, 'gen_1.png');
-  assert.match(r.wrap.innerHTML, /封面确认/);
+  assert.match(r.page.root.querySelector('.page-title').textContent, /封面预览确认/);
   assert.match(r.wrap.innerHTML, /cover-confirm-img/);
   assert.match(r.wrap.innerHTML, /保存为封面/);
   assert.match(r.wrap.innerHTML, /放弃/);
-  assert.equal(fetchCalls.length, 0, '打开弹窗本身不应触发任何请求');
+  assert.equal(fetchCalls.length, 0, '打开页面本身不应触发任何请求');
 });
 
 test('点击「保存为封面」：POST /cover {asset} 保存并应用，弹窗关闭', async () => {
@@ -119,7 +119,7 @@ test('点击「保存为封面」：POST /cover {asset} 保存并应用，弹窗
   assert.deepEqual(applied, [{ url: '/assets/gen_2.png', source: 'upload', updatedAt: 1 }], '后端封面写回 applyCover');
   assert.equal(changed, 1, 'onChanged 已通知列表刷新');
   assert.ok(messages.some((m) => String(m.text).includes('已保存为项目封面')), '对话里追加保存成功消息');
-  assert.equal(r.wrap.removed, true, '保存成功后弹窗关闭');
+  assert.equal(r.page.root.removed, true, '保存成功后页面关闭');
 });
 
 test('点击「放弃」：不发任何请求，弹窗关闭并提示图片留在资源库', async () => {
@@ -137,7 +137,7 @@ test('点击「放弃」：不发任何请求，弹窗关闭并提示图片留�
   assert.equal(fetchCalls.length, 0, '放弃不应触发保存请求');
   assert.equal(applied.length, 0, '放弃不改封面');
   assert.ok(messages.some((m) => String(m.text).includes('已放弃本次封面')), '提示图片已存入资源库');
-  assert.equal(r.wrap.removed, true, '弹窗关闭');
+  assert.equal(r.page.root.removed, true, '页面关闭');
 });
 
 test('保存请求失败：弹窗保留、按钮恢复可点，不误报成功', async () => {

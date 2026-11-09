@@ -8,6 +8,7 @@
  * ==========================================================================*/
 import { toast } from './panels.js';
 import { collectProjectAssets } from './project-sidebar.js';
+import { openPage } from './page.js';
 import { $, esc, cut } from './utils.js';
 
 const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
@@ -27,9 +28,9 @@ async function api(path, body, method) {
   return data;
 }
 
-const TYPE_LABEL = { image: '图片', video: '视频', other: '其他' };
-const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '其他' };
-const KIND_ORDER = ['all', 'character', 'cover', 'image', 'video', 'pack', 'other'];
+const TYPE_LABEL = { image: '图片', video: '视频', audio: '音频', other: '其他' };
+const KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', audio: '音色', pack: '导演包', other: '其他' };
+const KIND_ORDER = ['all', 'character', 'cover', 'image', 'video', 'audio', 'pack', 'other'];
 const SORTS = {
   new:   { label: '最新优先', fn: (a, b) => (b.createdAt || 0) - (a.createdAt || 0) },
   old:   { label: '最早优先', fn: (a, b) => (a.createdAt || 0) - (b.createdAt || 0) },
@@ -38,10 +39,12 @@ const SORTS = {
   name:  { label: '名称 A→Z', fn: (a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-CN') },
 };
 
-/** 单元格视觉：图片直接缩略、视频用静帧预览、其余按扩展名块呈现 */
+/** 单元格视觉：图片直接缩略、视频用静帧预览、音频给播放器、其余按扩展名块呈现 */
 function cellMedia(a) {
   if (a.type === 'image') return `<img loading="lazy" src="${esc(a.url)}" alt="${esc(a.name)}">`;
   if (a.type === 'video') return `<video src="${esc(a.url)}" muted controls preload="metadata" playsinline></video>`;
+  // 音频没有画面，缩略图格里只放一个紧凑播放器；不给播放器就只能看到 .MP3 扩展名块，抽卡候选听着像不存在
+  if (a.type === 'audio') return `<div class="asset-audio"><audio src="${esc(a.url)}" controls preload="metadata"></audio></div>`;
   return `<span class="asset-ext">${esc((a.ext || '?').toUpperCase())}</span>`;
 }
 
@@ -70,10 +73,9 @@ export function openAssetLibrary(o = {}) {
   let sortBy = 'new';            // 排序方式（SORTS 键）
   let selMode = false;           // 多选模式（manage）
   const selSet = new Set();      // 多选选中的 file 集合
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  const close = () => backdrop.remove();
-  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+  const page = openPage({ title: '▣ 资源库', sub: '', variant: 'wide' });
+  const backdrop = page.content;
+  const close = () => page.close();
 
   const load = async () => {
     const d = await api('/api/assets');
@@ -138,10 +140,8 @@ export function openAssetLibrary(o = {}) {
     const st = fileScope
       ? `${scopeProject?.name ? `「${esc(cut(scopeProject.name, 12))}」` : '本项目'} ${assets.length} 项`
       : (stats ? `共 ${stats.total} 项 · ${fmtBytes(stats.bytes)}${stats.tagCount ? ` · ${stats.tagCount} 个标签` : ''}` : `${assets.length} 项`);
-    backdrop.innerHTML = `<div class="modal asset-modal" role="dialog" aria-label="资源库">
-      <div class="pmm-head"><div><h2>▣ 资源库</h2><div class="sub">${mode === 'pick' ? (multi ? '点击勾选，可多选后按勾选顺序使用' : '点击资源即可选用') : `${st} · 生成的封面 / 角色 / 片段统一管理，可打标签跨项目复用`}</div></div>
-        <button class="icon-btn" data-act="close" aria-label="关闭">✕</button></div>
-      <div class="asset-toolbar">
+    page.setSub(mode === 'pick' ? (multi ? '点击勾选，可多选后按勾选顺序使用' : '点击资源即可选用') : `${st} · 生成的封面 / 角色 / 片段统一管理，可打标签跨项目复用`);
+    backdrop.innerHTML = `<div class="asset-toolbar">
         <div class="asset-filters">${kindChips}</div>
         <div class="asset-toolbar-right">
           <select id="asset-sort" class="asset-sort" title="排序方式">
@@ -165,8 +165,7 @@ export function openAssetLibrary(o = {}) {
         <button class="btn" data-act="reindex">↻ 重扫目录</button>
         <button class="btn${selMode ? ' primary' : ''}" data-act="sel-toggle">${selMode ? '☑ 完成多选' : '☑ 多选'}</button>` : ''}
         ${multi ? `<button class="btn primary" data-pick-confirm ${selSet.size ? '' : 'disabled'}>✓ 使用所选（${selSet.size}）</button>` : ''}
-        <button class="btn" data-act="close">关闭</button></div>
-    </div>`;
+        <button class="btn" data-act="close">关闭</button></div>`;
 
     backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
     backdrop.querySelector('[data-act="reindex"]')?.addEventListener('click', async (e) => {
@@ -305,14 +304,11 @@ export function openAssetLibrary(o = {}) {
     }
   }
 
-  /** 改名 / 打标签 / 改类型弹窗：PATCH /api/assets/:file 后刷新列表 */
+  /** 改名 / 打标签 / 改类型子页：PATCH /api/assets/:file 后刷新列表 */
   function openMetaDialog(a) {
-    const wrap = document.createElement('div');
-    wrap.className = 'modal-backdrop';
-    wrap.innerHTML = `<div class="modal asset-meta-modal" role="dialog" aria-label="资源信息">
-      <div class="pmm-head"><div><h2>✎ 资源信息</h2><div class="sub">${esc(a.file)} · ${fmtBytes(a.size || a.bytes)}</div></div>
-        <button class="icon-btn" data-x>✕</button></div>
-      <div class="field"><label>展示名（角色资源建议用角色名，便于跨项目匹配）</label>
+    const sub = openPage({ title: '✎ 资源信息', sub: `${a.file} · ${fmtBytes(a.size || a.bytes)}` });
+    const wrap = sub.content;
+    wrap.innerHTML = `<div class="field"><label>展示名（角色资源建议用角色名，便于跨项目匹配）</label>
         <input id="am-name" value="${esc(a.name)}" maxlength="80"></div>
       <div class="field"><label>类型</label>
         <select id="am-kind">${Object.entries(KIND_LABEL).map(([k, v]) => `<option value="${k}" ${(a.kind || 'other') === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
@@ -320,11 +316,8 @@ export function openAssetLibrary(o = {}) {
         <input id="am-tags" value="${esc((a.tags || []).join(', '))}" placeholder="例如：角色, 古装, 女主"></div>
       ${a.sourceProjectName ? `<div class="cover-note">来源项目：${esc(a.sourceProjectName)}</div>` : ''}
       <div class="modal-actions"><button class="btn" data-x>取消</button>
-        <button class="btn primary" data-save>保存</button></div>
-    </div>`;
-    (document.getElementById('modal-root') || document.body).appendChild(wrap);
-    const done = () => wrap.remove();
-    wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
+        <button class="btn primary" data-save>保存</button></div>`;
+    const done = () => sub.close();
     wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
     wrap.querySelector('[data-save]').addEventListener('click', async () => {
       const btn = wrap.querySelector('[data-save]');
@@ -343,17 +336,18 @@ export function openAssetLibrary(o = {}) {
     wrap.querySelector('#am-name').focus();
   }
 
-  /** 增强预览：大图/视频 + 完整信息 + 下载 / 复制链接 / 编辑信息 */
+  /** 增强预览子页：大图/视频/音频 + 完整信息 + 下载 / 复制链接 / 编辑信息 */
   function openPreview(a) {
-    const wrap = document.createElement('div');
-    wrap.className = 'modal-backdrop';
     const isVideo = a.type === 'video';
-    wrap.innerHTML = `<div class="modal asset-preview-modal" role="dialog" aria-label="资源预览">
-      <div class="pmm-head"><div><h2>👁 ${esc(a.name)}</h2><div class="sub">${esc(a.file)}</div></div>
-        <button class="icon-btn" data-x>✕</button></div>
-      <div class="asset-preview-media">${isVideo
-        ? `<video src="${esc(a.url)}" controls autoplay loop playsinline></video>`
-        : `<img src="${esc(a.url)}" alt="${esc(a.name)}">`}</div>
+    const isAudio = a.type === 'audio';
+    const sub = openPage({ title: `👁 ${a.name}`, sub: a.file, variant: 'wide' });
+    const wrap = sub.content;
+    const media = isVideo
+      ? `<video src="${esc(a.url)}" controls autoplay loop playsinline></video>`
+      : isAudio
+        ? `<audio src="${esc(a.url)}" controls autoplay preload="metadata"></audio>`
+        : `<img src="${esc(a.url)}" alt="${esc(a.name)}">`;
+    wrap.innerHTML = `<div class="asset-preview-media${isAudio ? ' is-audio' : ''}">${media}</div>
       <div class="asset-info">
         <div><span>类型</span><b class="asset-kind k-${esc(a.kind || 'other')}">${KIND_LABEL[a.kind] || TYPE_LABEL[a.type] || '其他'}</b></div>
         <div><span>大小</span><b>${fmtBytes(a.size || a.bytes)}</b></div>
@@ -366,11 +360,8 @@ export function openAssetLibrary(o = {}) {
         <button class="btn" data-copy>⧉ 复制链接</button>
         <button class="btn" data-edit>✎ 编辑信息</button>
         <button class="btn primary" data-x>关闭</button>
-      </div>
-    </div>`;
-    (document.getElementById('modal-root') || document.body).appendChild(wrap);
-    const done = () => wrap.remove();
-    wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
+      </div>`;
+    const done = () => sub.close();
     wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
     wrap.querySelector('[data-copy]').addEventListener('click', async () => {
       const abs = location.origin + a.url;
@@ -384,23 +375,17 @@ export function openAssetLibrary(o = {}) {
     wrap.querySelector('[data-edit]').addEventListener('click', () => { done(); openMetaDialog(a); });
   }
 
-  /** 批量打标：把同一组标签追加到多选的资源上 */
+  /** 批量打标子页：把同一组标签追加到多选的资源上 */
   function batchTagDialog() {
     const files = [...selSet];
     if (!files.length) return;
-    const wrap = document.createElement('div');
-    wrap.className = 'modal-backdrop';
-    wrap.innerHTML = `<div class="modal asset-meta-modal" role="dialog" aria-label="批量打标">
-      <div class="pmm-head"><div><h2># 批量打标</h2><div class="sub">将为选中的 ${files.length} 项资源追加标签</div></div>
-        <button class="icon-btn" data-x>✕</button></div>
-      <div class="field"><label>标签（逗号分隔 · 追加到现有标签之后）</label>
+    const sub = openPage({ title: '# 批量打标', sub: `将为选中的 ${files.length} 项资源追加标签` });
+    const wrap = sub.content;
+    wrap.innerHTML = `<div class="field"><label>标签（逗号分隔 · 追加到现有标签之后）</label>
         <input id="am-btags" placeholder="例如：第2幕, 夜景"></div>
       <div class="modal-actions"><button class="btn" data-x>取消</button>
-        <button class="btn primary" data-save>应用</button></div>
-    </div>`;
-    (document.getElementById('modal-root') || document.body).appendChild(wrap);
-    const done = () => wrap.remove();
-    wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
+        <button class="btn primary" data-save>应用</button></div>`;
+    const done = () => sub.close();
     wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
     wrap.querySelector('[data-save]').addEventListener('click', async () => {
       const raw = wrap.querySelector('#am-btags').value;
@@ -426,8 +411,6 @@ export function openAssetLibrary(o = {}) {
     wrap.querySelector('#am-btags').focus();
   }
 
-  const root = $('modal-root') || document.body;
-  root.appendChild(backdrop);
   load().then(render).catch((err) => { close(); toast(err.message, 'err'); });
   return backdrop;
 }

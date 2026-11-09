@@ -131,7 +131,50 @@
 
 **与旧实现的差异**：旧提取链路只取「开头 6000 字 + 每候选名附近 2 个窗口」，长篇中后段角色的外貌/服饰描写必然落空，模型只能靠常识编造；现改为全书检索召回 + 原文定位窗口，模型看到的是原文证据。单次 LLM 调用成本不变（上下文总量仍受 `EXTRACT_CAP=12000` 约束），召回率与属性准确度显著提升。
 
+**2026-11-09 提取链路优化**：
+
+- **候选抽取**（`src/core/novel.mjs · extractCharacters`）改为全书扫描（旧实现只取前 60000 字，长篇中后段角色必然漏掉）；用「非汉字边界 + 常见姓氏锚定」双策略、剥离身份修饰前缀，修正「少年阿杰说」被截成「年阿杰」的误捕；过滤虚词 / 说话动词尾字 / 地点组织后缀，并为每位候选附首现原文句 `evidence`（可被 `verifyEvidence()` 逐字回溯）。
+- **证据预算**（`src/core/characters.mjs`）：窗口与 BM25 召回块按原文字符区间去重（重叠 > 60% 跳过），窗口优先占位且取「首次 + 末次出现」两段以覆盖全书；分集梗概预留 `EXTRACT_SUMMARY_CAP = 1200`，不再被 `EXTRACT_CAP = 12000` 整体截断挤掉。
+- **零 Key 可信度**（`src/core/providers.mjs`）：Mock 的 `charExtract` 不再按候选序号轮流编造性别 / 年龄 / 性格 / 配色 / 画风，只输出可逐字回溯的原文证据与「待补全」占位；`generate()` 打 `__mock` 标记，路由据此把 `source` 定为 `heuristic` 并明示「未配置模型…占位设定」，既避免假成功，也保证后续真实 LLM 能覆盖占位值（`mergeExtracted` 的 `fromHeuristic` 分支）。
+- **Agent 化**（`src/agents/character-agent.mjs`）：内联在路由里的提取逻辑抽成 `extractProjectCharacters()`，路由与画布共用同一口径，并注册 `character-extractor`（组「资产」，出现在 `/api/bootstrap` 的智能体列表）；提取响应新增 `source` 与 `stats{candidates, fragments, verified, dropped}`，前端提示可观测。候选上限由 8 提升到 `MAX_CHARACTERS = 12`。
+
 **依赖方向约束**：检索算法层独立在 `src/core/bm25.mjs`（零 I/O、零依赖），`src/core/knowledge.mjs` 只保留磁盘缓存并转出算法。否则 `characters → knowledge → store → project-steps → characters` 会形成循环依赖。
+
+### 5.3 导演 Agent 技能：流程型智能体与最终产物验收（论文之外的扩展层）
+
+论文只定义到「镜头 → 成片」的生成机制，没有项目级制片策略，也没有交接格式与验收环节。本节的 `director` 属于 §4 标注的扩展层，不对应任何论文公式。
+
+| 层 | 落点 | 职责 |
+|---|---|---|
+| 策略声明（纯逻辑） | `src/core/director-skills.mjs` | **14 项技能**（4 流程策略 + 10 导演风格，按 `DIRECTOR_SKILL_GROUPS` 分两组）：`capabilities`（前置能力，5 项）、`deliverables`（最终产物组合）、`steps`（六步 / 智能体四步）、`repack` / `verify`；`planDirectorRun()` 产出可执行计划，`verifyDirectorDeliverables()` 产出验收清单 |
+| 美学档案（纯数据） | `src/core/director-styles.mjs` | 十位导演的调色板 / 光线 / 构图 / 运镜 / 媒介 / 禁忌 / 固定否定词；`resolveAesthetic` 合成生效美学对象，`aestheticPrompt` / `aestheticShotSuffix` / `aestheticTreatment` 供生成侧消费。**对本文件无反向 import**，避免与 director-skills 循环依赖 |
+| 流程型 Agent | `src/agents/director-agent.mjs` | 不产出单个画布节点，而是串起：原著前置保障 → 能力调度（设定 / 导演阐述 / 角色 / 定妆 / 音色）→ `executeSteps()` 六步编排 → 导演包补齐 → 验收报告 |
+| 项目状态 | `management.director` | `skillId`（项目级选择）、`styleId` + `paletteKey`（风格与主色）、`treatment`（全片视听纲领）、`lastRun`（含 checklist 的完整报告） |
+| 接口与界面 | `src/api/routes/director.mjs`、`public/director-panel.js` | `GET/POST /director/skills`（含切主色调）、`POST /director/run`；工作台 ① 选技能 + 选主色、⑦ 看验收；SSE `director:progress` 推阶段进度 |
+
+**与六步状态机的关系**：导演是「编排的编排」，不另起一套流水线——主流程仍走 `executeSteps(scope)` 与 `runProject()` 的拓扑分层调度，因此式(1)–(8) 的机制、波次并发、节点状态与 SSE 全部沿用。技能只决定「跑哪些步、跑之前补哪些资料、最终交什么」。
+
+**诚实化约束**（与 §5.2 零 Key 策略同源）：
+
+- 零 Key / 模型回退时，导演阐述与原著生成均标 `heuristic` / `mock`，不冒充 LLM 成果；
+- 没有 ComfyUI 真实片段时：本机 ffmpeg 可用会产出「关键帧预览成片」并标 `source='preview-frames'`（真实可播放、时长可 ffprobe 实测，但不冒充 AI 生成视频）；ffmpeg 不可用时验收项 `level='degraded'` 并写明原因。`complete=true` 仅表示「必需产物均已就绪且降级已如实披露」；
+- 缺少原著且无构想时直接 `blocked='source'`，不把六步标成已完成——修复前直接调用 `executeSteps()` 而不经 `agents/index.mjs` 注册时，会出现「六步全 done、画布 0 节点」的假成功，现由 `step-runner.mjs` 显式导入节点型 Agent 兜住。
+
+### 5.4 短剧成片规格：时长作为可核对的硬约束（论文之外的扩展层）
+
+论文按「镜头」组织生成，未规定全片时长与单镜头时长；工程上若各层各自取默认值，就无法表达「30s / 每片段 3s」。本节同样属于 §4 扩展层，不对应论文公式。
+
+**单一事实来源**：`management.runtime` 只存 `{totalSeconds, clipSeconds, fps}`，`normalizeRuntimeSpec()` 推导 `clipCount / framesPerClip / totalFrames`；片数不独立存储，避免「片数与时长互相矛盾」。总时长不能整除时按片段时长对齐（优先保证每段严格等长），并以 `aligned` 如实标记。
+
+| 机制 | 落点 |
+|---|---|
+| 镜头预算 | `allocateShots(sceneCount, spec)` 把 `clipCount` 精确分配到各场景，`shotSequenceStarts()` 给全局序号；`decomposer` 先摊平场景再下发 `shotCount`，`storyboard` 严格按预算生成并补齐缺额 |
+| 时长贯通 | 分镜 mock、`video` Agent、`composer` 时间线、导演包 `collectShotPackages()`、单集包 `timeline.json` 统一读 `runtime.clipSeconds` |
+| 成片 | `stitchClips()` 拼接真实 ComfyUI 片段；`renderPreviewFilm()` 在零 Key 下用 ffmpeg 把关键帧渲染为等长片段并拼成 MP4 |
+| 实测 | `probeDuration()` 用 ffprobe 读实际秒数，`duration` 取实测值而非元数据求和，`measured=false` 时如实标明 |
+| 验收 | `verifyRuntime()` 逐条核对片段数 / 每片段时长 / 时间线总长 / 导演包组数 / MP4 实测时长，并作为 `verifyDirectorDeliverables()` 的「成片时长规格」项 |
+
+**修复前的真实缺陷**：片段时长散落在 5 处硬编码（分镜 `4+(i%3)`、视频 / 时间线 / 拼接默认 5s、单集包固定 5s），实测产出 12 个片段、时长 4/5/6s 循环、总 60s，而验收清单不含时长项，于是被判「全流程已达成」。现在 30s / 3s → 10 个片段，导演包 `timeline.json` 10 段 × 72 帧 = 720 帧，成片 ffprobe 实测 30.00s，8 项验收全达成。
 
 ---
 
@@ -151,9 +194,11 @@
 | 并行调度 | 运行日志的「第 N 波：X 个节点就绪，按并发 3 调度」 |
 | 六步状态与视觉提示 | 右侧「任务步骤」Tab、顶栏 `x/6` 胶囊与进度条、画布上方六步导航条、Toast 与运行日志 |
 | 双产物 | 第 ⑥ 步后 `final` 节点 `data.directorPack`（可下载 ZIP）/ `data.film`（接入 ComfyUI 后才有 MP4）、`timeline.json` |
+| 导演技能全流程（§5.3） | 工作台 ① 切换技能 → `GET /director/skills` 的计划与验收快照同步变化；点「一键完成最终产物全流程」→ 六步全 done、画布长出 `shot/keyframe/video`、`final.data.directorPack` 可下载、⑦ 验收清单 8 项全达成、`management.director.lastRun.complete=true` |
+| 短剧成片规格（§5.4） | 工作台 ① 的「短剧成片规格」显示 `30s ÷ 3s = 10 个片段 · 24fps · 720 帧`；`GET /runtime` 的 `timeline` 10 段各 3s；跑完后 `final.data.timeline` 10 段 / `duration=30`、每个 `video` 节点 `duration=3`、`film.duration=30` 且 `film.measured=true`；导演包 `timeline.json` 10 段 × `durationSec=3` / `totalFrames=720`；`GET /film` 下载后用 ffprobe 实测 30.00s |
 | 项目管理 | 侧栏搜索 / 筛选 / 收藏 / 归档 / 复制 / 标签，管理面板的快照创建与恢复 |
 
-### 6.1 自动化验证（`npm test` → 257 项全通过）
+### 6.1 自动化验证（`npm test` → 346 项全通过）
 
 机制层面的"真的落地"由测试固化，而非仅靠肉眼检查：
 
@@ -173,6 +218,8 @@
 | 六步状态机 | `tests/project-steps.test.mjs`：待执行→进行中→完成/失败→重置的完整迁移；进度百分比；失败时 `status='error'` |
 | 论文默认值 | `management.theory.defaults` 断言 `k=2`、`anchorRequired`、`ragRequired`、`eventChainRequired` 均为真 |
 | 交付格式 | `outputModeOf()` 三态映射；导演包 ZIP 经 Python `zipfile.testzip()` 逐条 CRC 校验 |
+| 导演技能与最终产物验收（§5.3） | `tests/director-skills.test.mjs`：技能清单 / 运行计划（六步 vs 四步）/ 交付设置覆盖 / 验收分级（达成·降级·缺失）/ **时长规格不符即判未达成** / 零 Key 导演阐述；`tests/director-run.test.mjs`：空项目真实编排到 62 节点与 35 文件导演包、六步全 done、**10 片段 × 3s = 30s、ffprobe 实测成片、导演包 timeline 10 段 / 720 帧**、角色音色写回、换技能同步交付设置与强制重打包、缺原著阻断、空步骤链不伪造执行记录 |
+| 短剧成片规格（§5.4） | `tests/runtime-spec.test.mjs`：30/3→10 推导、非整除对齐与钳制、`allocateShots()` 在任意场景数下总和恒等于片段数、项目状态与管理动作、验收逐条列出失败项（含还原「12 片段 / 60s」旧缺陷）、**真实 ffmpeg 成片 ffprobe 实测 30s**、`stitchClips()` 报告实测时长而非标称值 |
 | 图调度（DAG 分层） | `tests/graph.test.mjs`：`topoLayers()` 分层、`descendants/ancestors` 上下游子图、`autoLayout()` 自动布局、`validate()` 环检测 |
 | 持久层一致性 | `tests/store.test.mjs`：列表缓存同毫秒连改仍读到最新索引、快照封顶 20 份且同毫秒不互相覆盖 |
 | 极简创建与延迟上传 | `tests/novel-project.test.mjs`：空 text 返回骨架（六步全 pending、停在第 ① 步、不建分集节点但保留画布 DAG）；`attachSource()` 注入节点并完成 ①②；过短正文仍被 40 字校验拦截 |

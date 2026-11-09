@@ -6,7 +6,9 @@
 import { openAssetLibrary } from './asset-manager.js';
 import { openAIChat } from './ai-chat.js';
 import { ensureModelPicker, withModelId } from './model-picker.js';
+import { openPage } from './page.js';
 import { $, esc, cut } from './utils.js';
+import { speakText, stopSpeak, isSpeechSupported } from './voice-preview.js';
 
 const fmtTime = (ts) => {
   if (!ts) return '—';
@@ -15,14 +17,35 @@ const fmtTime = (ts) => {
 };
 const fmtBytes = (b) => !b ? '—' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
 
-/** 角色多视图定义（与后端 characters.mjs CHARACTER_VIEWS 对齐） */
+/** 角色多视图定义（与后端 characters.mjs CHARACTER_VIEWS 完全对齐：5 视图） */
 const CHARACTER_VIEWS = [
-  { key: 'front', label: '正面' },
-  { key: 'side', label: '侧面' },
-  { key: 'back', label: '背面' },
+  { key: 'front', label: '正面', core: true, kind: 'body' },
+  { key: 'threeQuarter', label: '3/4 侧', core: true, kind: 'body' },
+  { key: 'side', label: '侧面', core: true, kind: 'body' },
+  { key: 'back', label: '背面', core: true, kind: 'body' },
+  { key: 'closeup', label: '面部特写', core: false, kind: 'face' },
 ];
+/** 进视频所需的最小视图组：正面（身份基准）+ 面部（能对齐脸） */
+const VIDEO_CORE_VIEWS = ['front', 'closeup'];
 /** 多视图生成中的进度状态（跨 render 保持） */
 let viewGen = { charId: null, current: 0, total: 0 };
+
+/** 角色定妆完整度：与后端 characterViewStatus 同口径，供卡片徽标与批量提示使用 */
+function charViewStatus(c) {
+  const have = CHARACTER_VIEWS.filter((v) => c.views?.[v.key]?.url).map((v) => v.key);
+  const missing = CHARACTER_VIEWS.filter((v) => !c.views?.[v.key]?.url).map((v) => v.key);
+  const coreHave = CHARACTER_VIEWS.filter((v) => v.core && c.views?.[v.key]?.url).length;
+  const coreTotal = CHARACTER_VIEWS.filter((v) => v.core).length;
+  const videoReady = VIDEO_CORE_VIEWS.every((k) => c.views?.[k]?.url);
+  return {
+    have, missing, coreHave, coreTotal,
+    hasSheet: Boolean(c.sheet?.url),
+    allComplete: missing.length === 0,
+    coreComplete: coreHave === coreTotal,
+    videoReady,
+    pct: Math.round((have.length / CHARACTER_VIEWS.length) * 100),
+  };
+}
 
 async function api(path, body, method) {
   const res = await fetch(path, {
@@ -503,20 +526,14 @@ export function openCoverDialog(ctx = {}) {
  * applyCover（写回封面）/ onChanged / toast。返回 { wrap, generated } 便于调用方登记待确认项。 */
 export function openGeneratedConfirm({ project, ui = { addMessage: () => {} }, generated, applyCover = () => {}, onChanged, toast: toastFn = () => {} }) {
   if (!generated?.file || !generated?.url) return null;
-  const wrap = document.createElement('div');
-  wrap.className = 'modal-backdrop';
-  wrap.innerHTML = `<div class="modal cover-confirm-modal" role="dialog" aria-label="封面确认">
-      <div class="pmm-head"><div><h2>👁 封面预览确认</h2><div class="sub">保存后生效为项目封面；放弃则图片仍存于资源库</div></div>
-        <button class="icon-btn" data-x aria-label="关闭">✕</button></div>
-      <img class="cover-confirm-img" src="${esc(generated.url)}" alt="生成的封面" title="点击图片可关闭，稍后从对话里重新确认">
+  const page = openPage({ title: '👁 封面预览确认', sub: '保存后生效为项目封面；放弃则图片仍存于资源库' });
+  const wrap = page.content;
+  wrap.innerHTML = `<img class="cover-confirm-img" src="${esc(generated.url)}" alt="生成的封面" title="点击图片可关闭，稍后从对话里重新确认">
       <div class="modal-actions">
         <button class="btn" data-skip>✕ 放弃</button>
         <button class="btn primary" data-save>✓ 保存为封面</button>
-      </div></div>`;
-  (document.getElementById('modal-root') || document.body).appendChild(wrap);
-  const done = () => wrap.remove();
-  wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) done(); });
-  wrap.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', done));
+      </div>`;
+  const done = () => page.close();
   wrap.querySelector('.cover-confirm-img').addEventListener('click', done);
   wrap.querySelector('[data-skip]').addEventListener('click', () => {
     done();
@@ -535,7 +552,7 @@ export function openGeneratedConfirm({ project, ui = { addMessage: () => {} }, g
       done();
     } catch (err) { toastFn(err.message, 'err'); btn.disabled = false; }
   });
-  return { wrap, generated };
+  return { wrap, generated, page };
 }
 
 /* ------------------------------------------------------------------ 六步任务面板 */
@@ -610,6 +627,45 @@ function bindSourceUpload(host, ctx) {
   }));
 }
 
+/**
+ * 单步 token 用量卡：执行 / 对话 / 合计三栏 + 可折叠的逐次运行明细。
+ * 三者分开的意义：重跑花掉的（执行）和聊天花掉的（对话）不是一回事，
+ * 混成一个数字会让人误判「这一步很贵」的原因。
+ */
+function stepTokenHTML(st = {}) {
+  const exec = st.tokens || {};
+  const chat = st.chatTokens || {};
+  const sum = {
+    prompt: (exec.prompt || 0) + (chat.prompt || 0),
+    completion: (exec.completion || 0) + (chat.completion || 0),
+    total: (exec.total || 0) + (chat.total || 0),
+    calls: (exec.calls || 0) + (chat.calls || 0),
+  };
+  const runLog = Array.isArray(st.runLog) ? st.runLog : [];
+  if (!sum.total && !sum.calls && !runLog.length) return '';
+  const how = (a) => (a === 'chat' ? '对话触发' : a === 'auto' ? '自动' : '手动');
+  // 零 Key 环境：执行确实发生了，但没有真实 LLM 调用 → 0 token。
+  // 如实说明「为什么是 0」，比编一个估算数字更有用。
+  const noLlm = !sum.total && !sum.calls;
+  return `<div class="sp-token-detail">
+    <b>Token 用量</b>
+    ${noLlm
+      ? '<div class="sp-tok-none">本步未调用大模型（零 Key / 本地 Mock 出图），因此没有 token 消耗；在「设置 → 模型」配置 LLM 后，这里会按执行 / 对话分栏统计。</div>'
+      : `<div class="sp-tok-grid">
+      <span title="执行本步（含对话里触发的重跑）"><em>执行</em>${fmtTok(exec.total)}<small>${exec.calls || 0} 次</small></span>
+      <span title="在本步对话里产生的 LLM 消耗"><em>对话</em>${fmtTok(chat.total)}<small>${chat.calls || 0} 次</small></span>
+      <span class="tot" title="执行 + 对话"><em>合计</em>${fmtTok(sum.total)}<small>入 ${fmtTok(sum.prompt)} / 出 ${fmtTok(sum.completion)}</small></span>
+    </div>`}
+    ${runLog.length ? `<details class="sp-runlog"><summary>运行明细 · ${runLog.length} 次</summary>
+      <ul>${runLog.slice(0, 12).map((it) => `<li class="${it.ok ? '' : 'err'}">
+        <span class="rl-at">${new Date(it.at).toLocaleString('zh-CN', { hour12: false })}</span>
+        <span class="rl-how">${how(it.action)}</span>
+        <span class="rl-tok">${fmtTok(it.tokens?.total || 0)} tok</span>
+        <span class="rl-ms">${((it.durationMs || 0) / 1000).toFixed(1)}s</span>
+      </li>`).join('')}</ul></details>` : ''}
+  </div>`;
+}
+
 export function renderStepPanel(host, ctx = {}) {
   if (!host) return;
   const project = ctx.project;
@@ -639,6 +695,17 @@ export function renderStepPanel(host, ctx = {}) {
     return a;
   }, { prompt: 0, completion: 0, total: 0, calls: 0 });
   const live = running ? ctx.liveTokens : null;
+  // 六步账目（执行 + 对话）：与项目级 runs 汇总互为交叉校验——
+  // runs 覆盖画布运行，steps 覆盖「按步骤执行 + 分步对话」，两者都看才完整
+  const stepTok = (m.steps || []).reduce((a, s) => {
+    for (const k of ['prompt', 'completion', 'total', 'calls']) {
+      a.exec[k] += s.tokens?.[k] || 0;
+      a.chat[k] += s.chatTokens?.[k] || 0;
+      a.sum[k] += (s.tokens?.[k] || 0) + (s.chatTokens?.[k] || 0);
+    }
+    return a;
+  }, { exec: { prompt: 0, completion: 0, total: 0, calls: 0 }, chat: { prompt: 0, completion: 0, total: 0, calls: 0 }, sum: { prompt: 0, completion: 0, total: 0, calls: 0 } });
+  const projectChatMsgs = (m.stepChats?.project?.messages || []).length;
 
   host.innerHTML = `
     <div class="sp-head">
@@ -647,6 +714,7 @@ export function renderStepPanel(host, ctx = {}) {
       <div class="sp-status st-${overall}"><span class="sp-status-dot"></span>${esc(STATUS_TEXT[overall] || overall)}${running ? ' · 画布节点正在生长' : ''}</div>
       <div class="sp-token"><b>Token 统计</b>
         <span class="sp-token-total">${sumTok.calls} 次调用 · ${fmtTok(sumTok.total)} tokens（输入 ${fmtTok(sumTok.prompt)} / 输出 ${fmtTok(sumTok.completion)}）</span>
+        ${stepTok.sum.total || stepTok.sum.calls ? `<span class="sp-token-steps" title="六步执行 + 分步对话合计（与上面的运行口径互为补充）">六步合计 ${fmtTok(stepTok.sum.total)} tok（执行 ${fmtTok(stepTok.exec.total)} / 对话 ${fmtTok(stepTok.chat.total)}）</span>` : ''}
         ${live ? `<span class="sp-token-live">${live.estimated ? '≈' : ''}${fmtTok(live.total)} tok · 实时</span>` : ''}
       </div>
       <div class="sp-legend"><span class="lg pending">灰 · 待执行</span><span class="lg running">橙 + 呼吸 · 进行中</span><span class="lg done">绿 ✓ · 完成</span><span class="lg error">红 · 失败可重试</span></div>
@@ -658,26 +726,27 @@ export function renderStepPanel(host, ctx = {}) {
       const tokBadge = st.tokens?.total ? ` · ${fmtTok(st.tokens.total)} tok` : '';
       const badge = st.status === 'done' ? `✓ ${st.durationMs ? (st.durationMs / 1000).toFixed(1) + 's' : '已完成'}${tokBadge}`
         : st.status === 'running' ? '进行中…' : st.status === 'error' ? '失败 · 重试' : isCur ? '下一步' : '待执行';
+      // 该步对话记录条数：让「这一步聊过什么」在收起状态下也可见
+      const msgs = (m.stepChats?.[def.id]?.messages || []).length;
       return `<div class="sp-step st-${esc(st.status)} ${isCur ? 'current' : ''} ${open ? 'open' : ''}" data-step="${esc(def.id)}">
         <div class="sp-row" data-toggle="${esc(def.id)}">
           <span class="sp-no">${st.status === 'done' ? '✓' : def.no}</span>
           <span class="sp-icon">${def.icon}</span>
           <span class="sp-txt"><strong>${esc(def.title)}</strong><small>${esc(def.short)}</small></span>
+          ${msgs ? `<span class="sp-chat-badge" title="这一步有 ${msgs} 条对话记录">💬 ${msgs}</span>` : ''}
           <span class="sp-badge">${esc(badge)}</span>
         </div>
         ${open ? `<div class="sp-detail">
           <p class="sp-desc">${esc(def.desc)}</p>
           ${st.note ? `<div class="sp-note ${st.status === 'error' ? 'err' : ''}">${esc(st.note)}</div>` : ''}
           ${def.id === 'upload' && needSource ? renderSourceUpload() : ''}
-          ${st.tokens && (st.tokens.calls > 0 || st.status === 'done') ? `<div class="sp-token-detail"><b>Token 用量</b>
-            <span>累计 ${fmtTok(st.tokens.total)} tok（输入 ${fmtTok(st.tokens.prompt)} / 输出 ${fmtTok(st.tokens.completion)}）· ${st.tokens.calls} 次调用</span>
-            ${st.lastTokens ? `<span>上次运行 ${fmtTok(st.lastTokens.total)} tok（输入 ${fmtTok(st.lastTokens.prompt)} / 输出 ${fmtTok(st.lastTokens.completion)}）</span>` : ''}
-          </div>` : ''}
+          ${stepTokenHTML(st)}
           <div class="sp-checks"><b>完成检查</b>${def.checklist.map((c) => `<span>○ ${esc(c)}</span>`).join('')}</div>
           <div class="sp-theory"><b>论文依据 · ${esc(def.theory.ref)}</b><p>${esc(def.theory.text)}</p>
             <div class="sp-map">${def.theory.map.map(([k, v]) => `<span><em>${esc(k)}</em>${esc(v)}</span>`).join('')}</div></div>
           <div class="sp-actions">
-            ${st.status !== 'done' && !(def.id === 'upload' && needSource) ? `<button class="btn primary" data-run="${esc(def.id)}" ${ctx.busy ? 'disabled' : ''}>${st.status === 'error' ? '↻ 重试本步' : '▶ 执行本步'}</button>` : ''}
+            <button class="btn primary" data-chat="${esc(def.id)}">💬 和 Agent 对话修改</button>
+            ${st.status !== 'done' && !(def.id === 'upload' && needSource) ? `<button class="btn" data-run="${esc(def.id)}" ${ctx.busy ? 'disabled' : ''}>${st.status === 'error' ? '↻ 重试本步' : '▶ 执行本步'}</button>` : ''}
             <button class="btn" data-focus="${esc(def.id)}">⌖ 查看画布节点</button>
             ${st.status === 'done' && !def.auto ? `<button class="btn" data-reset="${esc(def.id)}">重置状态</button>` : ''}
           </div>
@@ -687,6 +756,7 @@ export function renderStepPanel(host, ctx = {}) {
     <div class="sp-foot">
       <button class="btn primary" id="sp-next" ${(ctx.busy || done === total) ? 'disabled' : ''}>${ctx.busy ? '执行中…' : '▶ 执行下一步'}</button>
       <button class="btn" id="sp-all" ${(ctx.busy || done === total) ? 'disabled' : ''}>⏩ 全部执行</button>
+      <button class="btn" id="sp-chat-project">💬 问制片助理${projectChatMsgs ? ` · ${projectChatMsgs}` : ''}</button>
       <button class="btn" id="sp-manage">▦ 项目管理</button>
       <button class="btn" id="sp-reset-all">↺ 重置六步</button>
     </div>`;
@@ -696,6 +766,7 @@ export function renderStepPanel(host, ctx = {}) {
     renderStepPanel(host, ctx);
   }));
   bindSourceUpload(host, ctx);
+  host.querySelectorAll('[data-chat]').forEach((b) => b.addEventListener('click', () => ctx.onChatStep?.(b.dataset.chat)));
   host.querySelectorAll('[data-run]').forEach((b) => b.addEventListener('click', () => ctx.onRunStep?.(b.dataset.run, false)));
   host.querySelectorAll('[data-focus]').forEach((b) => b.addEventListener('click', () => ctx.onFocus?.(b.dataset.focus)));
   host.querySelectorAll('[data-reset]').forEach((b) => b.addEventListener('click', () => ctx.onReset?.(b.dataset.reset)));
@@ -721,6 +792,7 @@ export function renderStepPanel(host, ctx = {}) {
     ctx.onRunStep?.(null, true);
   });
   $('sp-manage')?.addEventListener('click', () => ctx.onManage?.());
+  $('sp-chat-project')?.addEventListener('click', () => ctx.onChatStep?.('project'));
   $('sp-reset-all')?.addEventListener('click', () => ctx.onReset?.(null));
 }
 
@@ -757,51 +829,75 @@ function bibleHintHTML(m) {
   return `<div class="cf-note pmm-bible-hint">创作设定：${esc(bits.join(' · '))}（<a href="javascript:void 0" data-goto-bible>编辑创作设定</a>）</div>`;
 }
 
-/** 角色卡片：三视图缩略 + 属性摘要 + 操作按钮；生成中显示逐视图进度 */
+/** 角色卡片：多视图缩略 + 定妆板 + 完整度徽标 + 操作按钮；生成中显示逐视图进度 */
 function charCardHTML(c, gen = { charId: null }) {
   const generating = gen.charId === c.id;
+  const st = charViewStatus(c);
+  // 视图徽标：视频可用 / 基础组齐全 / 缺几张
+  const badge = st.videoReady
+    ? (st.allComplete
+      ? '<span class="pmm-badge ok">定妆齐全 · 可用于视频</span>'
+      : `<span class="pmm-badge ok">可用于视频 · 缺 ${st.missing.length} 张</span>`)
+    : `<span class="pmm-badge warn">不可进视频 · 缺 ${VIDEO_CORE_VIEWS.filter((k) => !c.views?.[k]?.url).map((k) => CHARACTER_VIEWS.find((v) => v.key === k)?.label).join('、')}</span>`;
+
   const views = CHARACTER_VIEWS.map((v) => {
     const img = c.views?.[v.key];
     return img
-      ? `<div class="pmm-char-view"><img src="${esc(img.url)}" alt="${esc(v.label)}"><span>${v.label}</span></div>`
-      : `<div class="pmm-char-view empty"><i></i><span>${v.label}</span></div>`;
+      ? `<div class="pmm-char-view" data-char-preview="${esc(c.id)}" data-view="${v.key}" title="点击查看大图与提示词">
+          <img src="${esc(img.url)}" alt="${esc(v.label)}" loading="lazy">
+          <span>${v.label}</span>
+          <em class="pmm-view-prov">${esc(img.provider || '')}</em>
+        </div>`
+      : `<div class="pmm-char-view empty" data-char-view-one="${esc(c.id)}" data-view="${v.key}" title="点击单独生成 ${esc(v.label)}">
+          <i></i><span>${v.label}</span></div>`;
   }).join('');
+
+  // 定妆板：多视图并排在一张图里，视频模型最吃的「角色设定」输入
+  const sheet = c.sheet?.url
+    ? `<div class="pmm-char-sheet" data-char-preview="${esc(c.id)}" data-view="sheet" title="点击查看定妆板大图">
+        <img src="${esc(c.sheet.url)}" alt="定妆板" loading="lazy"><span>定妆板 · ${(c.sheet.views || []).length || 4} 视角</span>
+      </div>`
+    : '<div class="pmm-char-sheet empty" title="尚无定妆板"><i></i><span>定妆板</span></div>';
+
   const srcLabel = { llm: 'LLM 提取', heuristic: '启发式', manual: '手动' }[c.source] || c.source || '手动';
   return `<div class="pmm-char-card" data-char-id="${esc(c.id)}">
-    <div class="pmm-char-views">${views}</div>
+    <div class="pmm-char-media">
+      <div class="pmm-char-views">${views}</div>
+      ${sheet}
+    </div>
     <div class="pmm-char-info">
       <div class="pmm-char-title"><b>${esc(c.name)}</b>
         ${(c.aliases || []).map((a) => `<span class="pmm-chip">${esc(a)}</span>`).join('')}
         <span class="pmm-chip">${esc(srcLabel)}</span></div>
+      <div class="pmm-char-badges">${badge}
+        <em class="pmm-char-progress">${st.have.length}/${CHARACTER_VIEWS.length} 视图</em></div>
       ${c.role ? `<div class="pmm-char-role">${esc(c.role)}</div>` : ''}
       ${c.staticFeatures ? `<div class="pmm-char-desc">固定特征：${esc(cut(c.staticFeatures, 50))}</div>` : ''}
       ${c.style ? `<div class="pmm-char-desc">设定风格：${esc(cut(c.style, 60))}</div>` : ''}
+      ${c.styleLock ? `<div class="pmm-char-desc pmm-char-lock">风格锁：${esc(cut(c.styleLock, 56))}</div>` : ''}
       ${c.personality ? `<div class="pmm-char-desc">${esc(cut(c.personality, 60))}</div>` : ''}
       <div class="pmm-char-pal">${(c.palette || []).map((col) => `<i style="background:${esc(col)}"></i>`).join('')}</div>
     </div>
     <div class="pmm-char-acts">
       ${generating
-      ? `<span class="pmm-char-gen">正在生成 ${CHARACTER_VIEWS[gen.current - 1]?.label || ''} ${gen.current}/${gen.total}…</span>`
+      ? `<span class="pmm-char-gen">正在生成 ${gen.label || CHARACTER_VIEWS.find((v) => v.key === gen.view)?.label || ''} ${gen.current}/${gen.total}…</span>`
       : `<button class="btn sm" data-char-edit="${esc(c.id)}">✎ 编辑</button>
-      <button class="btn sm primary" data-char-views="${esc(c.id)}">✦ 生成多视图</button>
+      <button class="btn sm primary" data-char-views="${esc(c.id)}">${st.missing.length ? '✦ 补全定妆' : '✦ 全部重生成'}</button>
+      <button class="btn sm" data-char-sheet="${esc(c.id)}">▦ 定妆板</button>
       <button class="btn sm" data-char-del="${esc(c.id)}">✕</button>`}
     </div>
   </div>`;
 }
 
-/** 角色属性编辑弹窗：新增/编辑角色（含别名、人物关系、配色、多视图提示词），保存走 char-upsert */
+/** 角色属性编辑页：新增/编辑角色（含别名、人物关系、配色、多视图提示词），保存走 char-upsert */
 export function openCharacterEditor(char = {}, onSave) {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  const close = () => backdrop.remove();
-  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+  const page = openPage({ title: char.id ? '✎ 编辑角色' : '＋ 新增角色', sub: '角色属性驱动多视图生成与关键帧一致性' });
+  const backdrop = page.content;
+  const close = () => page.close();
   let relations = (char.relations || []).map((r) => ({ ...r }));
 
   const renderBody = () => {
-    backdrop.innerHTML = `<div class="modal char-editor" role="dialog" aria-label="角色属性">
-      <div class="pmm-head"><div><h2>${char.id ? '✎ 编辑角色' : '＋ 新增角色'}</h2><div class="sub">角色属性驱动多视图生成与关键帧一致性</div></div>
-        <button class="icon-btn" data-act="close">✕</button></div>
-      <div class="pmm-body">
+    backdrop.innerHTML = `<div class="pmm-body">
         <div class="modal-grid">
           <div class="field"><label>姓名 *</label><input id="ce-name" maxlength="20" value="${esc(char.name || '')}"></div>
           <div class="field"><label>别名（逗号分隔）</label><input id="ce-aliases" value="${esc((char.aliases || []).join('，'))}"></div>
@@ -842,8 +938,7 @@ export function openCharacterEditor(char = {}, onSave) {
       <div class="modal-actions">
         <button class="btn" data-act="close">取消</button>
         <button class="btn primary" data-act="save">保存角色</button>
-      </div>
-    </div>`;
+      </div>`;
     backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
     backdrop.querySelector('[data-act="add-rel"]').addEventListener('click', () => {
       relations.push({ target: '', label: '' });
@@ -877,18 +972,26 @@ export function openCharacterEditor(char = {}, onSave) {
     });
   };
   renderBody();
-  $('modal-root').appendChild(backdrop);
 }
 
 export function openProjectManager(ctx = {}) {
   const toast = ctx.toast || (() => {});
-  const root = $('modal-root');
   let tab = ['overview', 'bible', 'characters', 'episodes', 'deliverables', 'versions'].includes(ctx.tab) ? ctx.tab : 'overview';
   let snapshots = [];
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  const close = () => { backdrop.remove(); ctx.onClose?.(); };
-  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+  let voiceLib = [];            // 全局音色库（data/voices.json）
+  let voiceLibOpen = false;     // 「音色库管理」面板展开状态
+  let voiceEditing = null;      // 正在编辑的音色 id（null = 新增模式）
+  // 音色抽卡：候选池（data/voice-drafts.json，24h 过期）+ 上一次的抽卡结果状态
+  let voiceCandidates = [];     // 当前展示的候选（可能来自上次抽卡，也可能是刚抽的）
+  let voiceDrawBusy = null;     // 正在抽卡的角色 id（null = 空闲）
+  let voiceDrawKeep = true;     // 抽卡完成后保留已有候选（不覆盖上一次抽到但还没保存的）
+  let voiceDrawReady = false;   // 是否已配置音频工作流（未配置则抽卡按钮给配置指引）
+  let voiceWorkflowName = '';   // 当前生效的抽卡工作流名
+  let draftTtlHours = 24;       // 候选存活时长（服务端下发）
+  const voiceDrawCount = 4;     // 每次抽卡数量（服务端 1–8）
+  const page = openPage({ title: '▦ 项目管理', sub: '' });
+  const backdrop = page.content;
+  const close = () => { page.close(); ctx.onClose?.(); };
 
   async function refresh(keepTab = true) {
     try {
@@ -896,6 +999,15 @@ export function openProjectManager(ctx = {}) {
       ctx.project.management = d.management; ctx.stats = d.stats; ctx.progress = d.progress;
       const s = await api(`/api/projects/${ctx.project.id}/snapshots`);
       snapshots = s.snapshots || [];
+      try { const v = await api('/api/voices'); voiceLib = v.voices || []; } catch { /* 音色库读取失败不阻断角色页 */ }
+      // 候选池：刷新时同步服务端的过期淘汰结果，并把挂牌工作流就绪状态带回来
+      try {
+        const dz = await api('/api/voices/drafts');
+        voiceCandidates = (dz.drafts || []).filter((x) => voiceDrawKeep || x.projectId === ctx.project.id);
+        voiceDrawReady = Boolean(dz.workflow?.ready);
+        voiceWorkflowName = dz.workflow?.name || '';
+        draftTtlHours = dz.stats?.ttlHours || 24;
+      } catch { /* 候选池读取失败不影响角色页 */ }
       if (!keepTab) tab = 'overview';
       render();
     } catch (e) { toast(e.message, 'err'); }
@@ -912,19 +1024,82 @@ export function openProjectManager(ctx = {}) {
     } catch (e) { toast(e.message, 'err'); return null; }
   }
 
+  /**
+   * 定妆大图预览：显示提示词、用了哪些参考图、风格锁，便于核对「这张图为什么长这样」。
+   * 归在项目管理面板内部（需要 ctx / toast / 重绘能力），不对外导出以避免作用域歧义。
+   */
+  function openPortraitPreview(character, viewKey) {
+    const isSheet = viewKey === 'sheet';
+    const shot = isSheet ? character.sheet : character.views?.[viewKey];
+    if (!shot?.url) return toast('这张图还没有生成', 'err');
+    const label = isSheet ? '定妆板' : (CHARACTER_VIEWS.find((v) => v.key === viewKey)?.label || viewKey);
+    const page = openPage({ title: `▦ ${character.name} · ${label}`, sub: '定妆大图 · 提示词与参考图可回溯' });
+    page.content.innerHTML = `<div class="pmm-preview">
+      <div class="pmm-preview-img"><img src="${esc(shot.url)}" alt="${esc(label)}"></div>
+      <div class="pmm-preview-meta">
+        <div class="pmm-preview-row"><label>角色</label><span>${esc(character.name)}${character.role ? ` · ${esc(character.role)}` : ''}</span></div>
+        <div class="pmm-preview-row"><label>视角</label><span>${esc(label)}${shot.angle ? ` · ${esc(shot.angle)}` : ''}</span></div>
+        <div class="pmm-preview-row"><label>出图</label><span>${esc(shot.provider || '未知')}${shot.provider === 'mock' ? '（本地占位，未接出图工作流）' : ''}</span></div>
+        ${shot.styleLock ? `<div class="pmm-preview-row"><label>风格锁</label><span>${esc(shot.styleLock)}</span></div>` : ''}
+        ${(shot.refs || []).length ? `<div class="pmm-preview-row"><label>参考图</label><span>${esc(shot.refs.length + ' 张')}</span>
+          <div class="pmm-preview-refs">${shot.refs.map((r) => `<img src="${esc(r)}" alt="参考图">`).join('')}</div></div>` : '<div class="pmm-preview-row"><label>参考图</label><span>无（纯文字生成）</span></div>'}
+        <div class="pmm-preview-row"><label>提示词</label><span class="pmm-preview-prompt">${esc(shot.prompt || '')}</span></div>
+        <div class="pmm-preview-acts">
+          <button class="btn sm" id="pmm-pv-regen">↻ 重新生成这张</button>
+          <button class="btn sm" id="pmm-pv-sheet">▦ 生成定妆板</button>
+          <button class="btn sm" id="pmm-pv-close">关闭</button>
+        </div>
+      </div>
+    </div>`;
+    page.content.querySelector('#pmm-pv-close')?.addEventListener('click', () => page.close());
+    page.content.querySelector('#pmm-pv-regen')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
+          withModelId('chars', { characterId: character.id, view: isSheet ? 'sheet' : viewKey }));
+        applyCharacterUpdate(d);
+        page.close();
+        toast(`「${character.name}·${label}」已重新生成`, 'ok');
+      } catch (err) {
+        btn.disabled = false; btn.textContent = '↻ 重新生成这张';
+        toast(err.message, 'err');
+      }
+    });
+    page.content.querySelector('#pmm-pv-sheet')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
+          withModelId('chars', { characterId: character.id, view: 'sheet' }));
+        applyCharacterUpdate(d);
+        page.close();
+        toast(`「${character.name}」定妆板已生成`, 'ok');
+      } catch (err) {
+        btn.disabled = false; btn.textContent = '▦ 生成定妆板';
+        toast(err.message, 'err');
+      }
+    });
+  }
+
+  /** 路由返回的角色更新同步到本地缓存并重绘（不整页刷新，保住滚动位置） */
+  function applyCharacterUpdate(d) {
+    if (!Array.isArray(d?.characters)) return;
+    if (ctx.project) {
+      ctx.project.management = ctx.project.management || {};
+      ctx.project.management.characters = d.characters;
+    }
+    if (tab === 'characters') render();
+  }
+
   function render() {
     const p = ctx.project;
     const m = p.management || {};
     const s = ctx.stats || {};
     const prog = ctx.progress || { label: `${(m.steps || []).filter((x) => x.status === 'done').length}/6`, percent: 0 };
-    backdrop.innerHTML = `<div class="modal pm-modal" role="dialog" aria-label="项目管理">
-      <div class="pmm-head"><div><h2>▦ 项目管理</h2><div class="sub">${esc(p.name)} · ${m.kind === 'novel' ? '小说分集创作项目' : '标准流水线项目'} · 六步 ${esc(prog.label)}</div></div>
-        <button class="icon-btn" data-act="close">✕</button></div>
-      <div class="pmm-tabs">${[['overview', '概览'], ['bible', '创作设定'], ['characters', '角色'], ['episodes', '分集'], ['deliverables', '产物'], ['versions', '版本 / 记录']].map(([k, label]) => `<button class="pmm-tab ${tab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}</div>
-      <div class="pmm-body" id="pmm-body"></div>
-      <div class="modal-actions"><button class="btn" data-act="close">关闭</button></div>
-    </div>`;
-    backdrop.querySelector('[data-act="close"]').addEventListener('click', close);
+    backdrop.innerHTML = `<div class="pmm-tabs">${[['overview', '概览'], ['bible', '创作设定'], ['characters', '角色'], ['episodes', '分集'], ['deliverables', '产物'], ['versions', '版本 / 记录']].map(([k, label]) => `<button class="pmm-tab ${tab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}</div>
+      <div class="pmm-body" id="pmm-body"></div>`;
+    page.setSub(`${p.name} · ${m.kind === 'novel' ? '小说分集创作项目' : '标准流水线项目'} · 六步 ${prog.label}`);
     backdrop.querySelectorAll('[data-act="close"]').forEach((b) => b.addEventListener('click', close));
     backdrop.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { tab = b.dataset.tab; render(); }));
     const body = $('pmm-body');
@@ -936,7 +1111,7 @@ export function openProjectManager(ctx = {}) {
     if (tab === 'versions') renderVersions(body, p, s);
   }
 
-  /** 「角色」Tab：从小说提取角色属性（LLM 优先）、手动维护、逐视图生成多视图 */
+  /** 「角色」Tab：从小说提取 + 手动维护 + 逐视图生成 + 角色音色分配与试听 */
   function renderCharacters(body, m) {
     const chars = Array.isArray(m.characters) ? m.characters : [];
     const hasNovel = !!m.source?.text;
@@ -949,15 +1124,45 @@ export function openProjectManager(ctx = {}) {
           <span class="cf-note" style="margin:0" id="pmm-char-status">${hasNovel ? '' : '请先上传小说后再提取角色'}</span>
         </div>
         <div class="cf-row pmm-char-batch">
-          <button class="btn primary" id="pmm-char-gen-all" ${chars.length ? '' : 'disabled'}>✦ 一键生成全部角色定妆图</button>
-          <label class="cf-check"><input type="checkbox" id="pmm-char-all-views"> 每人生成三视图（正面 / 侧面 / 背面）</label>
+          <button class="btn primary" id="pmm-char-gen-all" ${chars.length ? '' : 'disabled'}>✦ 一键补全全部定妆</button>
+          <label class="cf-check"><input type="checkbox" id="pmm-char-include-sheet" checked> 同时生成定妆板</label>
           <label class="cf-check"><input type="checkbox" id="pmm-char-only-missing" checked> 只补缺失的图</label>
-          <span class="cf-note" style="margin:0">${chars.length ? `共 ${chars.length} 位角色 · 逐张落盘，可随时中断` : ''}</span>
+          <span class="cf-note" style="margin:0">${chars.length
+          ? `共 ${chars.length} 位角色 · ${chars.filter((c) => charViewStatus(c).videoReady).length} 位已可用于视频 · 逐张落盘可中断`
+          : ''}</span>
         </div>
+        <div class="cf-note" id="pmm-char-batch-hint">${chars.length
+          ? `按全片风格锁生成 5 视图（正面 / 3-4 侧 / 侧面 / 背面 / 面部特写），逐张落盘；正面是所有其他视图的身份基准`
+          : '还没有角色。可从小说自动提取（LLM 优先、启发式兜底），或手动新增角色。'}</div>
         ${chars.length
         ? `<div class="pmm-chars">${chars.map((c) => charCardHTML(c, viewGen)).join('')}</div>`
         : '<div class="cf-note">还没有角色。可从小说自动提取（LLM 优先、启发式兜底），或手动新增角色。</div>'}
+      </div>
+
+      <div class="cf-section voice-section">
+        <h4>角色音色分配 <span class="cf-note">（音色库全局共享 · 预设音色可离线试听 · 抽卡音色播真实音频）</span></h4>
+        <div class="cf-row">
+          <button class="btn primary" id="pmm-voice-assign" ${chars.length ? '' : 'disabled'}>✦ AI 分配音色</button>
+          <button class="btn" id="pmm-voice-draw" ${chars.length ? '' : 'disabled'} title="用本地 ComfyUI 音色工作流抽卡，抽到的候选满意再保存">🎲 抽卡音色</button>
+          <label class="cf-check"><input type="checkbox" id="pmm-voice-keep" ${voiceDrawKeep ? 'checked' : ''}> 保留上次候选</label>
+          ${speechOn ? '' : '<span class="cf-note">当前浏览器不支持语音合成，无音频样本的预设音色无法试听</span>'}
+          <span class="cf-note" style="margin:0" id="pmm-voice-status">${chars.length ? `共 ${chars.length} 位角色` : '请先添加角色'}</span>
+        </div>
+        <div class="cf-note" id="pmm-voice-draw-hint">${voiceDrawReady
+          ? `抽卡将调用「${esc(voiceWorkflowName)}」跑 ${voiceDrawCount} 次；候选进临时池，${draftTtlHours} 小时内不保存会自动清理。绑定角色的音色一定是已保存的正式音色。`
+          : '抽卡需要先在「设置 → 本地 ComfyUI」导入一份音色（TTS）工作流。没有它也可以直接从音色库挑预设音色。'}</div>
+        ${chars.length
+          ? `<div class="pmm-voice-rows">${chars.map((c) => voiceRowHTML(c)).join('')}</div>`
+          : '<div class="cf-note">还没有角色，无法分配音色。</div>'}
+        ${voiceCandidates.length ? voiceCandidatesHTML() : ''}
+        <div class="cf-section voice-lib">
+          <h4>音色库管理 <span class="cf-note">（全局，多项目共享 · ${(voiceLib || []).filter((v) => v.audio).length} 个带真实音频）</span>
+            <button class="btn sm" id="pmm-voice-lib-toggle">${voiceLibOpen ? '收起' : '展开'}</button>
+            <button class="btn sm" id="pmm-voice-add">＋ 新增音色</button></h4>
+          ${voiceLibOpen ? voiceLibBodyHTML() : ''}
+        </div>
       </div>`;
+
     // 模型选择器：提取与多视图生成都用它选中的模型（库为空时不出现）
     ensureModelPicker('chars', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
     body.querySelector('#pmm-char-add').addEventListener('click', () => {
@@ -970,7 +1175,8 @@ export function openProjectManager(ctx = {}) {
       if (status) status.textContent = mode === 'heuristic' ? '启发式提取中…' : 'LLM 提取中，可能需要 30 秒以上，请耐心等待…';
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/extract`, withModelId('chars', { mode }));
-        toast(d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`, d.fellBack ? 'err' : 'ok');
+        const st = d.stats ? ` · 候选 ${d.stats.candidates} / 片段 ${d.stats.fragments} / 证据 ${d.stats.verified}✓ ${d.stats.dropped}✗` : '';
+        toast(`${d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`}${st}`, d.fellBack ? 'err' : 'ok');
         await refresh();
         await ctx.onChanged?.();
       } catch (e) {
@@ -983,7 +1189,7 @@ export function openProjectManager(ctx = {}) {
       body.querySelector('#pmm-char-extract').addEventListener('click', () => extract('llm'));
       body.querySelector('#pmm-char-heur').addEventListener('click', () => extract('heuristic'));
     }
-    /** 一键生成全部角色：一次请求批量出图，SSE 进度由 app.js 写回 #pmm-char-status */
+    /** 一键补全全部定妆：一次请求批量出图（5 视图 + 可选定妆板），SSE 进度写回状态栏 */
     body.querySelector('#pmm-char-gen-all')?.addEventListener('click', async (e) => {
       const btn = e.currentTarget;
       const status = $('pmm-char-status');
@@ -992,11 +1198,13 @@ export function openProjectManager(ctx = {}) {
       if (status) status.textContent = '正在准备批量生成…';
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/views/all`, withModelId('chars', {
-          allViews: body.querySelector('#pmm-char-all-views')?.checked === true,
+          scope: 'all',
+          includeSheet: body.querySelector('#pmm-char-include-sheet')?.checked !== false,
           onlyMissing: body.querySelector('#pmm-char-only-missing')?.checked !== false,
         }));
-        toast(d.message || '批量生成完成', d.failed?.length ? 'warn' : 'ok');
-        if (status) status.textContent = d.message || '';
+        const ready = d.videoReady?.label || '';
+        toast([d.message || '批量生成完成', ready].filter(Boolean).join(' · '), d.failed?.length ? 'warn' : 'ok');
+        if (status) status.textContent = [d.message || '', ready].filter(Boolean).join(' · ');
         await refresh();
         await ctx.onChanged?.();
       } catch (err) {
@@ -1004,7 +1212,7 @@ export function openProjectManager(ctx = {}) {
         if (status) status.textContent = err.message;
       } finally {
         btn.disabled = false;
-        btn.textContent = '✦ 一键生成全部角色定妆图';
+        btn.textContent = '✦ 一键补全全部定妆';
       }
     });
     body.querySelectorAll('[data-char-edit]').forEach((b) => b.addEventListener('click', () => {
@@ -1016,26 +1224,374 @@ export function openProjectManager(ctx = {}) {
       const c = chars.find((x) => x.id === b.dataset.charViews);
       if (c) generateViews(c);
     }));
+    // 单张定妆板生成
+    body.querySelectorAll('[data-char-sheet]').forEach((b) => b.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const c = chars.find((x) => x.id === b.dataset.charSheet);
+      if (!c) return;
+      btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
+          withModelId('chars', { characterId: c.id, view: 'sheet' }));
+        applyCharacterUpdate(d);
+        toast(`「${c.name}」定妆板已生成`, 'ok');
+      } catch (err) {
+        btn.disabled = false; btn.textContent = '▦ 定妆板';
+        toast(err.message, 'err');
+      }
+    }));
+    // 点击已生成的视图 → 大图预览（提示词 / 参考图 / 风格锁）
+    body.querySelectorAll('[data-char-preview]').forEach((el) => el.addEventListener('click', () => {
+      const c = chars.find((x) => x.id === el.dataset.charPreview);
+      if (c) openPortraitPreview(c, el.dataset.view);
+    }));
+    // 点击空视图格 → 单独生成这一张
+    body.querySelectorAll('[data-char-view-one]').forEach((el) => el.addEventListener('click', async () => {
+      const c = chars.find((x) => x.id === el.dataset.charViewOne);
+      if (!c) return;
+      const viewKey = el.dataset.view;
+      const label = CHARACTER_VIEWS.find((v) => v.key === viewKey)?.label || viewKey;
+      el.innerHTML = `<span class="pmm-char-gen">生成 ${esc(label)}…</span>`;
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
+          withModelId('chars', { characterId: c.id, view: viewKey }));
+        applyCharacterUpdate(d);
+        toast(`「${c.name}·${label}」已生成`, 'ok');
+      } catch (err) {
+        toast(err.message, 'err');
+        applyCharacterUpdate({ characters: chars });
+      }
+    }));
+
+    // ---------------- 角色音色分配：AI 分配 / 手动指定 / 试听 ----------------
+    body.querySelector('#pmm-voice-assign')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = '分配中…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/voices/assign`, withModelId('chars', {}));
+        toast(d.message || '音色分配完成', d.fellBack ? 'warn' : 'ok');
+        await refresh();
+        await ctx.onChanged?.();
+      } catch (err) {
+        toast(`分配失败：${err.message}`, 'err');
+      } finally {
+        btn.disabled = !chars.length;
+        btn.textContent = '✦ AI 分配音色';
+      }
+    });
+    // 下拉手动指定：即时写回，行内刷新，不整页重渲染（保留正在编辑的音色库状态）
+    body.querySelectorAll('[data-voice-select]').forEach((sel) => sel.addEventListener('change', async () => {
+      const characterId = sel.dataset.voiceSelect;
+      const voiceId = sel.value;
+      const row = sel.closest('.pmm-voice-row');
+      const reasonEl = row?.querySelector('.pmm-voice-reason');
+      const prevBtn = row?.querySelector('[data-voice-preview]');
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/voices/set`, { characterId, voiceId });
+        const c = (ctx.project.management?.characters || []).find((x) => x.id === characterId);
+        if (c) {
+          c.voiceId = d.character.voiceId || '';
+          c.voiceName = d.character.voiceName || '';
+          c.voiceReason = d.character.voiceReason || '';
+        }
+        if (reasonEl) reasonEl.innerHTML = d.character.voiceId
+          ? esc(`已指定：${d.character.voiceName || '音色'}`)
+          : '<i class="muted">未分配音色</i>';
+        if (prevBtn) {
+          prevBtn.dataset.voicePreview = d.character.voiceId || '';
+          prevBtn.dataset.voiceText = '';
+          prevBtn.disabled = !d.character.voiceId || !speechOn;
+        }
+        if (d.character.voiceId) toast(`已指定音色：${d.character.voiceName}`, 'ok');
+      } catch (err) { toast(`指定失败：${err.message}`, 'err'); }
+    }));
+
+    // ---------------- 音色抽卡：按角色条件抽 → 候选试听 → 保存 / 直接绑定 ----------------
+    body.querySelector('#pmm-voice-keep')?.addEventListener('change', (e) => {
+      voiceDrawKeep = e.currentTarget.checked;
+      render();
+    });
+    body.querySelector('#pmm-voice-draw')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      if (!voiceDrawReady) {
+        toast('还没有音色抽卡工作流：请到「设置 → 本地 ComfyUI」导入一份 TTS 工作流（导出(API) 格式）', 'err');
+        return;
+      }
+      // 默认按第一个还没有音色的角色抽：抽卡本来就是为「选不出音色」服务的
+      const target = chars.find((c) => !c.voiceId) || chars[0];
+      btn.disabled = true;
+      const status = body.querySelector('#pmm-voice-status');
+      const started = Date.now();
+      const tick = setInterval(() => {
+        if (status) status.textContent = `正在抽卡 ${Math.round((Date.now() - started) / 1000)}s…`;
+      }, 500);
+      voiceDrawBusy = target?.id || '';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/voices/draw`, withModelId('chars', {
+          characterId: target?.id || '', count: voiceDrawCount,
+        }));
+        voiceCandidates = voiceDrawKeep ? [...(d.drafts || []), ...voiceCandidates] : (d.drafts || []);
+        voiceDrawReady = true;
+        toast(d.message || '抽卡完成', d.ok ? 'ok' : 'warn');
+        if (d.failures?.length) toast(`部分抽卡失败：${d.failures[0].error}`, 'warn');
+      } catch (err) {
+        toast(`抽卡失败：${err.message}`, 'err');
+      } finally {
+        clearInterval(tick);
+        voiceDrawBusy = null;
+        btn.disabled = !chars.length;
+        await refresh();
+      }
+    });
+    // 候选卡：试听 / 保存入库 / 直接绑定到角色 / 丢弃
+    body.querySelectorAll('[data-draft-preview]').forEach((b) => b.addEventListener('click', () => {
+      const d = voiceCandidates.find((x) => x.id === b.dataset.draftPreview);
+      if (d?.audio?.url) speakText({ audioUrl: d.audio.url, text: d.sampleText });
+    }));
+    body.querySelectorAll('[data-draft-save]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.draftSave;
+      b.disabled = true;
+      try {
+        const d = await api(`/api/voices/drafts/${id}/save`, {});
+        toast(d.message || '已保存为音色', 'ok');
+        voiceCandidates = voiceCandidates.filter((x) => x.id !== id);
+        await refresh();
+      } catch (err) { toast(`保存失败：${err.message}`, 'err'); b.disabled = false; }
+    }));
+    body.querySelectorAll('[data-draft-bind]').forEach((b) => b.addEventListener('click', async () => {
+      const draft = voiceCandidates.find((x) => x.id === b.dataset.draftBind);
+      const characterId = b.dataset.charId;
+      if (!draft || !characterId) return;
+      b.disabled = true;
+      try {
+        // 绑定候选 = 保存 + 绑定一次完成：角色只能引用已保存的音色
+        const d = await api(`/api/projects/${ctx.project.id}/voices/set`, { characterId, voiceId: draft.id });
+        toast(d.message || '已保存并绑定', 'ok');
+        voiceCandidates = voiceCandidates.filter((x) => x.id !== draft.id);
+        await refresh();
+        await ctx.onChanged?.();
+      } catch (err) { toast(`绑定失败：${err.message}`, 'err'); b.disabled = false; }
+    }));
+    body.querySelectorAll('[data-draft-del]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.draftDel;
+      try {
+        await api(`/api/voices/drafts/${id}`, undefined, 'DELETE');
+        voiceCandidates = voiceCandidates.filter((x) => x.id !== id);
+        render();
+      } catch (err) { toast(`丢弃失败：${err.message}`, 'err'); }
+    }));
+
+    // 逐角色抽卡：按该角色的性别 / 年龄 / 性格条件抽，候选自动挂到这个角色
+    body.querySelectorAll('[data-voice-draw-for]').forEach((btn) => btn.addEventListener('click', async () => {
+      const characterId = btn.dataset.voiceDrawFor;
+      const character = chars.find((c) => c.id === characterId);
+      if (!character) return;
+      if (!voiceDrawReady) {
+        toast('还没有音色抽卡工作流：请到「设置 → 本地 ComfyUI」导入一份 TTS 工作流（导出(API) 格式）', 'err');
+        return;
+      }
+      voiceDrawBusy = characterId;
+      render();
+      const started = Date.now();
+      const tick = setInterval(() => {
+        const el = body.querySelector('#pmm-voice-status');
+        if (el) el.textContent = `「${character.name}」抽卡中 ${Math.round((Date.now() - started) / 1000)}s…`;
+      }, 500);
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/voices/draw`, withModelId('chars', {
+          characterId, count: voiceDrawCount,
+        }));
+        voiceCandidates = voiceDrawKeep ? [...(d.drafts || []), ...voiceCandidates] : (d.drafts || []);
+        toast(d.message || `「${character.name}」抽卡完成`, d.ok ? 'ok' : 'warn');
+        if (d.failures?.length) toast(`部分失败：${d.failures[0].error}`, 'warn');
+      } catch (err) {
+        toast(`抽卡失败：${err.message}`, 'err');
+      } finally {
+        clearInterval(tick);
+        voiceDrawBusy = null;
+        await refresh();
+      }
+    }));
+
+    // ---------------- 音色库管理：展开 / 新增 / 编辑 / 删除 / 试听 ----------------
+    body.querySelector('#pmm-voice-lib-toggle')?.addEventListener('click', () => { voiceLibOpen = !voiceLibOpen; render(); });
+    body.querySelector('#pmm-voice-add')?.addEventListener('click', () => { voiceEditing = null; voiceLibOpen = true; render(); });
+    body.querySelectorAll('[data-voice-edit]').forEach((b) => b.addEventListener('click', () => { voiceEditing = b.dataset.voiceEdit; render(); }));
+    body.querySelector('[data-act="ve-cancel"]')?.addEventListener('click', () => { voiceEditing = null; render(); });
+    body.querySelector('#pmm-voice-save')?.addEventListener('click', async () => {
+      const name = String(body.querySelector('#ve-name')?.value || '').trim();
+      if (!name) { body.querySelector('#ve-name')?.focus(); return; }
+      const payload = {
+        name,
+        gender: body.querySelector('#ve-gender')?.value || '中性',
+        ageGroup: body.querySelector('#ve-age')?.value || '青年',
+        tags: String(body.querySelector('#ve-tags')?.value || '').split(/[,，、]/).map((s) => s.trim()).filter(Boolean),
+        sampleText: body.querySelector('#ve-sample')?.value || '欢迎来到灵犀漫剧。',
+        rate: Number(body.querySelector('#ve-rate')?.value) || 1,
+        pitch: Number(body.querySelector('#ve-pitch')?.value) || 1,
+        language: body.querySelector('#ve-lang')?.value || 'zh-CN',
+        note: body.querySelector('#ve-note')?.value || '',
+      };
+      try {
+        if (voiceEditing) await api(`/api/voices/${voiceEditing}`, payload, 'PUT');
+        else await api('/api/voices', payload, 'POST');
+        voiceEditing = null;
+        await refresh();
+        toast('音色已保存', 'ok');
+      } catch (err) { toast(`保存失败：${err.message}`, 'err'); }
+    });
+    body.querySelectorAll('[data-voice-del]').forEach((b) => b.addEventListener('click', async () => {
+      const item = b.closest('[data-voice-item]');
+      const label = item?.querySelector('b')?.textContent || '该音色';
+      if (!window.confirm(`确定删除音色「${label}」？已绑定该音色的角色将回退为未分配。`)) return;
+      try { await api(`/api/voices/${b.dataset.voiceDel}`, undefined, 'DELETE'); await refresh(); toast('已删除', 'ok'); }
+      catch (err) { toast(`删除失败：${err.message}`, 'err'); }
+    }));
+    // 试听（委托）：角色行与音色库共用同一回调；有真实音频样本就播样本，否则浏览器合成
+    body.querySelectorAll('[data-voice-preview]').forEach((btn) => btn.addEventListener('click', () => {
+      const id = btn.dataset.voicePreview;
+      const v = (voiceLib || []).find((x) => x.id === id);
+      const text = btn.dataset.voiceText || v?.sampleText || '';
+      if (!v || !text) return;
+      speakText({ text, lang: v.language, rate: v.rate, pitch: v.pitch, gender: v.gender, audioUrl: v.audio?.url });
+    }));
+  }
+
+  // ---------------- 角色音色分配相关纯渲染 helpers（在 openProjectManager 闭包内，可访问 voiceLib 等） ----------------
+  const speechOn = isSpeechSupported();
+
+  function voiceOptionsHTML(selectedId) {
+    const opts = ['<option value="">— 未指定 —</option>'];
+    for (const v of (voiceLib || [])) {
+      const sel = v.id === selectedId ? ' selected' : '';
+      opts.push(`<option value="${esc(v.id)}"${sel}>${esc(v.name)}（${esc(v.gender)}·${esc(v.ageGroup)}）</option>`);
+    }
+    return opts.join('');
+  }
+
+  function voiceLibBodyHTML() {
+    const editor = voiceEditorHTML();
+    const list = (voiceLib || []).map((v) => `
+      <div class="pmm-voice-item" data-voice-item="${esc(v.id)}">
+        <div class="pmm-voice-item-main"><b>${esc(v.name)}</b>
+          <span class="pmm-chip">${esc(v.gender)}·${esc(v.ageGroup)}</span>
+          ${v.source === 'draw' ? '<span class="pmm-chip pmm-chip-audio">抽卡 · 真实音频</span>' : ''}
+          ${(v.tags || []).map((t) => `<span class="pmm-chip">${esc(t)}</span>`).join('')}</div>
+        <div class="pmm-voice-item-sub">${esc(cut(v.sampleText, 64))}${v.audio ? ` · ${Math.round((v.audio.bytes || 0) / 1024)} KB` : ''}</div>
+        <div class="pmm-voice-item-acts">
+          <button class="btn sm" data-voice-preview="${esc(v.id)}" data-voice-text="${esc(v.sampleText)}" ${v.audio || speechOn ? '' : 'disabled'}>${v.audio ? '▶ 原声' : '🔊 试听'}</button>
+          <button class="btn sm" data-voice-edit="${esc(v.id)}">✎ 编辑</button>
+          <button class="btn sm" data-voice-del="${esc(v.id)}">✕</button>
+        </div>
+      </div>`).join('')
+      || '<div class="cf-note">音色库为空，点击下方「＋ 新增音色」创建一个。</div>';
+    return `<div class="pmm-voice-lib-list">${list}</div>${editor}`;
+  }
+
+  function voiceEditorHTML() {
+    const e = voiceEditing ? (voiceLib || []).find((v) => v.id === voiceEditing) : null;
+    const val = (k, d = '') => (e ? esc((e[k] ?? d)) : d);
+    return `<div class="pmm-voice-editor">
+      <h5>${e ? '✎ 编辑音色' : '＋ 新增音色'}</h5>
+      <div class="modal-grid">
+        <div class="field"><label>名称 *</label><input id="ve-name" maxlength="40" value="${val('name')}"></div>
+        <div class="field"><label>性别</label><select id="ve-gender">${['男', '女', '中性'].map((g) => `<option value="${g}" ${e && e.gender === g ? 'selected' : ''}>${g}</option>`).join('')}</select></div>
+        <div class="field"><label>年龄层</label><select id="ve-age">${['儿童', '青年', '中年', '老年'].map((a) => `<option value="${a}" ${e && e.ageGroup === a ? 'selected' : ''}>${a}</option>`).join('')}</select></div>
+      </div>
+      <div class="field"><label>性格标签（逗号分隔）</label><input id="ve-tags" value="${esc((e && e.tags) || []).join('，')}"></div>
+      <div class="field"><label>试听样例文案</label><textarea id="ve-sample" rows="2" maxlength="200">${val('sampleText')}</textarea></div>
+      <div class="modal-grid">
+        <div class="field"><label>语速 rate (0.5–2)</label><input id="ve-rate" type="number" step="0.05" min="0.5" max="2" value="${e ? e.rate : 1}"></div>
+        <div class="field"><label>音高 pitch (0–2)</label><input id="ve-pitch" type="number" step="0.05" min="0" max="2" value="${e ? e.pitch : 1}"></div>
+        <div class="field"><label>语言</label><input id="ve-lang" value="${val('language', 'zh-CN')}"></div>
+      </div>
+      <div class="field"><label>备注</label><input id="ve-note" value="${val('note')}"></div>
+      <div class="modal-actions">
+        ${e ? '<button class="btn" data-act="ve-cancel">取消</button>' : ''}
+        <button class="btn primary" id="pmm-voice-save">${e ? '保存修改' : '新增音色'}</button>
+      </div>
+    </div>`;
+  }
+
+  function voiceRowHTML(c) {
+    const v = c.voiceId ? (voiceLib || []).find((x) => x.id === c.voiceId) : null;
+    const busy = voiceDrawBusy === c.id;
+    return `<div class="pmm-voice-row" data-char="${esc(c.id)}">
+      <span class="pmm-voice-char">${esc(c.name)}</span>
+      <select class="pmm-voice-select" data-voice-select="${esc(c.id)}">${voiceOptionsHTML(c.voiceId)}</select>
+      <button class="btn sm" data-voice-preview="${esc(c.voiceId || '')}" data-voice-text="${esc(v ? v.sampleText : '')}" ${v && (speechOn || v.audio) ? '' : 'disabled'}>${v?.audio ? '▶ 原声' : '🔊 试听'}</button>
+      <button class="btn sm" data-voice-draw-for="${esc(c.id)}" ${busy || !voiceDrawReady ? 'disabled' : ''}>${busy ? '🎲 抽卡中…' : '🎲 抽卡'}</button>
+      <span class="pmm-voice-reason">${v
+        ? esc(c.voiceReason || `已指定：${v.name}`) + (v.audio ? ' · 真实音频' : '')
+        : '<i class="muted">未分配音色</i>'}</span>
+    </div>`;
+  }
+
+  /** 候选池：抽卡结果。未保存的候选不能绑定角色，只能「保存」「保存并绑定」或丢弃 */
+  function voiceCandidatesHTML() {
+    const list = voiceCandidates.map((d) => {
+      const target = (ctx.project.management?.characters || [])
+        .find((c) => c.id === d.characterId);
+      const chars = (ctx.project.management?.characters || []);
+      const bindTo = d.characterId && target ? target.id : (chars[0]?.id || '');
+      const bindName = chars.find((c) => c.id === bindTo)?.name || '';
+      const created = new Date(d.createdAt || Date.now());
+      return `<div class="pmm-draft" data-draft="${esc(d.id)}">
+        <div class="pmm-draft-main">
+          <b>${esc(d.nameHint || '候选音色')}</b>
+          <span class="pmm-chip">${esc(d.gender)}·${esc(d.ageGroup)}</span>
+          ${d.characterName ? `<span class="pmm-chip">为 ${esc(d.characterName)} 抽</span>` : ''}
+          <span class="pmm-chip">${esc(d.draw?.workflowName || '抽卡')}</span>
+          <span class="cf-note" style="margin:0">${esc(created.toLocaleTimeString('zh-CN', { hour12: false }))}${d.audio?.bytes ? ` · ${Math.round(d.audio.bytes / 1024)} KB` : ''}</span>
+        </div>
+        <div class="pmm-draft-sub">${esc(cut(d.sampleText, 80))}</div>
+        <div class="pmm-draft-acts">
+          <button class="btn sm" data-draft-preview="${esc(d.id)}">▶ 试听原声</button>
+          <button class="btn sm" data-draft-save="${esc(d.id)}">✓ 保存为音色</button>
+          ${bindTo ? `<button class="btn sm primary" data-draft-bind="${esc(d.id)}" data-char-id="${esc(bindTo)}">保存并绑定「${esc(bindName)}」</button>` : ''}
+          <button class="btn sm" data-draft-del="${esc(d.id)}">✕ 丢弃</button>
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="cf-section pmm-drafts">
+      <h4>抽卡候选 <span class="cf-note">（${voiceCandidates.length} 段 · ${draftTtlHours} 小时内不保存会自动清理 · 绑定前必须先保存）</span></h4>
+      <div class="pmm-draft-list">${list}</div>
+    </div>`;
   }
 
   /** 逐视图生成角色多视图：每张一次请求、逐张反馈进度，单张失败继续后续视图 */
+  /**
+   * 逐视图生成（补全缺失）：按视图顺序一张一张走单视图端点。
+   * 为什么串行而不是一个批量请求：单张失败时其余仍能落地，且进度条与卡片能实时反映
+   * 「正在生成哪一张」，用户随时可以中断。已存在的视图默认跳过（可点「全部重生成」覆盖）。
+   */
   async function generateViews(c) {
-    viewGen = { charId: c.id, current: 0, total: CHARACTER_VIEWS.length };
+    const st = charViewStatus(c);
+    // 缺图才补；全齐时视为「全部重生成」
+    const targets = st.missing.length
+      ? CHARACTER_VIEWS.filter((v) => st.missing.includes(v.key))
+      : CHARACTER_VIEWS;
+    const all = !st.missing.length;
+    viewGen = { charId: c.id, current: 0, total: targets.length, view: targets[0]?.key, label: targets[0]?.label };
     render();
     let okCount = 0;
     const fails = [];
-    for (let i = 0; i < CHARACTER_VIEWS.length; i++) {
-      const v = CHARACTER_VIEWS[i];
-      viewGen = { charId: c.id, current: i + 1, total: CHARACTER_VIEWS.length };
+    for (let i = 0; i < targets.length; i++) {
+      const v = targets[i];
+      viewGen = { charId: c.id, current: i + 1, total: targets.length, view: v.key, label: v.label };
       render();
       try {
-        await api(`/api/projects/${ctx.project.id}/characters/views`, withModelId('chars', { characterId: c.id, view: v.key }));
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
+          withModelId('chars', { characterId: c.id, view: v.key }));
+        if (Array.isArray(d?.characters)) Object.assign(c, d.characters.find((x) => x.id === c.id) || {});
         okCount += 1;
       } catch (e) { fails.push(`${v.label}：${e.message}`); }
     }
     viewGen = { charId: null, current: 0, total: 0 };
-    if (fails.length) toast(`「${c.name}」多视图完成 ${okCount}/${CHARACTER_VIEWS.length}，失败 ${fails.join('；')}`, 'err');
-    else toast(`「${c.name}」多视图已生成：${okCount} 张，已登记资源库`, 'ok');
+    const nowReady = charViewStatus(c).videoReady;
+    const tail = nowReady ? ' · 已可用于视频生成' : ' · 仍缺正面/面部参考，暂不可进视频';
+    if (fails.length) toast(`「${c.name}」${all ? '重生成' : '补全'}完成 ${okCount}/${targets.length}，失败 ${fails.join('；')}`, 'err');
+    else toast(`「${c.name}」${all ? '已重生成' : '已补全'} ${okCount} 张定妆${tail}`, 'ok');
     await refresh();
     await ctx.onChanged?.();
   }
@@ -1279,7 +1835,9 @@ export function openProjectManager(ctx = {}) {
     });
   }
 
-  root.appendChild(backdrop);
   render();
+  // 首次打开就拉全数据（音色库 voiceLib / 抽卡候选池 voiceCandidates 只在 refresh() 里加载）。
+  // 只 render() 会让已绑定音色的角色误显示「未分配音色」、候选池空白，直到用户任意交互才纠正。
+  refresh();
   return { close, refresh };
 }

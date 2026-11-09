@@ -7,6 +7,7 @@
 
 /** 模型选择器（可选）：库里有模型时在输入栏前插入下拉，本次对话用哪个模型由用户临时决定 */
 import { ensureModelPicker } from './model-picker.js';
+import { openPage } from './page.js';
 import { esc as $esc } from './utils.js';
 
 
@@ -34,9 +35,6 @@ export function openAIChat(o = {}) {
     modelEntry = null,   // 模型库入口 key：设置后输入栏左侧出现模型下拉（如 'cover'）
   } = o;
 
-  const root = document.getElementById('modal-root') || document.body;
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
   const history = [];               // [{role:'user'|'assistant', content}] 文本对话上下文
   let busy = false;
   let busyNote = null;              // 忙等气泡（打字指示 + 说明）
@@ -56,28 +54,27 @@ export function openAIChat(o = {}) {
     for (const sel of BUTTON_SELS) el.querySelectorAll(sel).forEach((b) => (b.disabled = true));
   };
 
+  const page = openPage({
+    title, sub: subtitle, variant: 'chat',
+    guardClose: () => !busy,
+  });
+  const backdrop = page.content;
+
   function close() {
     if (busy) return;
-    backdrop.remove();
+    page.close();
     onClose?.();
   }
-  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
 
-  backdrop.innerHTML = `<div class="modal aichat-modal" role="dialog" aria-label="${$esc(title)}">
-    <div class="pmm-head"><div><h2>${$esc(title)}</h2>${subtitle ? `<div class="sub">${$esc(subtitle)}</div>` : ''}</div>
-      <button class="icon-btn" data-aichat="close" aria-label="关闭">✕</button></div>
-    <div class="aichat-list" data-aichat="list"></div>
+  backdrop.innerHTML = `<div class="aichat-list" data-aichat="list"></div>
     <div class="aichat-inputbar">
       <textarea data-aichat="input" rows="1" placeholder="${$esc(placeholder)}" aria-label="消息输入"></textarea>
       <button class="btn primary" data-aichat="send" aria-label="发送">➤</button>
-    </div>
-  </div>`;
-  root.appendChild(backdrop);
+    </div>`;
 
   const list = backdrop.querySelector('[data-aichat="list"]');
   const input = backdrop.querySelector('[data-aichat="input"]');
   const sendBtn = backdrop.querySelector('[data-aichat="send"]');
-  const closeBtn = backdrop.querySelector('[data-aichat="close"]');
   if (modelEntry) ensureModelPicker(modelEntry, backdrop.querySelector('.aichat-inputbar'), input);
 
   /** 气泡内图片点击放大：组件内自建 lightbox，保持零依赖（不引入 panels 的预览弹窗） */
@@ -101,9 +98,13 @@ export function openAIChat(o = {}) {
       ? `<div class="aichat-chips">${msg.suggestions.map((s, i) => `<button class="aichat-chip" data-aichat-chip="${i}" title="点击发送">${$esc(s)}</button>`).join('')}</div>` : '';
     const acts = (Array.isArray(msg.actions) && msg.actions.length)
       ? `<div class="aichat-acts">${msg.actions.map((a, i) => `<button class="btn sm ${a.primary ? 'primary' : ''}" data-aichat-act="${i}" ${a.disabled ? 'disabled' : ''}>${$esc(a.label)}</button>`).join('')}</div>` : '';
+    // 外链产物（下载导演包 / 成片 MP4 / 导出记录）：直接用 <a> 而不是动作按钮，
+    // 浏览器原生下载与 target=_blank 比 JS 转发更可靠，也不会被忙等态静默禁用。
+    const links = (Array.isArray(msg.links) && msg.links.length)
+      ? `<div class="aichat-links">${msg.links.map((l) => `<a class="aichat-link" href="${$esc(l.url)}" target="_blank" rel="noopener">${$esc(l.label)}</a>`).join('')}</div>` : '';
     const text = String(msg.text || '').trim();
     return `<div class="aichat-msg ${isUser ? 'user' : 'assistant'}">
-      <div class="aichat-bubble">${text ? `<div class="aichat-text">${$esc(text).replace(/\n/g, '<br>')}</div>` : ''}${imgs}${pb}${chips}${acts}</div></div>`;
+      <div class="aichat-bubble">${text ? `<div class="aichat-text">${$esc(text).replace(/\n/g, '<br>')}</div>` : ''}${imgs}${pb}${links}${chips}${acts}</div></div>`;
   }
 
   const ui = {
@@ -144,7 +145,6 @@ export function openAIChat(o = {}) {
       busy = !!v;
       input.disabled = busy;
       sendBtn.disabled = busy;
-      closeBtn.disabled = busy;
       if (busy) holdBusyButtons(backdrop);
       else { busyHeld.forEach((b) => (b.disabled = false)); busyHeld = []; }
       if (busy) {
@@ -183,8 +183,6 @@ export function openAIChat(o = {}) {
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
   });
-  closeBtn.addEventListener('click', close);
-
   if (welcome) ui.addMessage({ role: 'assistant', ...welcome });
   return ui;
 }

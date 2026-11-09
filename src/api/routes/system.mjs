@@ -8,6 +8,9 @@ import { buildTemplate, TEMPLATE_META } from '../../pipelines/templates.mjs';
 import { listAgents } from '../../agents/index.mjs';
 import { loadComfyConfig, comfySummary } from '../../core/comfy-config.mjs';
 import { STEPS } from '../../core/project-steps.mjs';
+import { listDirectorSkills, listDirectorSkillsByGroup, DIRECTOR_CAPABILITIES,
+  DIRECTOR_SKILL_GROUPS } from '../../core/director-skills.mjs';
+import { DEFAULT_RUNTIME, normalizeRuntimeSpec } from '../../core/runtime-spec.mjs';
 import { validateNovelInput, novelPreview, mergeNovelFiles } from '../../core/novel.mjs';
 import { createProviders } from '../../core/providers.mjs';
 import { loadAppSettings, saveAppSettings, appSettingsSummary, ensureModelRoster, normalizeModelProfile, modelProfileSummary } from '../../core/app-settings.mjs';
@@ -45,6 +48,12 @@ export async function handleSystem(req, res, url) {
     const active = projects.filter((p) => !p.archived);
     return json(res, {
       projects, templates: TEMPLATE_META, agents: listAgents(),
+      // 导演 Agent 技能清单：工作台首屏即可渲染技能卡，无需等项目级接口。
+      // directorSkillGroups 直接给分组元数据（顺序 + 说明），前端不必再硬编码分组标题。
+      directorSkills: listDirectorSkills(), directorCapabilities: DIRECTOR_CAPABILITIES,
+      directorSkillGroups: Object.values(DIRECTOR_SKILL_GROUPS),
+      // 短剧成片规格默认值：工作台首屏即可显示「30s / 3s / 10 片段」
+      runtimeDefaults: normalizeRuntimeSpec(DEFAULT_RUNTIME),
       recent: projects[0]?.id || null, serverTime: Date.now(),
       comfy: comfySummary(loadComfyConfig()),
       // 启动检查：前端据此判断是否需要弹「首次配置模型」引导框

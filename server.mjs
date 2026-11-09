@@ -31,6 +31,14 @@ const MIME = {
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
   '.zip': 'application/zip',
+  // 音色抽卡产物：<audio> 直接播放，缺 MIME 时浏览器会当成下载或静默失败
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.flac': 'audio/flac',
+  '.aac': 'audio/aac',
+  '.opus': 'audio/opus',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
 };

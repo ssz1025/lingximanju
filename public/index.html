@@ -18,26 +18,10 @@
 
     <div class="side-scroll">
       <!-- 进入项目后只展示当前项目：项目导航 / 资源列表 / 项目设置。
-           项目列表、新建、导入统一收敛到首页（顶栏 ⌂ 项目列表或面包屑）。 -->
+           项目列表、新建、导入只在首页提供；项目内退出只有两处：
+           右上角「退出项目」与下方「项目设置 → 退出项目」。 -->
       <div id="project-sidebar"></div>
 
-      <!-- 画布工具只在画布视图出现，工作台 / 剧集详情不占用侧栏 -->
-      <div id="side-canvas-tools">
-        <section class="side-section">
-          <div class="section-head"><span>流水线模板</span><span class="section-hint">点击应用</span></div>
-          <div id="template-list" class="template-list"></div>
-        </section>
-
-        <section class="side-section">
-          <div class="section-head"><span>节点库</span><span class="section-hint">拖入画布</span></div>
-          <div id="node-palette" class="palette"></div>
-        </section>
-
-        <section class="side-section">
-          <div class="section-head"><span>智能体</span><span class="section-hint" id="agent-count"></span></div>
-          <div id="agent-list" class="agent-list"></div>
-        </section>
-      </div>
     </div>
 
     <div class="side-foot">
@@ -56,22 +40,14 @@
           <input id="project-name" spellcheck="false" aria-label="项目名称">
           <span id="project-mode" class="mode-chip"></span>
         </div>
-        <button id="btn-close-project" class="icon-btn close-project" title="关闭当前项目，返回项目列表 (H)" aria-label="关闭项目" hidden>✕</button>
         <div id="step-chip" class="step-chip" hidden><span class="sc-dot"></span><span id="step-chip-text">0/6</span></div>
       </div>
       <div class="tb-center"><div id="run-status" class="run-status"><span class="rs-dot"></span><span id="run-status-text">就绪</span></div></div>
       <div class="tb-right">
         <!-- 应用级入口：只在项目列表页显示；打开项目后整页只讲当前项目 -->
         <button id="btn-config-chip" class="btn config-chip app-only" title="模型尚未配置完整，点击去设置" hidden>⚠ 模型未配置</button>
-        <button id="btn-home" class="btn app-only" title="关闭当前项目，返回项目列表 (H)">⌂ 项目列表</button>
         <button id="btn-view-toggle" class="btn project-only" title="切换 项目工作台 / 画布视图">⬡ 画布</button>
-        <button id="btn-step-run" class="btn primary canvas-only project-only" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
         <button id="btn-project-manage" class="btn project-only in-more" title="项目管理：分集 / 产物 / 快照 / 标签">▦ 项目管理</button>
-        <button id="btn-arrange" class="btn canvas-only project-only in-more" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
-        <button id="btn-fit" class="btn canvas-only project-only" title="适应视图 (F)">⤢ 适应</button>
-        <button id="btn-run" class="btn primary canvas-only project-only" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
-        <button id="btn-stop" class="btn danger canvas-only project-only" hidden>■ 停止</button>
-        <button id="btn-director-pack" class="btn canvas-only project-only in-more" title="生成并下载导演包（可导入 ComfyUI 导演工作台）">▤ 导演包</button>
         <span class="tb-sep project-only in-more"></span>
         <button id="btn-export" class="icon-btn project-only in-more" title="导出项目 JSON">⇩</button>
         <button id="btn-asset-lib" class="icon-btn in-more" title="资源库：已生成资源统一管理与复用">▣</button>
@@ -99,6 +75,8 @@
             <button data-target="btn-help">? 操作指引</button>
           </div>
         </div>
+        <!-- 项目会话退出出口 1/2：右上角「退出项目」（另一处在左侧「项目设置」） -->
+        <button id="btn-close-project" class="btn exit-project" title="退出当前项目，返回项目列表" aria-label="退出项目" hidden>⇦ 退出项目</button>
       </div>
       <div id="top-progress" class="top-progress" hidden><i></i></div>
     </header>
@@ -107,41 +85,77 @@
       <section id="home-view" hidden></section>
       <section id="episode-view" hidden></section>
 
+      <!-- 画布内侧边栏：画布打开时才存在。运行操作与画布工具都收在这里，
+           顶栏不再常驻画布按钮，全局侧栏也不再放画布工具。 -->
       <div id="canvas-wrapper" tabindex="0">
-        <div id="grid"></div>
-        <div id="canvas-viewport">
-          <svg id="edge-layer" width="12000" height="12000" xmlns="http://www.w3.org/2000/svg"></svg>
-          <div id="node-layer"></div>
-        </div>
-        <div id="selection-box" hidden></div>
-        <div id="connect-line" hidden><svg width="100%" height="100%"><path id="connect-path" fill="none"></path></svg></div>
+        <aside id="canvas-side">
+          <div class="cside-actions">
+            <button id="btn-step-run" class="btn primary project-only" title="执行下一步任务 (S)" hidden>▶ 下一步</button>
+            <div class="cside-run">
+              <button id="btn-run" class="btn primary project-only" title="运行完整流水线 (R)">▶ <span>运行完整流水线</span></button>
+              <button id="btn-stop" class="btn danger project-only" hidden>■ 停止</button>
+            </div>
+            <div class="cside-row">
+              <button id="btn-arrange" class="btn project-only" title="按依赖拓扑自动布局 (L)">⌗ 布局</button>
+              <button id="btn-fit" class="btn project-only" title="适应视图 (F)">⤢ 适应</button>
+            </div>
+            <button id="btn-director-pack" class="btn project-only" title="生成并下载导演包（可导入 ComfyUI 导演工作台）">▤ 导演包</button>
+          </div>
 
-        <div id="canvas-empty" class="empty-state" hidden>
-          <div class="empty-icon">◈</div>
-          <h3>画布空空如也</h3>
-          <p id="canvas-empty-tip">从左侧节点库拖入一个节点，或应用一套流水线模板。</p>
-        </div>
+          <div id="side-canvas-tools">
+            <section class="side-section">
+              <div class="section-head"><span>流水线模板</span><span class="section-hint">点击应用</span></div>
+              <div id="template-list" class="template-list"></div>
+            </section>
 
-        <button id="canvas-offscreen" class="offscreen-hint" hidden>节点在视口外 · 点击回到内容 ⤢</button>
+            <section class="side-section">
+              <div class="section-head"><span>节点库</span><span class="section-hint">拖入画布</span></div>
+              <div id="node-palette" class="palette"></div>
+            </section>
 
-        <div id="canvas-toolbar" class="canvas-toolbar">
-          <button data-act="zoom-in" title="放大">＋</button>
-          <span id="zoom-label">100%</span>
-          <button data-act="zoom-out" title="缩小">－</button>
-          <button data-act="fit" title="适应视图">⤢</button>
-          <button data-act="layout" title="自动布局">⌗</button>
-        </div>
+            <section class="side-section">
+              <div class="section-head"><span>智能体</span><span class="section-hint" id="agent-count"></span></div>
+              <div id="agent-list" class="agent-list"></div>
+            </section>
+          </div>
+        </aside>
 
-        <div id="minimap" class="minimap"><canvas id="minimap-canvas" width="220" height="140"></canvas><span class="minimap-label">导航图</span></div>
-        <div id="canvas-hint" class="canvas-hint">空格 + 拖拽平移 · 滚轮缩放 · 端口拖出连线 · 右键节点更多操作</div>
-        <!-- 画布范围：全部组合画布 / 项目主画布 / 每一集的独立画布 -->
-        <div id="canvas-scopebar" class="cs-bar">
-          <span class="cs-icon">⬡</span>
-          <select id="canvas-scope" class="cs-select" aria-label="选择画布范围"></select>
-          <span id="canvas-scope-hint" class="cs-hint"></span>
-          <button id="btn-scope-fit" class="cs-btn" title="适应当前画布 (F)">⤢</button>
+        <div id="canvas-stage">
+          <div id="grid"></div>
+          <div id="canvas-viewport">
+            <svg id="edge-layer" width="12000" height="12000" xmlns="http://www.w3.org/2000/svg"></svg>
+            <div id="node-layer"></div>
+          </div>
+          <div id="selection-box" hidden></div>
+          <div id="connect-line" hidden><svg width="100%" height="100%"><path id="connect-path" fill="none"></path></svg></div>
+
+          <div id="canvas-empty" class="empty-state" hidden>
+            <div class="empty-icon">◈</div>
+            <h3>画布空空如也</h3>
+            <p id="canvas-empty-tip">从左侧节点库拖入一个节点，或应用一套流水线模板。</p>
+          </div>
+
+          <button id="canvas-offscreen" class="offscreen-hint" hidden>节点在视口外 · 点击回到内容 ⤢</button>
+
+          <div id="canvas-toolbar" class="canvas-toolbar">
+            <button data-act="zoom-in" title="放大">＋</button>
+            <span id="zoom-label">100%</span>
+            <button data-act="zoom-out" title="缩小">－</button>
+            <button data-act="fit" title="适应视图">⤢</button>
+            <button data-act="layout" title="自动布局">⌗</button>
+          </div>
+
+          <div id="minimap" class="minimap"><canvas id="minimap-canvas" width="220" height="140"></canvas><span class="minimap-label">导航图</span></div>
+          <div id="canvas-hint" class="canvas-hint">空格 + 拖拽平移 · 滚轮缩放 · 端口拖出连线 · 右键节点更多操作</div>
+          <!-- 画布范围：全部组合画布 / 项目主画布 / 每一集的独立画布 -->
+          <div id="canvas-scopebar" class="cs-bar">
+            <span class="cs-icon">⬡</span>
+            <select id="canvas-scope" class="cs-select" aria-label="选择画布范围"></select>
+            <span id="canvas-scope-hint" class="cs-hint"></span>
+            <button id="btn-scope-fit" class="cs-btn" title="适应当前画布 (F)">⤢</button>
+          </div>
+          <div id="canvas-stepbar" class="canvas-stepbar" hidden></div>
         </div>
-        <div id="canvas-stepbar" class="canvas-stepbar" hidden></div>
       </div>
 
       <div id="project-view" hidden></div>
@@ -171,6 +185,9 @@
         </div>
       </aside>
     </div>
+
+    <!-- 统一页面宿主：项目内所有内容型浮层改为整页视图 -->
+    <section id="page-root" hidden></section>
 
     <footer id="statusbar">
       <div class="status-left">

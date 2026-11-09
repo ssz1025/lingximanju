@@ -10,8 +10,14 @@ import { placeholderFrame } from './raster.mjs';
 const PLACEHOLDER_RE = /\{\{\s*([\w.-]+)\s*\}\}/g;
 const VIDEO_EXTS = /\.(mp4|webm|mov|mkv|m4v|gif)$/i;
 const IMAGE_EXTS = /\.(png|jpe?g|webp|bmp)$/i;
+// 音频产物（TTS / 音色抽卡工作流的输出）：抽卡结果必须是可播放的真实音频，否则不入候选池
+const AUDIO_EXTS = /\.(mp3|wav|ogg|m4a|flac|aac|opus)$/i;
 // 支持 seed / noise_seed / sampling_mode.seed 这类带命名空间的种子字段
 const SEED_KEY_RE = /^(?:.*\.)?(seed|noise_seed|rand_seed)$/i;
+// 音色工作流的说话人 / 语言字段：抽卡时按候选音色轮换注入，制造可辨的声线差异
+const VOICE_KEY_RE = /^(voice|voice_name|speaker|speaker_id|speaker_name|timbre|voice_id)$/i;
+const LANG_KEY_RE = /^(language|lang|locale)$/i;
+const TTS_TEXT_KEY_RE = /^(text|content|prompt_text|tts_text)$/i;
 
 /* ------------------------------------------------------------------ *
  * 提示词注入点识别
@@ -215,7 +221,18 @@ export function analyzeWorkflow(wf) {
   return found;
 }
 
+/**
+ * 种子生成。
+ * 传纯数字（或数字字符串）时原样使用 —— 这是「复现同一段音频 / 同一张图」的唯一途径：
+ * 音色抽卡把真实注入的 seed 记进 draw.seed，用户想再跑一遍时把它传回来即可。
+ * 其它情况（没传 / 传的是 project-shot 这类字符串锚点）仍需每次随机，
+ * 否则同一镜头反复重跑会拿到完全相同的产物，抽卡也就抽不出任何差异。
+ */
 function seedValue(seedText = '') {
+  const asNum = Number(seedText);
+  if (String(seedText).trim() !== '' && Number.isFinite(asNum) && asNum >= 0) {
+    return Math.trunc(asNum) % 4294967295;
+  }
   let h = 2166136261;
   const s = `${seedText}|${Date.now()}|${Math.random()}`;
   for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -250,6 +267,12 @@ function resolveVars(vars) {
     title: String(vars.title || ''),
     shot_no: String(vars.shotNo || ''),
     motion: String(vars.motion || ''),
+    // 音色抽卡：voice 是工作流里的说话人枚举值（如 MiniMax 的 male-qn-qingse），
+    // language 是语言代码；两者为空时不注入，避免污染出图 / 出视频工作流。
+    voice: String(vars.voice ?? ''),
+    language: String(vars.language ?? ''),
+    // 抽卡朗读文案：只在值为字符串、且确实存在该字段时注入（见 injectWorkflow 的 ttsText 分支）
+    audioText: vars.audioText === undefined ? undefined : String(vars.audioText),
   };
 }
 
@@ -341,11 +364,19 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
       else if (key === 'length' && /Video|Animate|WAN|H3|Frame/i.test(node.class_type) && Number.isFinite(Number(val))) auto(id, node, key, values.frames, 'frames');
       else if (key === 'fps' && Number.isFinite(Number(val))) auto(id, node, key, values.fps, 'fps');
       else if (key === 'filename_prefix') auto(id, node, key, values.filename_prefix, 'outputPrefix');
+      // 音色抽卡工作流：说话人 / 语言只在显式传值时注入，
+      // 出图与出视频工作流不收这两个变量，因此不会误改它们的输入。
+      else if (VOICE_KEY_RE.test(key) && values.voice) auto(id, node, key, values.voice, 'voice');
+      else if (LANG_KEY_RE.test(key) && values.language) auto(id, node, key, values.language, 'language');
+      // 朗读文案不在这里处理：TTS 节点的 text 通常是连线（→ PrimitiveStringMultiline），
+      // 直接覆盖会把上游节点断成孤儿，留到第 3 步沿连线写进真正的文本源。
     }
     if (/^(LoadImage|LoadImageMask)$/i.test(node.class_type)) {
       uploadSlots.push({ node: id, input: 'image' });
     }
-    if (/^(SaveImage|SaveAnimatedWEBP|SaveAnimatedPNG|VHS_VideoCombine|SaveVideo|PreviewImage)$/i.test(node.class_type)) {
+    // 音频输出节点也要收：TTS 工作流只 SaveAudio / SaveAudioMP3，漏掉就会让
+    // describeAudioWorkflow 误报「没有音频输出节点」，抽卡自检直接变成不可用。
+    if (/^(SaveImage|SaveAnimatedWEBP|SaveAnimatedPNG|VHS_VideoCombine|SaveVideo|PreviewImage|SaveAudio|SaveAudioMP3|SaveAudioOpus|SaveAudioFlamingo|PreviewAudio)$/i.test(node.class_type)) {
       outputNodes.push({ node: id, classType: node.class_type });
     }
   }
@@ -403,6 +434,47 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
   injectRole('positive', values.prompt);
   injectRole('negative', values.negative_prompt);
 
+  // 3.5) 朗读文案（音色抽卡）：TTS 节点的 text 常是连线，必须沿连线写到上游文本源，
+  //      直接覆盖连线会让上游那个 PrimitiveStringMultiline 变成孤立节点，工作流跑起来
+  //      仍旧念它自己写死的那句话 —— 表现为「抽了 4 次，4 段音频念的是同一句无关文案」。
+  if (values.audioText !== undefined) {
+    const writeTtsText = () => {
+      for (const [id, node] of Object.entries(wf)) {
+        if (String(id).startsWith('_')) continue;
+        for (const [key, val] of Object.entries(node.inputs || {})) {
+          if (!TTS_TEXT_KEY_RE.test(key)) continue;
+          if (touched.has(`${id}::${key}`)) continue;
+          if (typeof val === 'string') {
+            // 字面量文案：直接覆盖，但不要误伤已经有内容的角色台词等字段以外的东西
+            wf[id].inputs[key] = values.audioText;
+            applied.push({ node: id, input: key, value: values.audioText, by: 'auto:ttsText' });
+            touched.add(`${id}::${key}`);
+            continue;
+          }
+          if (!isLink(val)) continue;
+          // 连线：沿上游找到真正存放文案的字符串槽位，写进去
+          const reach = upstreamNodes(wf, [String(val[0])]);
+          const target = [...reach]
+            .filter((nid) => wf[nid])
+            .flatMap((nid) => Object.entries(wf[nid].inputs || {})
+              .filter(([k, v]) => TEXT_INPUT_KEYS.has(k) && typeof v === 'string')
+              .map(([k]) => ({ node: nid, input: k })))
+            // 有多个候选时优先最上游那个（真正的文案源，而不是下游的拼接结果）
+            .sort((a, b) => upstreamNodes(wf, [a.node]).size - upstreamNodes(wf, [b.node]).size)[0]
+            || { node: String(val[0]), input: 'text' };
+          if (!wf[target.node]) continue;
+          wf[target.node].inputs[target.input] = values.audioText;
+          applied.push({
+            node: target.node, input: target.input, value: values.audioText,
+            via: `${id}.${key}`, by: 'auto:ttsText',
+          });
+          touched.add(`${target.node}::${target.input}`);
+        }
+      }
+    };
+    writeTtsText();
+  }
+
   // 4) 显式绑定最后落盘，确保覆盖自动注入
   for (const b of bindings || []) {
     const id = String(b.node ?? '').trim();
@@ -432,6 +504,107 @@ export function describeWorkflow(workflow, vars = {}, bindings = []) {
     samplePrompt,
     applied: built.applied.filter((a) => /positive|negative|placeholder|binding/.test(a.by)),
   };
+}
+
+/**
+ * 音色抽卡工作流的不连接自检：返回朗读文案 / 说话人 / 语言实际写到了哪个节点，
+ * 以及能识别到的音频输出节点。图片注入自检那一套（正向 / 负向提示词）对 TTS 工作流无意义，
+ * 这里单独给一份语义正确的计划，避免设置页把「未找到提示词注入点」误报成工作流有问题。
+ */
+export function describeAudioWorkflow(workflow, vars = {}, bindings = []) {
+  const sampleText = String(vars.audioText || '这是一段音色试听，用来判断声线是否适合这个角色。');
+  const built = injectWorkflow(workflow, { ...vars, prompt: '', audioText: sampleText }, bindings);
+  const pick = (...bys) => built.applied.find((a) => bys.includes(a.by)) || null;
+  const text = pick('auto:ttsText', 'auto:positive', 'placeholder', 'binding', 'auto:positive:overrideLink');
+  const voice = pick('auto:voice', 'auto:language');
+  const seed = built.applied.find((a) => a.by === 'auto:seed') || null;
+  const audioNodes = built.outputNodes.filter((n) => /Audio|TTS|Voice|Sound|Music/i.test(n.classType));
+  const warnings = built.promptInjection.warnings.filter((w) => !/提示词/.test(w));
+  if (!audioNodes.length) {
+    warnings.push('工作流里没有 SaveAudio / SaveAudioMP3 一类音频输出节点，抽卡拿不到可播放的音频。');
+  }
+  if (!built.applied.some((a) => a.by === 'auto:voice')) {
+    // 没有说话人字段时，多次抽卡的差异只能靠随机源。TTS 工作流常常既没有 voice
+    // 也没有 seed：此时跑 4 次会得到 4 段几乎一样的音频，必须提前说清楚，
+    // 否则用户会以为「抽卡坏了」。
+    warnings.push(seed
+      ? `没找到说话人字段（voice / speaker / voice_id），抽卡会退化为同一音色多次采样：差异来自 seed（${seed.node}.${seed.input}）。`
+      : '既没有说话人字段（voice / speaker / voice_id）也没有 seed 字段：多次抽卡很可能得到几乎相同的音频，建议在工作流里加一个 voice 或 seed 输入。');
+  }
+  return {
+    ok: Boolean(text && audioNodes.length),
+    name: vars.name || '',
+    nodes: Object.keys(workflow || {}).length,
+    sampleText,
+    text: text ? { node: text.node, input: text.input, strategy: text.by, preview: String(text.value) } : null,
+    voice: voice ? { node: voice.node, input: voice.input, strategy: voice.by, value: voice.value } : null,
+    seed: seed ? { node: seed.node, input: seed.input, value: seed.value } : null,
+    audioNodes,
+    warnings,
+  };
+}
+
+/**
+ * 音色抽卡执行：同一份 TTS 工作流跑 N 次，每次换 seed（必要时换说话人），
+ * 返回可进候选池的音频列表（只保留真实音频产物，图片 / 波形图不算抽卡结果）。
+ * @param {object} config    ComfyUI 全局配置
+ * @param {object} workflow  音频工作流（API 格式）
+ * @param {object} o         {count, text, voiceValues[], language, bindings, signal, log, filenamePrefix}
+ * @returns {Promise<{draws:Array<{url,file,bytes,seed,voiceValue}>, failures:Array, workflowName:string}>}
+ */
+export async function drawVoiceCandidates(config, workflow, o = {}) {
+  // 显式判断而不是 `Number(o.count) || 4`：后者会把用户传的 0 静默变成 4 次，
+  // 用户以为「抽 0 次」却真跑了 4 次队列。未传时默认 4（产品默认张数），
+  // 传了非法/非正值一律按 1 次，绝不悄悄放大次数。
+  const given = o.count === undefined || o.count === null || o.count === '';
+  const rawCount = given ? 4 : Math.floor(Number(o.count));
+  const count = Number.isFinite(rawCount)
+    ? (rawCount > 0 ? Math.min(8, rawCount) : 1)
+    : 1;
+  const text = String(o.text || '这是一段音色试听，用来判断声线是否适合这个角色。');
+  const voiceValues = Array.isArray(o.voiceValues) ? o.voiceValues.filter(Boolean) : [];
+  const language = String(o.language || '');
+  const log = o.log || (() => {});
+  const draws = [];
+  const failures = [];
+  for (let i = 0; i < count; i += 1) {
+    if (o.signal?.aborted) break;
+    // 说话人槽位：给了候选列表就轮换（抽到不同音色），只给一个就靠 seed 采样差异
+    const voiceValue = voiceValues.length ? voiceValues[i % voiceValues.length] : '';
+    // 直接生成一个数字种子（而不是字符串锚点）：这样「本次注入的 seed」是确定的，
+    // 记录下来后用户能把同一段音频原样跑回来；字符串锚点会被 seedValue 混入时间戳。
+    const seedNum = (Math.trunc(Date.now() / 1000) * 1000 + i * 7 + Math.trunc(Math.random() * 1000)) % 4294967295;
+    try {
+      const r = await runWorkflow(config, workflow, {
+        prompt: '',
+        audioText: text,
+        voice: voiceValue,
+        language,
+        filenamePrefix: o.filenamePrefix || 'lingximanju_voice',
+        cfg: config,
+        seed: seedNum,
+      }, { bindings: o.bindings || [], signal: o.signal, log });
+      const audio = r.assets.filter((a) => a.kind === 'audio');
+      if (!audio.length) {
+        failures.push({ index: i, error: '工作流跑完但没有音频产物（检查是否有 SaveAudio 类输出节点）' });
+        continue;
+      }
+      for (const a of audio) {
+        draws.push({
+          url: a.url, file: a.file, bytes: a.bytes,
+          seed: seedNum,   // 与真正注入工作流的种子完全一致，可据此复现同一段音频
+          voiceValue,
+          promptId: r.promptId,
+          durationMs: r.durationMs,
+        });
+      }
+      log('info', `抽卡 ${i + 1}/${count} · ${audio.length} 段音频${voiceValue ? ` · 说话人 ${voiceValue}` : ''}`);
+    } catch (err) {
+      failures.push({ index: i, error: err.message });
+      log('warn', `抽卡 ${i + 1}/${count} 失败：${err.message}`);
+    }
+  }
+  return { draws, failures, workflowName: o.workflowName || '' };
 }
 
 async function requestJSON(url, options = {}) {
@@ -524,7 +697,8 @@ async function downloadOutput(config, file, signal) {
   const buf = Buffer.from(await res.arrayBuffer());
   const ext = (file.filename.match(/\.[A-Za-z0-9]{1,6}$/) || ['.png'])[0].toLowerCase();
   const kind = VIDEO_EXTS.test(file.filename) ? 'video'
-    : IMAGE_EXTS.test(file.filename) ? 'image' : 'file';
+    : IMAGE_EXTS.test(file.filename) ? 'image'
+      : AUDIO_EXTS.test(file.filename) ? 'audio' : 'file';
   const name = `${uid('comfy')}${ext}`;
   const url = writeAsset(name, buf);
   return { url, file: name, filename: file.filename, kind, nodeId: file.nodeId, bytes: buf.length };
@@ -618,14 +792,19 @@ export async function runWorkflow(config, workflow, vars = {}, opts = {}) {
   if (!history) throw new Error(`ComfyUI 执行超时（${Math.round((config.timeoutMs || 0) / 1000)}s）`);
 
   const outputs = collectOutputs(history);
-  if (!outputs.length) throw new Error('工作流完成但没有可下载的输出节点（请确认工作流里有 SaveImage / VHS_VideoCombine 等输出节点）');
+  if (!outputs.length) throw new Error('工作流完成但没有可下载的输出节点（请确认工作流里有 SaveImage / SaveAudio / VHS_VideoCombine 等输出节点）');
   const assets = [];
   for (const file of outputs.slice(0, 24)) {
     try { assets.push(await downloadOutput(config, file, signal)); }
     catch (err) { log('warn', `产物 ${file.filename} 下载失败：${err.message}`); }
   }
   if (!assets.length) throw new Error('所有产物下载失败');
-  const primary = assets.find((a) => a.kind === 'video') || assets.find((a) => a.kind === 'image') || assets[0];
+  // 主产物按工作流语义挑：视频 > 音频 > 图片。音频排第二是因为音色抽卡工作流
+  // 常同时输出波形图一类的图片产物，此时「主产物」必须是那段可播放的音频。
+  const primary = assets.find((a) => a.kind === 'video')
+    || assets.find((a) => a.kind === 'audio')
+    || assets.find((a) => a.kind === 'image')
+    || assets[0];
   log('info', `ComfyUI 完成 · ${assets.length} 个产物 · ${Date.now() - t0}ms`);
   return { assets, primary, promptId, applied: built.applied, promptInjection: plan, durationMs: Date.now() - t0 };
 }

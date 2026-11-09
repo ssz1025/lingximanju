@@ -16,15 +16,21 @@ export const DEFAULT_COMFY = {
   pollIntervalMs: 1000,
   imageWorkflow: null,        // ComfyUI「导出(API)」的完整 JSON
   videoWorkflow: null,
+  // 音色抽卡工作流（TTS / 语音克隆）：抽卡时按 seed 与说话人轮换注入朗读文案，
+  // 产出真实音频后进候选池，满意再保存为音色。
+  audioWorkflow: null,
   imageWorkflowName: '',
   videoWorkflowName: '',
+  audioWorkflowName: '',
   // 工作流库：多导入 + 选中生效。选中项会镜像回填到上面的 imageWorkflow/videoWorkflow，
   // 因此 providers / director-pack / run-test / comfySummary 等消费端零改动。
   imageWorkflowLib: [],   // [{id, name, workflow, createdAt, lastTest:{ok,durationMs,at,error}|null}]
   videoWorkflowLib: [],
+  audioWorkflowLib: [],
   imageActiveId: null,
   videoActiveId: null,
-  bindings: { image: [], video: [] }, // 显式绑定 [{node:'6', input:'text', value:'{{prompt}}'}]
+  audioActiveId: null,
+  bindings: { image: [], video: [], audio: [] }, // 显式绑定 [{node:'6', input:'text', value:'{{prompt}}'}]
   negativePrompt: 'low quality, blurry, deformed hands, extra fingers, watermark, text, inconsistent character',
   width: 864,
   height: 480,
@@ -45,11 +51,17 @@ function contentId(seed, obj) {
   return `${seed}_${(h >>> 0).toString(36)}`;
 }
 
+/** 工作流种类：image=出图 / video=图生视频 / audio=音色抽卡（TTS） */
+export const WORKFLOW_KINDS = ['image', 'video', 'audio'];
+/** 任意输入串归一为合法 kind；未识别一律按出图（历史行为） */
+export const kindOf = (v) => (WORKFLOW_KINDS.includes(v) ? v : 'image');
+
 function normalize(raw) {
   const cfg = { ...DEFAULT_COMFY, ...(raw || {}) };
   cfg.bindings = {
     image: Array.isArray(raw?.bindings?.image) ? raw.bindings.image : [],
     video: Array.isArray(raw?.bindings?.video) ? raw.bindings.video : [],
+    audio: Array.isArray(raw?.bindings?.audio) ? raw.bindings.audio : [],
   };
   cfg.baseUrl = String(cfg.baseUrl || DEFAULT_COMFY.baseUrl).replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(cfg.baseUrl)) cfg.baseUrl = DEFAULT_COMFY.baseUrl;
@@ -62,7 +74,7 @@ function normalize(raw) {
   if (!['video', 'director-pack', 'both'].includes(cfg.outputMode)) cfg.outputMode = 'both';
   if (!['minimax-h3', 'generic'].includes(cfg.packTarget)) cfg.packTarget = 'minimax-h3';
   // ---- 工作流库：防御性清洗 + 旧配置迁移 ----
-  for (const kind of ['image', 'video']) {
+  for (const kind of WORKFLOW_KINDS) {
     const libKey = `${kind}WorkflowLib`;
     const activeKey = `${kind}ActiveId`;
     const raw = Array.isArray(cfg[libKey]) ? cfg[libKey] : [];
@@ -144,7 +156,7 @@ export function resolveComfyConfig(project, cfg) {
 export function saveComfyConfig(patch = {}) {
   const merged = { ...loadComfyConfig(), ...patch };
   // 切换选中：从库回填「当前生效」镜像；id 不在库中 → 清空（回退 Mock）
-  for (const kind of ['image', 'video']) {
+  for (const kind of WORKFLOW_KINDS) {
     const activeKey = `${kind}ActiveId`;
     if (!(activeKey in patch)) continue;   // 普通保存不碰镜像
     const entry = (merged[`${kind}WorkflowLib`] || []).find((e) => e.id === patch[activeKey]);
@@ -174,8 +186,10 @@ export function comfySummary(cfg = loadComfyConfig()) {
     width: cfg.width, height: cfg.height, fps: cfg.fps, frames: cfg.frames,
     imageWorkflow: cfg.imageWorkflow ? { name: cfg.imageWorkflowName, nodes: Object.keys(cfg.imageWorkflow).length } : null,
     videoWorkflow: cfg.videoWorkflow ? { name: cfg.videoWorkflowName, nodes: Object.keys(cfg.videoWorkflow).length } : null,
+    audioWorkflow: cfg.audioWorkflow ? { name: cfg.audioWorkflowName, nodes: Object.keys(cfg.audioWorkflow).length } : null,
     imageWorkflowLib: libOverview(cfg.imageWorkflowLib),
     videoWorkflowLib: libOverview(cfg.videoWorkflowLib),
+    audioWorkflowLib: libOverview(cfg.audioWorkflowLib),
   };
 }
 
@@ -186,7 +200,8 @@ export function comfySummary(cfg = loadComfyConfig()) {
  * @returns {{added: Array<{id,name,nodes}>, failed: Array<{name,error}>, lib: Array}}
  */
 export function addLibraryItems(cfg, kind, items) {
-  const libKey = (kind === 'video' ? 'video' : 'image') + 'WorkflowLib';
+  const k = kindOf(kind);
+  const libKey = `${k}WorkflowLib`;
   const lib = (Array.isArray(cfg[libKey]) ? cfg[libKey] : []).slice();
   const added = [];
   const failed = [];

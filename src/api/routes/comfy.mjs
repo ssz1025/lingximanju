@@ -1,11 +1,12 @@
 // ComfyUI 接入域：配置 / 探测 / 工作流测试 / 工作流库 / 单项与批量试跑
 import { json, readBody } from '../http.mjs';
 import { MATCH } from './match.mjs';
-import { loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems } from '../../core/comfy-config.mjs';
-import { parseWorkflow, analyzeWorkflow, describeWorkflow, testConnection, runWorkflow } from '../../core/comfyui.mjs';
+import { loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems, kindOf, WORKFLOW_KINDS } from '../../core/comfy-config.mjs';
+import { parseWorkflow, analyzeWorkflow, describeWorkflow, describeAudioWorkflow, testConnection, runWorkflow } from '../../core/comfyui.mjs';
 import { emit } from '../../core/events.mjs';
 
 const TEST_PROMPT = 'cinematic test shot, consistent character, soft light';
+const TEST_AUDIO_TEXT = '这是一段音色试听，用来判断声线是否适合这个角色。';
 const PROBE_TIMEOUT_MS = 8000;   // 连接探测上限：地址被代理吞掉时不能让面板无限转圈
 
 /** 把一次 runWorkflow 的结果压成前端可读的详情（不回传二进制内容） */
@@ -75,10 +76,12 @@ async function executeLibraryTests({ res, config, kind, ids, prompt, scope = 'ba
     const t0 = Date.now();
     let lastTest;
     try {
-      const r = await runWorkflow(config, entry.workflow, {
-        prompt: prompt || TEST_PROMPT,
-        filenamePrefix: 'lingximanju_test', cfg: config,
-      }, {
+      // 音频工作流用朗读文案 + 语言，图片 / 视频用画面提示词：
+      // 传错会让 TTS 工作流把画面描述当成要念的话，试跑结果不可信。
+      const vars = kind === 'audio'
+        ? { audioText: prompt || TEST_AUDIO_TEXT, language: 'zh-CN', filenamePrefix: 'lingximanju_test', cfg: config }
+        : { prompt: prompt || TEST_PROMPT, filenamePrefix: 'lingximanju_test', cfg: config };
+      const r = await runWorkflow(config, entry.workflow, vars, {
         bindings: config.bindings?.[kind] || [],
         signal: ac.signal,
         log: (lv, msg) => log(lv, `「${entry.name}」${msg}`, { entryId: entry.id }),
@@ -113,7 +116,7 @@ export async function handleComfy(req, res, url) {
   }
   if (pathname === '/api/comfyui/config' && method === 'PUT') {
     const body = await readBody(req);
-    for (const key of ['imageWorkflow', 'videoWorkflow']) {
+    for (const key of ['imageWorkflow', 'videoWorkflow', 'audioWorkflow']) {
       if (body[key] === '' || body[key] === null) body[key] = null;
       else if (body[key] !== undefined) body[key] = parseWorkflow(body[key], key);
     }
@@ -133,34 +136,40 @@ export async function handleComfy(req, res, url) {
   if (pathname === '/api/comfyui/analyze' && method === 'POST') {
     const body = await readBody(req);
     const config = loadComfyConfig();
+    const kind = kindOf(body.kind);
     // 不传 workflow 时按 kind 取「当前生效」的工作流，方便设置页直接自检
     const raw = body.workflow !== undefined
-      ? body.workflow : (body.kind ? config[`${body.kind}Workflow`] : null);
+      ? body.workflow : (body.kind ? config[`${kind}Workflow`] : null);
     if (!raw) return json(res, { error: '没有可分析的工作流，请先导入「导出(API)」工作流' }, 400), true;
     const wf = parseWorkflow(raw);
+    // 音频工作流走 TTS 语义的自检（朗读文案 + 说话人），图片 / 视频走提示词语义
+    const plan = kind === 'audio'
+      ? { audio: describeAudioWorkflow(wf, { audioText: body.prompt, language: 'zh-CN', cfg: config }, config.bindings?.audio || []) }
+      : { promptInjection: describeWorkflow(wf, { prompt: body.prompt, negative: config.negativePrompt, cfg: config }, config.bindings?.[kind] || []) };
     return json(res, {
+      kind,
       nodes: Object.keys(wf).length,
       detected: analyzeWorkflow(wf),
-      promptInjection: describeWorkflow(wf, {
-        prompt: body.prompt, negative: config.negativePrompt, cfg: config,
-      }, config.bindings?.[body.kind] || []),
+      ...plan,
     }), true;
   }
-  // 提示词注入自检：不连 ComfyUI，纯本地干跑，一次返回图片 / 视频两份工作流的注入计划
+  // 提示词注入自检：不连 ComfyUI，纯本地干跑，一次返回出图 / 视频 / 音色三份工作流的注入计划
   if (pathname === '/api/comfyui/inject-check' && method === 'POST') {
     const config = loadComfyConfig();
     const result = {};
-    for (const kind of ['image', 'video']) {
+    for (const kind of WORKFLOW_KINDS) {
       const raw = config[`${kind}Workflow`];
       if (!raw) { result[kind] = null; continue; }
       try {
-        result[kind] = {
-          name: config[`${kind}WorkflowName`] || '未命名工作流',
-          nodes: Object.keys(raw).length,
-          ...describeWorkflow(parseWorkflow(raw, `${kind} 工作流`), {
-            negative: config.negativePrompt, cfg: config,
-          }, config.bindings?.[kind] || []),
-        };
+        const base = { name: config[`${kind}WorkflowName`] || '未命名工作流', nodes: Object.keys(raw).length };
+        result[kind] = kind === 'audio'
+          ? { ...base, ...describeAudioWorkflow(parseWorkflow(raw, '音频 工作流'), { audioText: TEST_AUDIO_TEXT, language: 'zh-CN', cfg: config }, config.bindings?.audio || []) }
+          : {
+            ...base,
+            ...describeWorkflow(parseWorkflow(raw, `${kind} 工作流`), {
+              negative: config.negativePrompt, cfg: config,
+            }, config.bindings?.[kind] || []),
+          };
       } catch (err) {
         result[kind] = { ok: false, warnings: [`工作流解析失败：${err.message}`] };
       }
@@ -170,12 +179,12 @@ export async function handleComfy(req, res, url) {
   if (pathname === '/api/comfyui/run-test' && method === 'POST') {
     const body = await readBody(req);
     const config = loadComfyConfig();
-    const kind = body.kind === 'video' ? 'video' : 'image';
+    const kind = kindOf(body.kind);
     const wf = parseWorkflow(body.workflow || config[`${kind}Workflow`], `${kind} 工作流`);
-    const result = await runWorkflow(config, wf, {
-      prompt: body.prompt || 'cinematic test shot, consistent character, soft light',
-      filenamePrefix: 'lingximanju_test', cfg: config,
-    }, { bindings: config.bindings?.[kind] || [] });
+    const vars = kind === 'audio'
+      ? { audioText: body.prompt || TEST_AUDIO_TEXT, language: 'zh-CN', filenamePrefix: 'lingximanju_test', cfg: config }
+      : { prompt: body.prompt || TEST_PROMPT, filenamePrefix: 'lingximanju_test', cfg: config };
+    const result = await runWorkflow(config, wf, vars, { bindings: config.bindings?.[kind] || [] });
     return json(res, {
       ok: true, promptId: result.promptId, durationMs: result.durationMs,
       applied: result.applied, assets: result.assets, promptInjection: result.promptInjection,
@@ -185,7 +194,7 @@ export async function handleComfy(req, res, url) {
   // ---------- 工作流库：批量导入 / 切换选中 / 重命名 / 删除 ----------
   if (pathname === '/api/comfyui/library' && method === 'POST') {
     const body = await readBody(req);
-    const kind = body.kind === 'video' ? 'video' : 'image';
+    const kind = kindOf(body.kind);
     const items = Array.isArray(body.items) ? body.items : [];
     if (!items.length) return json(res, { error: '没有可导入的工作流' }, 400), true;
     const { added, failed, lib } = addLibraryItems(loadComfyConfig(), kind, items);
@@ -195,7 +204,7 @@ export async function handleComfy(req, res, url) {
   }
   if (pathname === '/api/comfyui/library' && method === 'PUT') {
     const body = await readBody(req);
-    const kind = body.kind === 'video' ? 'video' : 'image';
+    const kind = kindOf(body.kind);
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     const cfg0 = loadComfyConfig();
     if (name) {
@@ -215,7 +224,7 @@ export async function handleComfy(req, res, url) {
   }
   const libHit = pathname.match(MATCH.libItem);
   if (libHit && method === 'DELETE') {
-    const kind = libHit[1];
+    const kind = kindOf(libHit[1]);
     const id = decodeURIComponent(libHit[2]);
     const cfg = loadComfyConfig();
     const libKey = `${kind}WorkflowLib`;
@@ -231,7 +240,7 @@ export async function handleComfy(req, res, url) {
   // ---------- 单个库项独立试跑：设置页每行「▶ 测试」 ----------
   if (pathname === '/api/comfyui/test-one' && method === 'POST') {
     const body = await readBody(req);
-    const kind = body.kind === 'video' ? 'video' : 'image';
+    const kind = kindOf(body.kind);
     const config = loadComfyConfig();
     const entry = (config[`${kind}WorkflowLib`] || []).find((e) => e.id === body.id);
     if (!entry) return json(res, { error: '库项不存在' }, 404), true;
@@ -250,7 +259,7 @@ export async function handleComfy(req, res, url) {
   // ---------- 批量串行试跑：设置页「▶ 测试全部」 ----------
   if (pathname === '/api/comfyui/test-batch' && method === 'POST') {
     const body = await readBody(req);
-    const kind = body.kind === 'video' ? 'video' : 'image';
+    const kind = kindOf(body.kind);
     const config = loadComfyConfig();
     const lib = config[`${kind}WorkflowLib`] || [];
     const ids = (Array.isArray(body.ids) ? body.ids : []).filter((id) => lib.some((e) => e.id === id));

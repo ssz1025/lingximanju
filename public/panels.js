@@ -1,5 +1,6 @@
 // 检查器、对话、设置、弹窗、右键菜单、Toast 等 UI 组件
 import { NODE_TYPES, typeOf, STATUS_LABEL, previewHTML } from './nodes.js';
+import { showPage } from './page.js';
 import { $, esc, fmt } from './utils.js';
 
 
@@ -137,6 +138,18 @@ export async function openSettings(project, onSave) {
       </div>
 
       <div class="cf-section">
+        <h4>音色工作流库（抽卡 TTS / 语音克隆）<span class="wf-badge none" id="cf-audio-badge">可选</span></h4>
+        <div class="cf-note">导入一份 TTS 工作流（导出(API) 格式），角色页的「🎲 抽卡音色」就会用它真实跑 N 次，产出可试听的音频候选。
+          程序会沿连线找说话人字段（voice / speaker / voice_id）与朗读文案字段并注入；没找到说话人字段时靠种子采样差异。
+          <b>未配置也能用</b>：音色库里的预设音色照常可分配与试听，只是没有真实音频样本。</div>
+        <div class="cf-row" style="margin-top:9px">
+          <button class="btn" id="cf-import-audio" type="button">⇧ 导入 JSON</button>
+          <button class="btn" id="cf-testall-audio" type="button">▶ 测试全部</button>
+        </div>
+        <div class="wf-lib" id="cf-lib-audio"></div>
+      </div>
+
+      <div class="cf-section">
         <h4>提示词注入自检 <span id="cf-inject-badge" class="wf-badge none">未检查</span></h4>
         <div class="cf-note">检查每个镜头 / 封面的提示词是否真的写进了工作流。若显示「未找到注入点」，所有镜头都会沿用工作流里写死的那句提示词，生成的图片会高度雷同。自检只做本地干跑，不调用 ComfyUI。</div>
         <div class="cf-row" style="margin-top:9px">
@@ -176,7 +189,7 @@ export async function openSettings(project, onSave) {
 
     <div id="cf-result" class="cf-result" hidden></div>`;
 
-  const modal = showModal({
+  const modal = showPage({
     title: project ? `「${project.name || '未命名项目'}」· 模型与运行设置` : '模型、ComfyUI 与最终产物设置',
     sub: project
       ? '本项目的运行参数随项目单独保存；模型库与 ComfyUI 连接是应用级共享配置。所有数据只写入本地 data/ 目录。'
@@ -397,16 +410,34 @@ export async function openSettings(project, onSave) {
     injectBox.textContent = '检查中…';
     try {
       const d = await postJSON('/api/comfyui/inject-check', {});
-      injectBox.innerHTML = injectLine('出图', d.image) + injectLine('视频', d.video);
-      const configured = [d.image, d.video].filter(Boolean);
+      injectBox.innerHTML = injectLine('出图', d.image) + injectLine('视频', d.video) + injectAudioLine(d.audio);
+      const configured = [d.image, d.video, d.audio].filter(Boolean);
       const bad = configured.some((p) => !p.ok);
       injectBadge.className = `wf-badge ${!configured.length ? 'none' : bad ? 'err' : 'ok'}`;
       injectBadge.textContent = !configured.length ? '未配置' : bad ? '✕ 有风险' : '✓ 正常';
+      const audioBadge = root.querySelector('#cf-audio-badge');
+      if (audioBadge) {
+        audioBadge.className = `wf-badge ${d.audio ? (d.audio.ok ? 'ok' : 'err') : 'none'}`;
+        audioBadge.textContent = d.audio ? (d.audio.ok ? '✓ 抽卡就绪' : '✕ 有风险') : '可选';
+        audioBadge.title = d.audio ? (d.audio.warnings || []).join('；') : '未导入音频工作流：抽卡不可用，预设音色仍可分配';
+      }
     } catch (err) {
       injectBox.innerHTML = `<b class="err">✕ 自检失败</b> ${esc(err.message)}`;
       injectBadge.className = 'wf-badge err';
       injectBadge.textContent = '✕ 失败';
     }
+  };
+  /* 音频自检用另一套语义：TTS 工作流没有「正向提示词」，看的是朗读文案与说话人写到哪 */
+  const injectAudioLine = (p) => {
+    if (!p) {
+      return `<div style="margin-bottom:7px"><b>音色抽卡</b> · 未导入音频工作流，抽卡不可用（预设音色仍可分配与试听）</div>`;
+    }
+    const warns = p.warnings?.length ? `<br><span class="cf-note">⚠ ${esc(p.warnings.join('；'))}</span>` : '';
+    const t = p.text ? `<code>${esc(p.text.node)}.${esc(p.text.input)}</code> · ${esc(p.text.strategy)}` : '未找到朗读文案注入点';
+    const v = p.voice ? ` · 说话人 → <code>${esc(p.voice.node)}.${esc(p.voice.input)}</code>` : ' · 无说话人字段（靠种子采样差异）';
+    const out = p.audioNodes?.length ? ` · 音频输出 ${p.audioNodes.length} 个` : ' · <b class="err">无音频输出节点</b>';
+    return `<div style="margin-bottom:7px"><b class="${p.ok ? 'ok' : 'err'}">${p.ok ? '✓' : '✕'} 音色抽卡</b> · ${esc(p.name || '')}（${p.nodes || 0} 节点）
+      <br>朗读文案 → ${t}${v}${out}${warns}</div>`;
   };
   root.querySelector('#cf-inject-check').addEventListener('click', runInjectCheck);
   runInjectCheck();
@@ -444,7 +475,7 @@ export async function openSettings(project, onSave) {
   };
 
   const applyConfig = (d) => {
-    if (d?.config) { cfg = d.config; renderLib('image'); renderLib('video'); }
+    if (d?.config) { cfg = d.config; renderLib('image'); renderLib('video'); renderLib('audio'); }
   };
 
   const deleteItem = async (kind, entry, isActive) => {
@@ -570,6 +601,11 @@ export async function openSettings(project, onSave) {
     const neg = plan.negative ? ` · 负向 → <code>${esc(plan.negative.node)}.${esc(plan.negative.input)}</code>` : '';
     const warns = Array.isArray(plan.warnings) && plan.warnings.length
       ? `<div class="cf-note">⚠ ${esc(plan.warnings.join('；'))}</div>` : '';
+    const audioAssets = Array.isArray(r.assets) ? r.assets : [];
+    // 音频工作流的产物是 mp3/wav：用 <audio controls> 而不是缩略图，否则抽卡「成功」却听不到
+    const audioClips = audioAssets.filter((a) => a.kind === 'audio').slice(0, 3)
+      .map((a) => `<div class="wf-audio"><audio src="${esc(a.url)}" controls preload="metadata"></audio>
+        <span class="cf-note">${esc(a.filename || '')}${a.bytes ? ` · ${Math.round(a.bytes / 1024)} KB` : ''}</span></div>`).join('');
     const assets = Array.isArray(r.assets) ? r.assets : [];
     const thumbs = assets.filter((a) => a.kind === 'image' || a.kind === 'video').slice(0, 3)
       .map((a) => `<a class="wf-thumb" href="${esc(a.url)}" target="_blank" rel="noopener" title="${esc(a.filename || '')}">${
@@ -580,7 +616,8 @@ export async function openSettings(project, onSave) {
     return `${headLine}
       <div class="wf-one-meta">prompt_id <code>${esc(r.promptId || '—')}</code> · 产物 ${assets.length} 个 · 注入 ${Number(r.applied) || 0} 处参数</div>
       <div class="wf-one-meta">提示词 → ${where}${neg}</div>${warns}
-      ${thumbs ? `<div class="wf-thumbs">${thumbs}<span class="cf-note">点击缩略图可打开原图 / 原视频</span></div>` : '<div class="cf-note">本次没有可预览的图片或视频产物。</div>'}
+      ${audioClips ? `<div class="wf-audios">${audioClips}<span class="cf-note">可直接播放：这段音频就是抽卡会产出的东西</span></div>` : ''}
+      ${thumbs ? `<div class="wf-thumbs">${thumbs}<span class="cf-note">点击缩略图可打开原图 / 原视频</span></div>` : (audioClips ? '' : '<div class="cf-note">本次没有可预览的图片或视频产物。</div>')}
       <div class="cf-note">结果已写入该行的「上次试跑」徽标；点「▶ 测试」可随时重跑。</div>`;
   };
 
@@ -592,7 +629,7 @@ export async function openSettings(project, onSave) {
     if (testBusy) { toast('已有试跑在进行中，请等待当前任务完成', ''); return; }
     testBusy = true;
     const one = opts.single || null;
-    const allBtns = ['image', 'video']
+    const allBtns = ['image', 'video', 'audio']
       .map((k) => root.querySelector(`#cf-testall-${k}`)).filter(Boolean);
     allBtns.forEach((b) => { b.disabled = true; });
     ids.forEach((id) => testing.add(id));
@@ -686,11 +723,11 @@ export async function openSettings(project, onSave) {
     input.click();
   };
 
-  for (const kind of ['image', 'video']) {
+  for (const kind of ['image', 'video', 'audio']) {
     setupLib(kind);
     renderLib(kind);
-    root.querySelector(`#cf-import-${kind}`).addEventListener('click', () => importLib(kind));
-    root.querySelector(`#cf-testall-${kind}`).addEventListener('click', () =>
+    root.querySelector(`#cf-import-${kind}`)?.addEventListener('click', () => importLib(kind));
+    root.querySelector(`#cf-testall-${kind}`)?.addEventListener('click', () =>
       testBatch(kind, (cfg[libKey(kind)] || []).map((e) => e.id)));
   }
 }
@@ -743,12 +780,13 @@ export function openHelp(project = null) {
       ['V', '本项目工作台 ⇄ 画布视图'],
       ['S', '执行本项目下一步任务'],
       ['P', '打开本项目管理面板（分集 / 产物 / 快照）'],
-      ['H 或 ✕', '关闭本项目，返回项目列表'],
+      ['右上角「⇦ 退出项目」', '退出本项目，返回项目列表（两处出口之一）'],
+      ['项目设置 → 退出项目', '退出本项目，返回项目列表（两处出口之一）'],
       ['N', '新建创作项目（在项目列表页也可使用）'],
       ['◐ / T', '切换外观主题'],
       ['?', '打开本项目操作指引'],
       ['左侧「项目资源」', `只显示「${project.name || '本项目'}」的资源，可筛选 / 预览 / 进资源库`],
-      ['左侧「项目设置」', '项目信息 / 创作设定 / 角色 / 封面 / 运行参数 / 导出'],
+      ['左侧「项目设置」', '项目信息 / 创作设定 / 角色 / 封面 / 运行参数 / 导出 / 退出项目'],
       ...canvasRows,
     ];
     title = `「${project.name || '未命名项目'}」· 操作指引`;
@@ -760,7 +798,7 @@ export function openHelp(project = null) {
       ...canvasRows,
     ];
   }
-  showModal({ title, sub,
+  showPage({ title, sub,
     body: `<div class="help-grid">${rows.map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('')}</div>`,
     actions: [{ label: '知道了', primary: true }] });
 }
@@ -771,7 +809,7 @@ export function openAssetPreview(url, title = '资产预览') {
   const media = isVideo
     ? `<video src="${esc(url)}" controls autoplay loop style="width:100%;border-radius:10px;border:1px solid var(--border)"></video>`
     : `<img src="${esc(url)}" style="width:100%;border-radius:10px;border:1px solid var(--border)">`;
-  showModal({ title, sub: 'Mock 模式下的画面由本地自绘 SVG 生成；接入真实图像模型后会替换为模型输出。',
+  showPage({ title, sub: 'Mock 模式下的画面由本地自绘 SVG 生成；接入真实图像模型后会替换为模型输出。',
     body: media,
     actions: [{ label: '关闭', primary: true }] });
 }

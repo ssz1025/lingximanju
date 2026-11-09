@@ -427,7 +427,9 @@ test('createManagement 初始化角色库，ensureManagement 为老项目补齐�
   assert.equal(m.characters.length, 1);
   assert.ok(m.characters[0].id);
   assert.deepEqual(m.characters[0].palette, ['#112233']);
-  assert.deepEqual(m.characters[0].views, { front: null, side: null, back: null });
+  assert.deepEqual(m.characters[0].views, {
+    front: null, threeQuarter: null, side: null, back: null, closeup: null,
+  });
 });
 
 test('applyManageAction char-upsert：新增 / 更新 / 校验', () => {

@@ -11,53 +11,27 @@ import { resolveComfyConfig } from '../../core/comfy-config.mjs';
 import { parseWorkflow, runWorkflow } from '../../core/comfyui.mjs';
 import { executeSteps, broadcastMeta } from '../../core/step-runner.mjs';
 import { createProviders } from '../../core/providers.mjs';
-import { extractCharacters } from '../../core/novel.mjs';
-import { CHARACTER_VIEWS, buildExtractVars, buildViewPrompt, mergeExtracted, verifyEvidence } from '../../core/characters.mjs';
-// 封面智能体（agents 统一目录）：提示词构建 / 参考图解析 / 对话编排都在那里
+import { mergeExtracted } from '../../core/characters.mjs';
+// 角色定妆业务层：路由只是薄壳，路由 / 智能体 / 导演能力共用同一口径
+import {
+  generateCharacterView, generateCharacterSheet, ensureCharacterPortraits,
+  characterReadyForVideo, emitPortraitProgress,
+} from '../../core/character-portrait.mjs';
+// 角色提取 / 封面智能体（agents 统一目录）：业务 Agent 与路由解耦，画布节点复用同一函数
+import { extractProjectCharacters } from '../../agents/character-agent.mjs';
 import { designCoverPrompt, MAX_COVER_REFS, parseImagePayload, resolveChatRefs, coverChat } from '../../agents/cover-agent.mjs';
 import { resolveModelSettings } from '../../core/app-settings.mjs';
 
 /**
- * 生成单个角色的某个视图，并写回 management.characters + 资源库。
- * 单视图端点与「一键生成全部角色」共用，保证两条路径字段口径完全一致。
+ * 单视图生成的内联实现已抽到 core/character-portrait.mjs。
+ * 保留此薄封装只为兼容旧调用点，逻辑与业务层完全一致（不维护第二套口径）。
  */
-async function generateCharacterView(project, m, character, viewKey, modelId = '') {
-  const view = CHARACTER_VIEWS.find((v) => v.key === viewKey);
-  if (!view) throw new Error('视图必须是 front / side / back');
-  const prompt = buildViewPrompt(character, view.key, {
-    style: m.bible?.stylePrompt || project.settings?.style || '',
-    negative: m.bible?.negativePrompt || '',
+async function generateView(project, m, character, viewKey, modelId = '') {
+  const out = await generateCharacterView({
+    project, m, character, viewKey, modelId,
+    log: (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }),
   });
-  const providers = createProviders(resolveModelSettings(project, modelId),
-    (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }));
-  // 论文对齐（ViMax CharacterPortraitsGenerator）：侧面/背面以正面定妆图为参考图，
-  // 保证同一人物的脸型/发型/服装/配饰完全一致；正面图缺失时退化为纯文本描述
-  const frontUrl = character.views?.front?.url || '';
-  const refs = view.key === 'front' || !frontUrl ? [] : [frontUrl];
-  if (view.key !== 'front' && !frontUrl) {
-    emit('log', { projectId: project.id, level: 'warn', message: `角色多视图 · ${character.name} 缺正面定妆图，${view.label}将仅依据文字特征生成` });
-  }
-  const img = await providers.image({
-    kind: 'character-view', view: view.key,
-    label: `${character.name}·${view.label}`,
-    prompt, palette: character.palette,
-    style: project.settings?.style || 'cinematic',
-    seed: `${project.id}-${character.id}-${view.key}`,
-    refs,
-  });
-  const file = String(img.url || '').split('/').pop();
-  registerAsset({
-    file, kind: 'character', name: `${character.name}·${view.label}`,
-    tags: ['角色', character.name, view.label, ...character.aliases].filter(Boolean),
-    sourceProjectId: project.id, sourceProjectName: project.name,
-  });
-  character.views = {
-    front: null, side: null, back: null, ...character.views,
-    [view.key]: { file, url: img.url, prompt, provider: img.provider, at: Date.now() },
-  };
-  character.updatedAt = Date.now();
-  m.updatedAt = Date.now();
-  return { view: view.key, url: img.url, provider: img.provider, character };
+  return out;
 }
 
 export async function handleManagement(req, res, url) {
@@ -318,45 +292,27 @@ export async function handleManagement(req, res, url) {
     const m = ensureManagement(project);
     if (!m.source?.text) return json(res, { error: '尚未上传小说，无法提取角色' }, 400), true;
     const body = await readBody(req);
-    const limit = Math.max(1, Math.min(8, Number(body.limit) || 8));
-    const heuristic = () => extractCharacters(m.source.text, limit);
-    let extracted = [];
-    let fellBack = false;
-    let message = '';
-    if (body.mode === 'heuristic') {
-      extracted = heuristic();
-      message = `启发式提取到 ${extracted.length} 位候选角色`;
-    } else {
-      try {
-        const providers = createProviders(resolveModelSettings(project, body.modelId), (level, msg) => emit('log', { projectId: id, level, message: `角色提取 · ${msg}` }));
-        // 论文式(6)：全书分块 → BM25 召回 + 候选名原文定位 → 原文证据喂给模型
-        const vars = buildExtractVars(project, m, limit);
-        emit('log', { projectId: id, level: 'info', message: `角色提取 · 召回 ${vars.fragments.length} 段原著片段（候选 ${vars.candidates.length} 位）` });
-        const out = await providers.generate('charExtract', vars);
-        if (out?.__fallback || !Array.isArray(out?.characters) || !out.characters.length) throw new Error('模型未返回有效角色');
-        extracted = out.characters;
-        // 证据校验：引用必须能在原著原文里逐字定位，定位不到即视为幻觉引用并丢弃
-        const checked = verifyEvidence(extracted, m.source.text);
-        extracted = checked.characters;
-        if (checked.dropped) {
-          emit('log', { projectId: id, level: 'info', message: `角色提取 · 证据校验：${checked.verified} 条引用有效，${checked.dropped} 条无法在原著中定位已丢弃` });
-        }
-        message = `LLM 提取到 ${extracted.length} 位角色`;
-      } catch (err) {
-        // LLM 不可用/失败自动落回启发式，响应里明示，避免假成功
-        extracted = heuristic();
-        fellBack = true;
-        message = `LLM 提取失败（${err.message}），已回退启发式提取 ${extracted.length} 位候选`;
-      }
-    }
-    const source = (fellBack || body.mode === 'heuristic') ? 'heuristic' : 'llm';
-    const merged = mergeExtracted(m.characters, extracted, { source });
+    // 提取逻辑统一走角色提取智能体：路由只负责读请求 → 落盘 → 广播
+    const result = await extractProjectCharacters({
+      project, m,
+      mode: body.mode,
+      limit: body.limit,
+      modelId: body.modelId,
+      log: (level, msg) => emit('log', { projectId: id, level, message: msg }),
+    });
+    if (!result.ok) return json(res, { error: result.error }, 400), true;
+    const merged = mergeExtracted(m.characters, result.extracted, { source: result.source });
     const out = applyManageAction(project, 'characters', merged.characters);
     if (!out.ok) return json(res, out, 400), true;
     saveProject(project);
     broadcastMeta(project);
     emit('state', { projectId: id, project, reason: 'characters' });
-    return json(res, { ok: true, characters: m.characters, added: merged.added, merged: merged.merged, fellBack, message }), true;
+    return json(res, {
+      ok: true, characters: m.characters,
+      added: merged.added, merged: merged.merged,
+      fellBack: result.fellBack, message: result.message,
+      source: result.source, stats: result.stats,
+    }), true;
   }
 
   const charViewsMatch = pathname.match(MATCH.charViews);
@@ -370,17 +326,38 @@ export async function handleManagement(req, res, url) {
     const character = (m.characters || []).find((c) => c.id === String(body.characterId || ''));
     if (!character) return json(res, { error: '角色不存在' }, 404), true;
     try {
-      const out = await generateCharacterView(project, m, character, String(body.view || ''), body.modelId);
+      // view 可传单视图 key，也可传 'sheet'（多视图并排定妆板）
+      if (String(body.view || '') === 'sheet') {
+        const out = await generateCharacterSheet({
+          project, m, character, modelId: body.modelId,
+          views: Array.isArray(body.views) && body.views.length ? body.views : null,
+          log: (level, msg) => emit('log', { projectId: id, level, message: `角色定妆板 · ${msg}` }),
+        });
+        saveProject(project);
+        broadcastMeta(project);
+        emit('state', { projectId: id, project, reason: 'characters' });
+        return json(res, {
+          ok: true, ...out, ready: characterReadyForVideo(character),
+          characters: m.characters,
+        }), true;
+      }
+      const out = await generateView(project, m, character, String(body.view || ''), body.modelId);
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'characters' });
-      return json(res, { ok: true, ...out }), true;
+      return json(res, {
+        ok: true, ...out, ready: characterReadyForVideo(character),
+        characters: m.characters,
+      }), true;
     } catch (err) {
       return json(res, { error: `角色多视图生成失败：${err.message}` }, 502), true;
     }
   }
 
-  /** 一键生成全部角色：默认每位角色生成「正面」定妆图，可选三视图；逐项落盘 + SSE 进度 */
+  /**
+   * 批量补全定妆：scope=core（正面/3-4 侧/侧面/背面）或 all（含面部特写）；
+   * includeSheet=true 时同时生成定妆板。逐张落盘 + SSE 进度，可断点续跑。
+   */
   const charViewsAllMatch = pathname.match(MATCH.charViewsAll);
   if (charViewsAllMatch) {
     if (method !== 'POST') return json(res, { error: '需要 POST' }, 405), true;
@@ -391,49 +368,46 @@ export async function handleManagement(req, res, url) {
     const body = await readBody(req);
     const all = m.characters || [];
     if (!all.length) return json(res, { error: '还没有角色：请先在「角色」页从原著提取或手动新增' }, 400), true;
-    const views = body.allViews === true
-      ? CHARACTER_VIEWS.map((v) => v.key)
-      : ['front'];
-    const onlyMissing = body.onlyMissing !== false;
-    const targets = onlyMissing
-      ? all.filter((c) => views.some((v) => !c.views?.[v]?.url))
-      : all;
-    if (!targets.length) return json(res, { ok: true, total: 0, generated: 0, failed: [], message: '所有角色定妆图都已生成' }), true;
 
-    const total = targets.length * views.length;
-    let done = 0;
-    let generated = 0;
-    const failed = [];
-    for (const c of targets) {
-      for (const key of views) {
-        if (onlyMissing && c.views?.[key]?.url) { done += 1; continue; }
-        emit('character:batch', {
-          projectId: id, done, total, characterId: c.id, name: c.name, view: key, status: 'running',
-        });
-        let lastOk = false;
-        try {
-          await generateCharacterView(project, m, c, key, body.modelId);
-          generated += 1;
-          lastOk = true;
-        } catch (err) {
-          failed.push(`${c.name}·${CHARACTER_VIEWS.find((v) => v.key === key)?.label || key}：${err.message}`);
-        }
-        done += 1;
-        // 每张都落盘：中途失败 / 关闭页面也不会丢已完成的定妆图
-        saveProject(project);
-        emit('character:batch', {
-          projectId: id, done, total, characterId: c.id, name: c.name, view: key,
-          status: lastOk ? 'done' : 'error',
-        });
-      }
+    // 兼容旧参数 allViews：true 等价 scope=core（含面部特写用 scope=all）
+    const scope = String(body.scope || (body.allViews === true ? 'core' : 'core'));
+    const onlyMissing = body.onlyMissing !== false;
+    const includeSheet = body.includeSheet === true || body.sheet === true;
+    try {
+      const out = await ensureCharacterPortraits({
+        project, m,
+        scope, onlyMissing, sheet: includeSheet,
+        characterIds: Array.isArray(body.characterIds) ? body.characterIds : null,
+        modelId: body.modelId,
+        save: () => saveProject(project),
+        log: (level, msg) => emit('log', { projectId: id, level, message: `角色定妆 · ${msg}` }),
+        onProgress: (evt) => emitPortraitProgress(id, evt),
+      });
+      broadcastMeta(project);
+      emit('state', { projectId: id, project, reason: 'characters' });
+      if (!out.ok && out.error) return json(res, { error: out.error, ...out }, 400), true;
+      // 与定妆智能体同一口径：面板需要「哪些角色已能进视频」与项目级完整度，
+      // 而不是自己去遍历 views —— 前端与后端只认一份判定。
+      const ready = Object.fromEntries((m.characters || []).map((c) => [c.id, characterReadyForVideo(c)]));
+      const readyList = Object.values(ready);
+      const blocked = (m.characters || []).filter((c) => !ready[c.id]?.ok).map((c) => c.name);
+      return json(res, {
+        ok: true, ...out,
+        characters: m.characters,
+        ready,
+        portraitStatus: out.status,
+        videoReady: {
+          total: readyList.length,
+          ready: readyList.filter((r) => r.ok).length,
+          blocked,
+          label: blocked.length
+            ? `${blocked.length} 位角色还不可进视频（${blocked.slice(0, 3).join('、')}${blocked.length > 3 ? ' 等' : ''}）`
+            : `${readyList.length} 位角色均可进入视频生成`,
+        },
+      }), true;
+    } catch (err) {
+      return json(res, { error: `批量定妆失败：${err.message}` }, 502), true;
     }
-    broadcastMeta(project);
-    emit('state', { projectId: id, project, reason: 'characters' });
-    return json(res, {
-      ok: true, total: targets.length, generated, failed,
-      characters: m.characters,
-      message: `一键生成完成：${targets.length} 位角色 · 成功 ${generated} 张${failed.length ? ` · 失败 ${failed.length} 张` : ''}`,
-    }), true;
   }
 
   // ---------- AI 生成小说：大纲预览 / 整本生成并注入（等价于上传小说，完成 ①② 步） ----------

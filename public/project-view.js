@@ -14,6 +14,7 @@ import { ensureModelPicker, withModelId } from './model-picker.js';
 import * as SV from './source-view.js';
 import * as PMODEL from './project-model.js';
 import { collectProjectAssets } from './project-sidebar.js';
+import { directorPanelHTML, directorReportHTML } from './director-panel.js';
 import { $, esc, cut } from './utils.js';
 
 
@@ -37,6 +38,19 @@ const ROADMAP = {
   storyboard: { name: '分镜与画面', hint: '关键帧 · 择优 · 视频片段', icon: '⌗' },
   deliver: { name: '成片交付', hint: '成片视频 / 导演包', icon: '✦' },
 };
+
+/** 工作台步骤清单（单页顺序展示）：① 设置基础信息 + 现有 6 步，第一项固定为基础信息。
+ *  底层仍走 project-steps.mjs 的 STEPS 状态机（除 basic 步骤外）。 */
+const WORKSHOP_STEPS = [
+  { id: 'basic', name: '设置基础信息', icon: '⚙', desc: '项目名 · 简介 · 类型 · 画面风格 · 画幅 · 交付形式', auto: true },
+  { id: 'upload', name: '准备故事', icon: '⇧', desc: '上传小说，或让 AI 按构想生成' },
+  { id: 'episodes', name: '分集拆解', icon: '▥', desc: '把长篇切成可拍摄的集' },
+  { id: 'script', name: '剧本创作', icon: '▤', desc: '分集梗概写成统一格式剧本' },
+  { id: 'context', name: '角色与上下文', icon: '⑂', desc: '提取角色 · 原著索引 · 层次分解' },
+  { id: 'storyboard', name: '分镜与画面', icon: '⌗', desc: '关键帧 · 择优 · 视频片段' },
+  { id: 'deliver', name: '成片交付', icon: '✦', desc: '成片视频 / 导演包' },
+];
+
 const STATUS_TEXT = { pending: '待执行', running: '进行中', done: '已完成', error: '失败 · 可重试', skipped: '已跳过' };
 const STYLES = ['cinematic', 'noir', 'anime', 'watercolor'];
 const STYLE_NAMES = { cinematic: '电影感', noir: '黑色电影', anime: '日系动画', watercolor: '水彩' };
@@ -55,15 +69,29 @@ const TABS = [
 ];
 const ASSET_KIND_LABEL = { cover: '封面', character: '角色', image: '图片', video: '视频', pack: '导演包', other: '其他' };
 
+/** 「制作步骤」导航的展开 / 收起偏好：跨项目、跨刷新保留 */
+const NAV_STATE_KEY = 'lxmj.workshop.navCollapsed';
+function readNavPref() {
+  try { return localStorage.getItem(NAV_STATE_KEY) === '1'; } catch { return false; }
+}
+function writeNavPref(collapsed) {
+  try { localStorage.setItem(NAV_STATE_KEY, collapsed ? '1' : '0'); } catch { /* 隐私模式下忽略 */ }
+}
+
 /* 工作台 UI 状态（跨渲染保留：AI 大纲草稿、上传草稿、项目信息编辑稿） */
 const ui = {
   projectId: null,
   tab: 'overview',
   stepId: null,
+  sourceOpen: false,              // 步骤②「查看原著与统计」折叠状态
+  navCollapsed: readNavPref(),    // 制作步骤导航：收起为悬浮胶囊 / 展开为悬浮浮层
+  scrollTo: null,                 // 导航点击后滚动锚点（渲染后消费并清空）
   info: {},                       // 项目信息编辑稿（bible 字段）
   skipCapture: false,             // AI 补全等服务端改写场景：跳过一次 DOM 捕获，避免旧输入框值盖回新数据
   upload: { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 },
   ai: { open: false, idea: '', chapterCount: 3, chapterChars: 800, outline: null, source: '', message: '', busy: false, busyText: '' },
+  // 导演 Agent：技能选择、一句话构想、SSE 阶段进度（busy 由 app.js 的 state.directorBusy 统一持有）
+  director: { skillId: null, paletteKey: null, idea: '', progress: null },
 };
 
 function resetUi(p) {
@@ -71,9 +99,12 @@ function resetUi(p) {
   ui.projectId = p.id;
   ui.tab = 'overview';
   ui.stepId = null;
+  ui.sourceOpen = false;
+  ui.scrollTo = null;
   ui.info = {};
   ui.upload = { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 };
   ui.ai = { open: false, idea: String(m.bible?.logline || ''), chapterCount: 3, chapterChars: 800, outline: null, source: '', message: '', busy: false, busyText: '' };
+  ui.director = { skillId: null, idea: '', progress: null };
 }
 
 /** 重绘前把用户正在编辑的 DOM 值收进 ui，避免 SSE 刷新吃掉输入 */
@@ -94,6 +125,9 @@ function captureState(host) {
     if (t) ui.ai.outline.title = t.value;
   }
   host.querySelectorAll('[data-bi]').forEach((el) => { ui.info[el.dataset.bi] = el.value; });
+  // 导演面板：一句话构想也要在 SSE 触发的重绘里保住
+  const dirIdea = q('#pv-dir-idea');
+  if (dirIdea) ui.director.idea = dirIdea.value;
 }
 
 const fmtTok = (n) => (Number(n) || 0) >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Number(n) || 0);
@@ -161,9 +195,20 @@ function resourceCardHTML(p, m, stats) {
       <div><b>${stats.videoCount ?? p.nodes.filter((n) => n.type === 'video').length}</b><span>片段</span></div>
     </div>
     ${chars.length ? `<div class="pv-res-chars">${chars.slice(0, 5).map((c) => {
-      const img = c.views?.front?.url;
-      return `<span class="pv-char-chip" title="${esc(c.role || c.name)}">${img ? `<img src="${esc(img)}" alt="">` : '<i></i>'}${esc(c.name)}</span>`;
-    }).join('')}${chars.length > 5 ? `<span class="pv-char-chip">+${chars.length - 5}</span>` : ''}</div>` : ''}
+    // 缩略图优先用正面（身份基准），缺正面时退到面部特写/3-4 侧，仍能看出是谁
+    const pick = c.views?.front?.url || c.views?.closeup?.url || c.views?.threeQuarter?.url || c.views?.side?.url || '';
+    const ready = Boolean(c.views?.front?.url);
+    return `<span class="pv-char-chip ${ready ? '' : 'warn'}" title="${esc(c.role || c.name)}${ready ? ' · 已有正面定妆，可用于视频' : ' · 缺正面定妆图，暂不可进视频'}">${pick ? `<img src="${esc(pick)}" alt="">` : '<i></i>'}${esc(c.name)}</span>`;
+  }).join('')}${chars.length > 5 ? `<span class="pv-char-chip">+${chars.length - 5}</span>` : ''}</div>` : ''}
+    ${chars.length ? (() => {
+    const readyCount = chars.filter((c) => c.views?.front?.url).length;
+    const sheetCount = chars.filter((c) => c.sheet?.url).length;
+    // 视图张数按 5 视图口径统计，让「定妆到底齐不齐」在资源卡上就能看出来
+    const viewTotal = chars.length * 5;
+    const viewDone = chars.reduce((n, c) => n
+      + ['front', 'threeQuarter', 'side', 'back', 'closeup'].filter((k) => c.views?.[k]?.url).length, 0);
+    return `<div class="pv-res-note">${readyCount}/${chars.length} 位角色可进视频 · ${viewDone}/${viewTotal} 张视图 · ${sheetCount} 张定妆板${readyCount < chars.length ? ' · 点「角色管理」可一键补全' : ''}</div>`;
+  })() : ''}
     <div class="pv-res-acts">
       <button class="btn sm" data-act="assets">▣ 资源库</button>
       <button class="btn sm" data-act="chars">👤 角色管理</button>
@@ -303,7 +348,7 @@ function uploadConsoleHTML(m) {
 function episodesConsoleHTML(m, st, busy) {
   const has = !!m.source?.text;
   const sp = m.split || { strategy: 'chapter', targetChars: 1200, maxEpisodes: 4 };
-  if (!has) return `<div class="pv-hint">先在第 ① 步上传或生成小说，再回来调整分集。</div>`;
+  if (!has) return `<div class="pv-hint">先在第 ② 步上传或生成小说，再回来调整分集。</div>`;
   return `<div class="pv-split">
     <div class="pv-split-cards">${SPLIT_STRATEGIES.map((s) => `
       <button class="pv-split-card ${sp.strategy === s.id ? 'selected' : ''}" data-split="${s.id}">
@@ -339,7 +384,7 @@ function contextConsoleHTML(p, m, st, busy) {
       <button class="btn sm" data-act="char-extract" data-mode="heuristic" ${!has || busy ? 'disabled' : ''}>⚙ 启发式提取</button>
       <button class="btn sm" data-act="chars">👤 角色管理（多视图定妆）</button>
     </div>
-    ${!has ? '<div class="pv-hint">先在第 ① 步准备故事，才能提取角色。</div>' : ''}
+    ${!has ? '<div class="pv-hint">先在第 ② 步准备故事，才能提取角色。</div>' : ''}
     ${chars.length ? `<div class="pv-char-list">${chars.map((c) => `
       <div class="pv-char-item">
         ${c.views?.front?.url ? `<img src="${esc(c.views.front.url)}" alt="">` : '<i class="pv-char-ph"></i>'}
@@ -531,6 +576,121 @@ function assetsHTML(p, ctx) {
 }
 
 /* ================================================================== 主渲染 */
+/** 步骤状态：basic 步骤本地计算（项目名/简介等是否已填），其余复用 STEPS 状态机 */
+function basicStatus(m) {
+  const b = m.bible || {};
+  return (b.logline || b.genre || b.tone || b.audience) ? 'done' : 'pending';
+}
+function stepStatus(m, id) {
+  if (id === 'basic') return basicStatus(m);
+  const s = (m.steps || []).find((x) => x.id === id);
+  return s?.status || 'pending';
+}
+
+/* ===== 制作步骤导航：展开为悬浮浮层，收起为悬浮胶囊（两态 DOM 同时存在，切换只改属性） ===== */
+function currentStepLabel(id) {
+  const i = WORKSHOP_STEPS.findIndex((s) => s.id === id);
+  const s = WORKSHOP_STEPS[i < 0 ? 0 : i];
+  return `${i < 0 ? 1 : i + 1} · ${s.name}`;
+}
+
+/** 侧边栏 1–N 步骤快捷导航：编号 + 名称 + 状态，点击滚动到对应步骤 */
+function navHTML(m, busy) {
+  const total = WORKSHOP_STEPS.length;
+  const done = WORKSHOP_STEPS.filter((s) => stepStatus(m, s.id) === 'done').length;
+  const current = (m.steps || []).find((s) => s.status === 'running') || (m.steps || []).find((s) => s.status === 'pending');
+  const expanded = String(!ui.navCollapsed);
+  return `<aside class="pv-nav" id="pv-nav" aria-label="制作步骤导航">
+    <div class="pv-nav-head">
+      <span class="pv-nav-title">🗺 制作步骤 <span class="pv-nav-count">${done}/${total}</span></span>
+      <button class="pv-nav-toggle" data-act="toggle-nav" aria-expanded="${expanded}" aria-controls="pv-nav-body"
+        title="${ui.navCollapsed ? '展开' : '收起'}制作步骤">${ui.navCollapsed ? '›' : '⟨'}</button>
+    </div>
+    <div class="pv-nav-body" id="pv-nav-body">
+      <div class="pv-nav-progress"><i style="width:${total ? Math.round(done / total * 100) : 0}%"></i></div>
+      <ol class="pv-nav-list" aria-label="制作步骤 ${total} 项">
+        ${WORKSHOP_STEPS.map((s, i) => {
+          const stt = stepStatus(m, s.id);
+          const isCur = current?.id === s.id && stt !== 'done';
+          const active = ui.stepId === s.id;
+          return `<li><button class="pv-nav-item st-${stt} ${active ? 'on' : ''}" data-step="${s.id}"
+            ${active ? 'aria-current="step"' : ''} title="${esc(s.name)} · ${STATUS_TEXT[stt] || stt}">
+            <span class="pv-nav-num">${stt === 'done' ? '✓' : i + 1}</span>
+            <span class="pv-nav-name">${esc(s.name)}</span>
+            ${isCur ? '<span class="pv-nav-now">下一步</span>' : ''}
+          </button></li>`;
+        }).join('')}
+      </ol>
+      <div class="pv-nav-foot">
+        <button class="btn primary sm block" data-act="run-next" ${busy || done === total ? 'disabled' : ''}>${busy ? '执行中…' : done === total ? '✓ 全部完成' : '▶ 执行下一步'}</button>
+        <button class="btn sm block" data-act="run-all" ${busy || done === total ? 'disabled' : ''}>⏩ 全部执行</button>
+      </div>
+    </div>
+  </aside>
+  <button class="pv-nav-fab" data-act="toggle-nav" aria-expanded="${expanded}" aria-controls="pv-nav-body"
+    title="展开制作步骤（悬浮导航）">
+    <span class="pv-fab-icon">🗺</span>
+    <span class="pv-fab-txt"><b>制作步骤</b><small data-fab-current>${esc(currentStepLabel(ui.stepId))}</small></span>
+    <span class="pv-fab-count" data-fab-count>${done}/${total}</span>
+    <span class="pv-fab-chev">›</span>
+  </button>`;
+}
+
+/** 悬浮坐标：以工作台可视区左上角为基准，跟随全局侧栏收起 / 窗口缩放 */
+function positionNav(host) {
+  const shell = host.querySelector('.pv-shell-steps');
+  if (!shell) return;
+  const r = host.getBoundingClientRect();
+  shell.style.setProperty('--pv-float-x', `${Math.max(8, Math.round(r.left + 12))}px`);
+  shell.style.setProperty('--pv-float-y', `${Math.max(8, Math.round(r.top + 8))}px`);
+}
+
+/** 胶囊上的「当前步骤 / 进度」与浮层保持同步（滚动联动时也会调用） */
+function updateFab(host) {
+  const cur = host.querySelector('[data-fab-current]');
+  if (cur) cur.textContent = currentStepLabel(ui.stepId);
+  const cnt = host.querySelector('[data-fab-count]');
+  const head = host.querySelector('.pv-nav-count');
+  if (cnt && head) cnt.textContent = head.textContent.trim();
+}
+
+/** 展开 / 收起：只改 data-nav 属性，不重建 DOM（不会丢失正在编辑的表单） */
+function setNavCollapsed(host, collapsed) {
+  ui.navCollapsed = !!collapsed;
+  writeNavPref(ui.navCollapsed);
+  const shell = host.querySelector('.pv-shell-steps');
+  if (shell) shell.dataset.nav = ui.navCollapsed ? 'collapsed' : 'expanded';
+  host.querySelectorAll('[data-act="toggle-nav"]').forEach((b) => {
+    b.setAttribute('aria-expanded', String(!ui.navCollapsed));
+    b.title = ui.navCollapsed ? '展开制作步骤（悬浮导航）' : '收起制作步骤';
+  });
+  const toggle = host.querySelector('.pv-nav-toggle');
+  if (toggle) toggle.textContent = ui.navCollapsed ? '›' : '⟨';
+  updateFab(host);
+  positionNav(host);
+}
+
+/** 单个步骤区块：编号 + 标题 + 状态 + 执行按钮 + 内容 */
+function stepSectionHTML(s, no, m, body, busy) {
+  const st = stepStatus(m, s.id);
+  return `<section class="pv-sstep ${ui.stepId === s.id ? 'pv-sstep-active' : ''}" id="step-${s.id}">
+    <div class="pv-sstep-head">
+      <span class="pv-sstep-num">${no}</span>
+      <div class="pv-sstep-tit"><strong>${no}. ${esc(s.name)}</strong><small>${esc(s.desc || '')}</small></div>
+      <span class="pv-pill st-${st}">${STATUS_TEXT[st] || st}</span>
+      ${s.auto ? '' : `<button class="btn primary sm" data-act="run-step" data-id="${s.id}" ${busy ? 'disabled' : ''}>${st === 'error' ? '↻ 重试本步' : st === 'done' ? '↻ 重新执行' : '▶ 执行本步'}</button>`}
+    </div>
+    <div class="pv-sstep-body">${body}</div>
+  </section>`;
+}
+
+/** 步骤② 准备故事：来源卡片 + 上传/AI 表单 + 可折叠原著阅读器 */
+function storyBodyHTML(m, ctx) {
+  const srcToggle = `<div class="pv-step-sub"><button class="btn sm" data-act="toggle-source" aria-expanded="${ui.sourceOpen}" aria-controls="pv-source-host">${ui.sourceOpen ? '▴ 收起原著与统计' : '📖 查看原著与统计'}</button></div>`;
+  const srcHost = ui.sourceOpen ? `<div id="pv-source-host" class="pv-source-host"></div>` : '';
+  return `${sourceCardHTML(m)}${uploadConsoleHTML(m)}${srcToggle}${srcHost}`;
+}
+
 export function renderProjectView(host, ctx = {}) {
   if (!host) return;
   if (ui.skipCapture) ui.skipCapture = false;
@@ -550,87 +710,145 @@ export function renderProjectView(host, ctx = {}) {
   }
   if (ui.projectId !== p.id) resetUi(p);
 
-  const steps = ctx.steps || [];
   const stats = ctx.stats || {};
   const busy = !!ctx.busy;
   const current = (m.steps || []).find((s) => s.status === 'running') || (m.steps || []).find((s) => s.status === 'pending');
-  if (!ui.stepId || !steps.some((s) => s.id === ui.stepId)) ui.stepId = current?.id || 'upload';
-  const def = steps.find((s) => s.id === ui.stepId) || steps[0] || { id: 'upload', no: 1 };
-  const st = stepStateOf(m, def.id);
+  if (!ui.stepId || !WORKSHOP_STEPS.some((s) => s.id === ui.stepId)) ui.stepId = 'basic';
 
-  let consoleBody = '';
-  if (def.id === 'upload') consoleBody = uploadConsoleHTML(m);
-  else if (def.id === 'episodes') consoleBody = episodesConsoleHTML(m, st, busy);
-  else if (def.id === 'script') consoleBody = scriptConsoleHTML(p, st);
-  else if (def.id === 'context') consoleBody = contextConsoleHTML(p, m, st, busy);
-  else if (def.id === 'storyboard') consoleBody = storyboardConsoleHTML(p, stats);
-  else if (def.id === 'deliver') consoleBody = deliverConsoleHTML(p, m, stats, busy);
+  // 各步骤内容（大面板按需求融入对应步骤）
+  // ① 项目信息后面接「导演 Agent 技能」：选策略 → 一键跑完全流程
+  const dirBusy = !!ctx.directorBusy || !!busy;
+  const dirPlan = ctx.directorPlan || {
+    warnings: !m.source?.text ? ['项目还没有原著：运行时会按一句话构想生成演示小说（未配置模型为内置模板）'] : [],
+  };
+  const basicBody = `${infoCardHTML(p, m)}${directorPanelHTML({
+    skills: ctx.directorSkills,
+    groups: ctx.directorSkillGroups,
+    skillId: ui.director.skillId || m.director?.skillId || 'full',
+    paletteKey: ui.director.paletteKey || m.director?.paletteKey || null,
+    busy: dirBusy, progress: ui.director.progress,
+    idea: ui.director.idea, plan: dirPlan, hasSource: !!m.source?.text,
+    runtime: ctx.runtime || m.runtime,
+  })}`;
+  const uploadBody = storyBodyHTML(m, ctx);
+  const episodesBody = `${episodesConsoleHTML(m, { status: stepStatus(m, 'episodes') }, busy)}${seasonsHTML(p, ctx)}${episodesListHTML(m)}${chapterMapHTML(m)}`;
+  const scriptBody = scriptConsoleHTML(p, { status: stepStatus(m, 'script') });
+  const contextBody = contextConsoleHTML(p, m, { status: stepStatus(m, 'context') }, busy);
+  const storyboardBody = storyboardConsoleHTML(p, stats);
+  // ⑦ 交付步骤顶部先给「最终产物验收报告」，再是交付设置与资源
+  const deliverBody = `${directorReportHTML({ report: m.director?.lastRun, busy: dirBusy })}`
+    + `${deliverConsoleHTML(p, m, stats, busy)}${resourceCardHTML(p, m, stats)}${assetsHTML(p, ctx)}`;
+  const bodies = { basic: basicBody, upload: uploadBody, episodes: episodesBody, script: scriptBody, context: contextBody, storyboard: storyboardBody, deliver: deliverBody };
 
-  const tab = TABS.some((t) => t.id === ui.tab) ? ui.tab : 'overview';
-  const hide = (id) => (tab === id ? '' : 'hidden');
-  host.innerHTML = `<div class="pv-shell">
-    ${tabsHTML(ctx)}
-    <div class="pv-panels">
-      <div class="pv-panel" data-panel="overview" ${hide('overview')}>
-        <div class="pv">
-          <aside class="pv-side">
-            ${roadmapHTML(m, steps, busy)}
-            ${sourceCardHTML(m)}
-          </aside>
-          <section class="pv-main">
-            ${infoCardHTML(p, m)}
-            <div class="pv-quick">
-              <button data-tab="source">📖 原著与统计</button>
-              <button data-tab="episodes">▥ 分季分集</button>
-              <button data-tab="assets">▣ 资源归纳</button>
-              <button data-act="open-overall">🌐 全部组合画布</button>
-            </div>
-            <div class="pv-card pv-console" id="pv-console">
-              ${consoleHeadHTML(def, st, busy)}
-              ${consoleBody}
-            </div>
-          </section>
-        </div>
-      </div>
-      <div class="pv-panel" data-panel="source" ${hide('source')}><div id="pv-source-host"></div></div>
-      <div class="pv-panel" data-panel="episodes" ${hide('episodes')}>
-        ${seasonsHTML(p, ctx)}
-        ${episodesListHTML(m)}
-        ${chapterMapHTML(m)}
-      </div>
-      <div class="pv-panel" data-panel="assets" ${hide('assets')}>
-        ${resourceCardHTML(p, m, stats)}
-        ${assetsHTML(p, ctx)}
-      </div>
-    </div>
+  host.innerHTML = `<div class="pv-shell pv-shell-steps" data-nav="${ui.navCollapsed ? 'collapsed' : 'expanded'}">
+    ${navHTML(m, busy)}
+    <main class="pv-ssteps" id="pv-steps">
+      ${WORKSHOP_STEPS.map((s, i) => stepSectionHTML(s, i + 1, m, bodies[s.id], busy)).join('')}
+    </main>
   </div>`;
-  // 原文阅读器只在「原著」Tab 挂载，避免把整本小说常驻在其它视图的 DOM 里
-  if (tab === 'source') {
-    const srcHost = host.querySelector('#pv-source-host');
-    if (srcHost) SV.renderSourceView(srcHost, {
-      project: p,
-      source: ctx.source || null,
-      toast: ctx.toast,
+
+  // 原著阅读器按需挂载（折叠时不在 DOM 内）
+  if (ui.sourceOpen) {
+    const sh = host.querySelector('#pv-source-host');
+    if (sh) SV.renderSourceView(sh, {
+      project: p, source: ctx.source || null, toast: ctx.toast,
       onOpenEpisode: (no) => ctx.onOpenEpisode?.(no),
       onReupload: () => ctx.onReupload?.(),
       onOpenAssets: () => ctx.onOpenAssets?.(),
     });
   }
-  bindEvents(host, ctx, { def, m });
+  // 导航后平滑滚动到目标步骤
+  if (ui.scrollTo) {
+    const el = host.querySelector(`#step-${ui.scrollTo}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    spyLockUntil = Date.now() + 1200;
+    ui.scrollTo = null;
+  }
+  bindEvents(host, ctx, { m });
+  // 每次渲染后重装滚动联动，先清旧监听避免累积
+  spyCleanup?.();
+  spyCleanup = installScrollSpy(host);
+  syncActive(host, ui.stepId);   // 同时对齐窄屏横向步骤条的滚动位置
+  positionNav(host);             // 浮层/胶囊以工作台可视区左上角定位
+  requestAnimationFrame(() => positionNav(host));  // 视图刚切换时 rect 可能为 0，下一帧校正
 }
 
-/** 顶栏「更多」/ 首页流程卡直达某个工作台 Tab */
+/** 顶栏「更多」/ 首页流程卡直达某个工作台 Tab（映射到步骤） */
 export function setWorkshopTab(id) {
-  if (!id || !TABS.some((t) => t.id === id)) return;
-  ui.tab = id;
+  const map = { overview: 'basic', source: 'upload', episodes: 'episodes', assets: 'deliver' };
+  const step = map[id] || 'basic';
+  ui.stepId = step; ui.scrollTo = step;
+}
+
+/* ===== 步骤高亮的轻量同步：滚动联动 / 点击导航都不重建 DOM ===== */
+let spyCleanup = null;
+let spyLockUntil = 0;
+
+/** 只切 class 与 aria-current，避免 rerender 重建 DOM 丢失用户正在编辑的表单 */
+function syncActive(host, id) {
+  host.querySelectorAll('.pv-nav-item').forEach((b) => {
+    const on = b.dataset.step === id;
+    b.classList.toggle('on', on);
+    if (on) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
+  });
+  host.querySelectorAll('.pv-sstep').forEach((s) => s.classList.toggle('pv-sstep-active', s.id === `step-${id}`));
+  updateFab(host);   // 收起态胶囊上的「当前步骤」跟随滚动联动
+  // 窄屏下步骤条是横向滚动的：把当前项滚进可视范围，避免被挤出屏幕（隐藏时跳过）
+  const list = host.querySelector('.pv-nav-list');
+  const btn = host.querySelector(`.pv-nav-item[data-step="${id}"]`);
+  if (list && btn && list.offsetWidth > 0 && getComputedStyle(list).flexDirection === 'row') {
+    const l = list.getBoundingClientRect(), r = btn.getBoundingClientRect();
+    if (r.left < l.left + 4) list.scrollLeft -= (l.left + 4 - r.left);
+    else if (r.right > l.right - 4) list.scrollLeft += (r.right - (l.right - 4));
+  }
+}
+
+/** 滚动联动：判断哪个步骤区块顶部已越过判定线，轻量切高亮（不触发 captureState/rerender） */
+function installScrollSpy(host) {
+  const sections = [...host.querySelectorAll('.pv-sstep')];
+  if (!sections.length) return () => {};
+  // 滚动容器优先取 host 自身（#project-view overflow:auto），否则向上找
+  let scroller = host;
+  while (scroller && scroller !== document.body && !['auto', 'scroll'].includes(getComputedStyle(scroller).overflowY)) {
+    scroller = scroller.parentElement;
+  }
+  scroller = (!scroller || scroller === document.body) ? window : scroller;
+  let raf = 0;
+  const update = () => {
+    raf = 0;
+    if (Date.now() < spyLockUntil) return;   // 点击导航后的平滑滚动期间锁定，避免高亮抖动
+    const base = (scroller === window ? 0 : scroller.getBoundingClientRect().top) + 120;
+    let activeId = sections[0].id;
+    for (const s of sections) if (s.getBoundingClientRect().top <= base) activeId = s.id;
+    // 滚到底部时强制高亮最后一步：末步区块较矮，顶部可能永远越不过判定线
+    if (scroller !== window && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8) {
+      activeId = sections[sections.length - 1].id;
+    }
+    const id = activeId.replace('step-', '');
+    if (id !== ui.stepId) { ui.stepId = id; syncActive(host, id); }
+  };
+  const onScroll = () => { if (!raf) raf = requestAnimationFrame(update); };
+  scroller.addEventListener('scroll', onScroll, { passive: true });
+  const onResize = () => { positionNav(host); syncActive(host, ui.stepId); onScroll(); };  // 窗口变窄时重新定位浮层并对齐横向步骤条
+  window.addEventListener('resize', onResize);
+  return () => {
+    scroller.removeEventListener('scroll', onScroll);
+    window.removeEventListener('resize', onResize);
+    if (raf) cancelAnimationFrame(raf);
+  };
 }
 
 /* ================================================================== 事件绑定 */
-function bindEvents(host, ctx, { def, m }) {
+function bindEvents(host, ctx, { m }) {
   const p = ctx.project;
   const toast = ctx.toast || (() => {});
   const q = (sel) => host.querySelector(sel);
-  const rerender = () => { renderProjectView(host, ctx); mountModelPickers(); };
+  const rerender = () => {
+    // 优先用宿主提供的最新上下文（项目对象可能已被 SSE / 导演运行刷新替换）；
+    // 直接复用闭包里的旧 ctx 会让刚写回的管理状态（如导演验收报告）在重绘中丢失。
+    if (typeof ctx.onRerender === 'function') ctx.onRerender();
+    else { renderProjectView(host, ctx); mountModelPickers(); }
+  };
   /** 各 AI 入口旁的模型下拉（rerender 会重建 DOM，每次重挂；选择由 localStorage 记忆） */
   const mountModelPickers = () => {
     const aiFill = q('[data-act="ai-fill"]');
@@ -650,7 +868,16 @@ function bindEvents(host, ctx, { def, m }) {
       return d;
     } catch (e) { toast(e.message, 'err'); return null; }
   };
-  const gotoStep = (id) => { ui.stepId = id; rerender(); };
+  /** 默认轻量：只切高亮 + 平滑滚动，不重建 DOM（不丢失正在编辑的表单）。
+   *  需要展开上传/AI 表单的入口传 { rerender: true } 走整页渲染。 */
+  const gotoStep = (id, opts = {}) => {
+    ui.stepId = id;
+    if (opts.rerender) { ui.scrollTo = id; rerender(); return; }
+    ui.scrollTo = null;
+    syncActive(host, id);
+    spyLockUntil = Date.now() + 1200;
+    host.querySelector(`#step-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
   const switchTab = (id) => { ui.tab = id; ctx.onTabChange?.(id); rerender(); };
 
   // Tab 导航（顶部标签 + 概览里的快捷入口共用 data-tab）
@@ -672,11 +899,16 @@ function bindEvents(host, ctx, { def, m }) {
   host.querySelectorAll('[data-act="refresh-assets"]').forEach((b) => b.addEventListener('click', () => ctx.onRefreshAssets?.()));
   host.querySelectorAll('[data-file]').forEach((b) => b.addEventListener('click', () => ctx.onPreviewAsset?.(b.dataset.file)));
 
-  // 路线图
+  // 步骤导航（侧边栏 1–N 快捷导航）
   host.querySelectorAll('[data-step]').forEach((b) => b.addEventListener('click', () => gotoStep(b.dataset.step)));
+  // 制作步骤导航展开 / 收起：只切属性，不重建 DOM，避免丢失正在编辑的表单
+  host.querySelectorAll('[data-act="toggle-nav"]').forEach((b) => b.addEventListener('click', () => setNavCollapsed(host, !ui.navCollapsed)));
+  // 步骤② 原著阅读器折叠切换
+  q('[data-act="toggle-source"]')?.addEventListener('click', () => { ui.sourceOpen = !ui.sourceOpen; rerender(); });
   q('[data-act="run-next"]')?.addEventListener('click', () => ctx.onRunStep?.(null, false));
   q('[data-act="run-all"]')?.addEventListener('click', () => ctx.onRunStep?.(null, true));
-  q('[data-act="run-step"]')?.addEventListener('click', (e) => ctx.onRunStep?.(e.target.dataset.id, false, true));
+  // 每个步骤区都有自己的「执行本步」按钮，必须全量绑定（早期 querySelector 只绑首个，后 5 个失效）
+  host.querySelectorAll('[data-act="run-step"]').forEach((b) => b.addEventListener('click', () => ctx.onRunStep?.(b.dataset.id, false, true)));
 
   // 资源 / 管理入口：多个 Tab 里可能出现同名按钮，统一按全部匹配绑定
   host.querySelectorAll('[data-panel="assets"] [data-act="assets"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenAssets?.()));
@@ -684,8 +916,8 @@ function bindEvents(host, ctx, { def, m }) {
   host.querySelectorAll('[data-act="manage"]').forEach((b) => b.addEventListener('click', () => ctx.onManage?.()));
   q('[data-act="cover"]')?.addEventListener('click', () => ctx.onOpenCover?.());
   q('[data-act="open-canvas"]')?.addEventListener('click', () => ctx.onOpenCanvas?.());
-  q('[data-act="goto-upload"]')?.addEventListener('click', () => { ui.upload.open = true; gotoStep('upload'); });
-  q('[data-act="goto-ai"]')?.addEventListener('click', () => { ui.ai.open = true; gotoStep('upload'); });
+  q('[data-act="goto-upload"]')?.addEventListener('click', () => { ui.upload.open = true; gotoStep('upload', { rerender: true }); });
+  q('[data-act="goto-ai"]')?.addEventListener('click', () => { ui.ai.open = true; gotoStep('upload', { rerender: true }); });
   q('[data-act="toggle-upload"]')?.addEventListener('click', () => { ui.upload.open = !ui.upload.open; rerender(); });
   q('[data-act="toggle-ai"]')?.addEventListener('click', () => { ui.ai.open = !ui.ai.open; rerender(); });
 
@@ -868,11 +1100,87 @@ function bindEvents(host, ctx, { def, m }) {
     b.disabled = true; b.textContent = '提取中…';
     try {
       const d = await api(`/api/projects/${p.id}/characters/extract`, withModelId('chars', { mode: b.dataset.mode }));
-      toast(d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`, d.fellBack ? 'err' : 'ok');
+      const st = d.stats ? ` · 候选 ${d.stats.candidates} / 片段 ${d.stats.fragments} / 证据 ${d.stats.verified}✓ ${d.stats.dropped}✗` : '';
+      toast(`${d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`}${st}`, d.fellBack ? 'err' : 'ok');
       await ctx.onChanged?.();
       rerender();
     } catch (e2) { toast(e2.message, 'err'); b.disabled = false; b.textContent = b.dataset.mode === 'llm' ? '✦ 从原著提取角色（LLM）' : '⚙ 启发式提取'; }
   }));
+
+  // 导演 Agent：技能选择 → 一键全流程 → 验收报告复跑
+  const directorBusy = () => !!ctx.directorBusy || !!ctx.busy;
+  const dirSkillId = () => ui.director.skillId || m.director?.skillId || 'full';
+  host.querySelectorAll('[data-dir="skill"]').forEach((b) => b.addEventListener('click', async () => {
+    if (directorBusy()) return;
+    captureState(host);
+    const id = b.dataset.id;
+    try {
+      const out = await ctx.onSelectDirectorSkill?.(id);
+      ui.director.skillId = id;
+      if (p.management) {
+        // styleId 一并写回本地：换导演后主色回到该档案默认色，面板需立即反映
+        p.management.director = {
+          ...(p.management.director || {}), skillId: id,
+          styleId: out?.director?.styleId || null, paletteKey: out?.director?.paletteKey || null,
+        };
+      }
+      toast(out?.message || `已切换导演技能「${id}」`, 'ok');
+      rerender();
+    } catch (e2) { toast(e2.message, 'err'); }
+  }));
+  // 主色调切换：只改色不改导演，选张艺谋的四色之一即可看到画面主色变化
+  host.querySelectorAll('[data-dir="palette"]').forEach((b) => b.addEventListener('click', async () => {
+    if (directorBusy()) return;
+    captureState(host);
+    const key = b.dataset.key;
+    try {
+      const out = await ctx.onSelectDirectorPalette?.(key);
+      if (p.management?.director) p.management.director.paletteKey = key;
+      ui.director.paletteKey = key;
+      toast(out?.message || '主色调已切换', 'ok');
+      rerender();
+    } catch (e2) { toast(e2.message, 'err'); }
+  }));
+  // 导演风格下拉：选完以卡片呈现所选导演（与技能卡点击同一回调）
+  host.querySelectorAll('[data-dir="style-select"]').forEach((sel) => sel.addEventListener('change', async () => {
+    if (directorBusy()) return;
+    const id = sel.value;
+    if (!id) return;
+    captureState(host);
+    try {
+      const out = await ctx.onSelectDirectorSkill?.(id);
+      ui.director.skillId = id;
+      if (p.management) {
+        p.management.director = {
+          ...(p.management.director || {}), skillId: id,
+          styleId: out?.director?.styleId || null, paletteKey: out?.director?.paletteKey || null,
+        };
+      }
+      toast(out?.message || `已切换导演风格「${id}」`, 'ok');
+      rerender();
+    } catch (e2) { toast(e2.message, 'err'); }
+  }));
+  host.querySelectorAll('[data-dir="run"], [data-dir="rerun"]').forEach((b) => b.addEventListener('click', async () => {
+    if (directorBusy()) return;
+    captureState(host);
+    const idea = String(q('#pv-dir-idea')?.value || ui.director.idea || '').trim();
+    b.disabled = true;
+    try {
+      await ctx.onRunDirector?.({ skillId: dirSkillId(), idea });
+    } catch (e2) { toast(e2.message, 'err'); }
+    finally { rerender(); }
+  }));
+  // 短剧成片规格：保存后由宿主刷新工作台，下一次全流程按新片段数分配镜头预算
+  host.querySelectorAll('[data-rt="save"]').forEach((b) => b.addEventListener('click', async () => {
+    const totalSeconds = Number(q('#pv-rt-total')?.value);
+    const clipSeconds = Number(q('#pv-rt-clip')?.value);
+    if (!(totalSeconds > 0) || !(clipSeconds > 0)) { toast('总时长与每片段时长都必须是正数', 'err'); return; }
+    b.disabled = true;
+    try { await ctx.onSaveRuntime?.({ totalSeconds, clipSeconds }); }
+    catch (e2) { toast(e2.message, 'err'); b.disabled = false; }
+  }));
+  host.querySelectorAll('[data-dir="pack"]').forEach((b) => b.addEventListener('click', () => ctx.onDownloadPack?.()));
+  host.querySelectorAll('[data-dir="scroll-top"]').forEach((b) => b.addEventListener('click', () => gotoStep('basic')));
 
   // ⑥ 交付
   host.querySelectorAll('[data-del]').forEach((el) => el.addEventListener('change', () => {
@@ -887,6 +1195,38 @@ function bindEvents(host, ctx, { def, m }) {
 export function setWorkshopStep(id) {
   if (!id) return;
   ui.stepId = id;
+  ui.scrollTo = id;
   // 已有原著的项目默认收起上传表单；从流程卡进来时直接展开，保证「进入这一步」即可操作
   if (id === 'upload') ui.upload.open = true;
+}
+
+/**
+ * SSE「director:progress」：只改进度文案 / 宽度 / 按钮态，不重建 DOM。
+ * 全流程约 20 秒，期间 project:meta 会多次触发重绘，ui.director.progress 保证进度不丢。
+ */
+export function setDirectorProgress(host, e = {}) {
+  const total = Number(e.total) || 0;
+  const index = Number(e.index) || 0;
+  let ratio = Number(e.percent);
+  if (!Number.isFinite(ratio)) ratio = e.phase === 'done' ? 1 : total ? index / total : 0;
+  const percent = Math.max(0, Math.min(1, ratio));
+  ui.director.progress = { phase: e.phase, label: e.label || '', percent, status: e.status };
+  if (!host) return;
+  const pct = Math.round(percent * 100);
+  const box = host.querySelector('[data-dir-progress]');
+  if (box) {
+    box.classList.add('show');
+    const bar = box.querySelector('.dir-progress-bar i');
+    if (bar) bar.style.width = `${pct}%`;
+    const msg = box.querySelector('[data-dir-msg]');
+    if (msg) msg.textContent = e.label || '';
+    const num = box.querySelector('[data-dir-pct]');
+    if (num) num.textContent = `${pct}%`;
+    box.classList.toggle('done', e.phase === 'done');
+    box.classList.toggle('error', e.status === 'error' || e.status === 'blocked');
+  }
+  const running = e.phase !== 'done' && !['blocked', 'error'].includes(e.status);
+  host.querySelectorAll('[data-dir="run"], [data-dir="rerun"], [data-dir="skill"]').forEach((b) => { b.disabled = running; });
+  const runBtn = host.querySelector('[data-dir="run"]');
+  if (runBtn) runBtn.textContent = running ? '⏳ 导演智能体执行中…' : '▶ 一键完成最终产物全流程';
 }

@@ -101,6 +101,7 @@ export function readAsset(name) {
 const ASSET_TYPES = {
   image: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'],
   video: ['.mp4', '.webm', '.mov'],
+  audio: ['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus'],
 };
 
 /** 全量资产索引：资源库弹窗与复用选择都从这里取数 */
@@ -113,7 +114,8 @@ export function listAssets() {
         if (!st.isFile()) return null;
         const ext = path.extname(name).toLowerCase();
         const type = ASSET_TYPES.image.includes(ext) ? 'image'
-          : ASSET_TYPES.video.includes(ext) ? 'video' : 'other';
+          : ASSET_TYPES.video.includes(ext) ? 'video'
+            : ASSET_TYPES.audio.includes(ext) ? 'audio' : 'other';
         return { name, url: `/assets/${name}`, type, ext: ext.slice(1), size: st.size, mtime: st.mtimeMs };
       } catch { return null; }
     })

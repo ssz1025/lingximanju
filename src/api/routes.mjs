@@ -3,10 +3,15 @@ import { json } from './http.mjs';
 import { handleSystem } from './routes/system.mjs';
 import { handleComfy } from './routes/comfy.mjs';
 import { handleManagement } from './routes/management.mjs';
+import { handleVoices } from './routes/voices.mjs';
+import { handleDirector } from './routes/director.mjs';
+import { handleRuntime } from './routes/runtime.mjs';
+import { handleProductionChat } from './routes/production-chat.mjs';
 import { handleMedia } from './routes/media.mjs';
 import { handleProjects } from './routes/projects.mjs';
 import { handleEpisodes } from './routes/episodes.mjs';
 import { handleAssets } from './routes/assets.mjs';
+import { handleStepChat } from './routes/step-chat.mjs';
 
 // 跨源白名单：默认空（浏览器/Electron 都是同源访问，不需要任何 CORS 头）。
 // 需要跨源调试时用 ALLOW_ORIGIN=https://dev.example.com,http://other:1234 显式放行。
@@ -34,10 +39,16 @@ export async function handleApi(req, res, url) {
   if (await handleSystem(req, res, url)) return true;
   if (await handleComfy(req, res, url)) return true;
   if (await handleManagement(req, res, url)) return true;
+  if (await handleVoices(req, res, url)) return true;
+  if (await handleDirector(req, res, url)) return true;
+  if (await handleRuntime(req, res, url)) return true;
   if (await handleMedia(req, res, url)) return true;
   if (await handleEpisodes(req, res, url)) return true;
   if (await handleProjects(req, res, url)) return true;
   if (await handleAssets(req, res, url)) return true;
+  // 对话域：分步会话（steps/*）与项目级制片对话（production/chat）各管一段，路径互不相交
+  if (await handleStepChat(req, res, url)) return true;
+  if (await handleProductionChat(req, res, url)) return true;
 
   return json(res, { error: `未知接口 ${method} ${pathname}` }, 404), true;
 }

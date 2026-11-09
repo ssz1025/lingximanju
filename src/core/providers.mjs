@@ -3,10 +3,14 @@
 // - openai：任意 OpenAI 兼容 /chat/completions，失败自动回退 mock
 // - comfyui：图片 / 视频直接提交本地 ComfyUI 导出的 API 格式 workflow（主路径）
 import { uid, writeAsset, readAsset } from './store.mjs';
-import { hash, storyboardSVG, characterSVG, characterViewSVG, transitionSVG, posterSVG } from './artwork.mjs';
+import { hash, storyboardSVG, characterSVG, characterViewSVG, characterSheetSVG, transitionSVG, posterSVG } from './artwork.mjs';
 import { parseWorkflow, runWorkflow } from './comfyui.mjs';
-import { placeholderFrame } from './raster.mjs';
+import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './knowledge.mjs';
+import { matchAll as matchVoicesForCharacters } from './voices.mjs';
+import { normalizeFilmPolicy } from './film-policy.mjs';
+import { skillAesthetic, getDirectorSkill } from './director-skills.mjs';
+import { aestheticPrompt } from './director-styles.mjs';
 
 const SCHEMAS = {
   screenplay: '剧本：{title, genre, logline, style, characters:[{name,role,appearance}], scenes:[{id,location,time,summary,script:[字符串]}]}',
@@ -42,6 +46,10 @@ const SCHEMAS = {
   // AI 生成小说：先出分章大纲，再逐章写正文
   novelOutline: '小说分章大纲：{title, genre, logline, chapters:[{title, summary, hook}]}（title 形如「第X章 · 标题」，summary 80 字内，hook 为结尾悬念句）',
   novelChapter: '小说章节正文：{title, text}（text 为该章完整正文，简体中文小说文体，多段落，不含章节标题行，不写「本章完」）',
+  // 音色分配：给每个角色从音色库里挑一个最合适的 voiceId，并给出可解释的匹配理由
+  voiceAssign: '音色分配：{assignments:[{characterName:string(角色名，须与原输入一致), voiceId:string(音色库中的音色 id), voiceName:string(音色名), reason:string(一句话匹配理由，说明性别/年龄/性格/定位如何契合)}]}（为每个输入角色匹配恰好一个音色，voiceId 必须来自提供的音色库；无合适音色时可省略该角色）',
+  // 导演阐述：导演 Agent 在跑六步之前给出的全片视听纲领，会作为一致性约束喂给分镜与打包
+  directorTreatment: '导演阐述：{title:string(本片导演方案标题), logline:string(一句话故事核心), tone:string(情绪基调), visualStyle:string(画面风格与色彩策略), pacing:string(叙事节奏与每集时长分配), shotStrategy:string(景别/运镜/轴线策略), audioStrategy:string(对白、环境声与音色策略), continuityRules:[string,3~5条跨镜头一致性硬约束], risks:[string,2~3条制作风险与规避办法]}（全部使用简体中文，须依据输入的项目设定与原著梗概，不要编造未提供的角色名）',
 };
 
 const THEMES = [
@@ -180,19 +188,70 @@ function mockGenerate(intent, vars = {}) {
       };
     }
     case 'shots': {
-      const count = Math.max(3, Math.min(8, Number(vars.count) || 5));
+      // count 由全片镜头预算下发，不能再用 3~8 的玩具范围覆盖，否则片段数无法精确
+      const count = Math.max(1, Math.min(24, Number(vars.count) || 5));
+      const clipSeconds = Number(vars.clipSeconds) || 3;
       const scene = vars.scene || theme.scenes[0];
       const location = scene.location || '场景';
+      // 导演风格台词本：零 Key 时也用该导演的景别 / 光线 / 媒介词汇写分镜，
+      // 而不是所有风格共用一套「冷调侧光 / 逆光轮廓」。
+      // 动作词汇按档案的 pace.mode 分组：静默爆发 / 凌厉武打 / 慢仪式 / 生活呼吸 /
+      // 缓慢静观 / 碎片跳切 / 骤起骤落，七种节奏各有一套，避免十位导演写成同一本。
+      const a = vars.aesthetic && vars.aesthetic.id ? vars.aesthetic : null;
+      const media = a?.medium?.length ? a.medium : ['冷调侧光', '逆光轮廓', '柔和顶光'];
+      const light = a?.light ? a.light.split('；')[0].replace(/，.*$/, '') : '';
+      const MOTION_BANK = {
+        'silence-burst': ['角色保持不动', '极缓慢地转头', '手指移到枪柄', '画面静止'],
+        kinetic: ['角色腾跃而起', '兵器横切过画面', '脚步急停扬起尘土', '衣袂随冲击扬起'],
+        'slow': ['角色缓慢起身，衣摆垂落', '人物走入画面后停住', '镜头内只有光影在移动', '角色缓缓抬头看向远处'],
+        ritual: ['队形从两侧合拢', '角色按仪轨一步步向前', '众人齐齐俯身行礼', '队列在鼓点中转向'],
+        breath: ['角色蹲下捧起一把草', '风吹动衣角与发梢', '远处有什么在慢慢移动', '角色抬头看向天空'],
+        fragment: ['角色错身而过', '手停在半空又收回', '门在身后缓缓关上', '烟灰落下的瞬间'],
+        contrast: ['角色静立，气息先动', '刀出鞘的一瞬', '人影从梁上落下', '脚步在门外顿住'],
+      };
+      const motionBank = MOTION_BANK[a?.pace?.mode]
+        || ['角色缓缓转身看向画外', '雨滴沿镜头前滑落', '远处灯光次第亮起', '纸页被风翻动'];
+      // 运镜词汇同样按节奏分组：固定长镜导演不该每镜都「缓慢推镜」，
+      // 凌厉武打也不该出现四种固定机位。fixedShotRatio 越高的导演，固定机位出现得越多。
+      const MOVE_BANK = {
+        'silence-burst': ['固定', '固定', '固定', '极缓慢横移'],
+        kinetic: ['快速跟拍', '手持晃动', '急推', '甩镜'],
+        'slow': ['固定', '缓慢横移', '固定', '极缓慢推近'],
+        ritual: ['固定', '对称横移', '固定', '缓慢升降'],
+        breath: ['固定', '缓慢横移', '固定', '缓慢拉远'],
+        fragment: ['手持晃动', '跳切', '固定', '错位跟拍'],
+        contrast: ['固定', '快速横移', '固定', '急推'],
+      };
+      const moveBank = MOVE_BANK[a?.pace?.mode] || MOVES;
+      // 音频词汇：从媒介短语里抽出「真的会发声」的声源词（风 / 雨 / 雪 / 沙 / 海 / 潮 / 雷 / 浪），
+      // 而不是整句照搬——「玻璃水汽的声音」「热浪扭曲的声音」都是不通的中文。
+      const SOUND_WORDS = ['狂风', '暴雨', '雨丝', '细雨', '雨滴', '雨柱', '雨', '风沙', '沙尘',
+        '飞雪', '落雪', '雪', '海风', '海潮', '潮水', '浪', '雷', '风', '水'];
+      const natural = (a?.medium || [])
+        .map((m) => SOUND_WORDS.find((w) => String(m).includes(w)))
+        .filter(Boolean);
+      const uniqueNatural = [...new Set(natural)].slice(0, 3);
+      const audioBank = a
+        ? [...uniqueNatural.map((m) => `${m}声`), '环境声压低人声', '转场保留连续底噪']
+        : ['雨声与远处警笛', '低频环境音', '脚步与衣料摩擦', '短暂的静默'];
       return {
         shots: Array.from({ length: count }, (_, i) => ({
           shotNo: i + 1,
           size: pick(SIZES, i + (seed % 3)),
           angle: pick(ANGLES, i + (seed % 2)),
-          movement: pick(MOVES, i),
-          ffDesc: `${location}｜${pick(SIZES, i + (seed % 3))}｜${theme.chars[i % theme.chars.length].name}位于画面${['左三分之一', '中央', '右三分之一'][i % 3]}，${['冷调侧光', '逆光轮廓', '柔和顶光'][i % 3]}，环境细节保持一致`,
-          motionDesc: `${pick(MOVES, i)}，${['角色缓缓转身看向画外', '雨滴沿镜头前滑落', '远处灯光次第亮起', '纸页被风翻动'][i % 4]}`,
-          audioDesc: `${['雨声与远处警笛', '低频环境音', '脚步与衣料摩擦', '短暂的静默'][i % 4]}`,
-          duration: 4 + (i % 3),
+          movement: pick(moveBank, i),
+          ffDesc: [
+            location,
+            pick(SIZES, i + (seed % 3)),
+            `${theme.chars[i % theme.chars.length].name}位于画面${['左三分之一', '中央', '右三分之一'][i % 3]}`,
+            a ? `${a.paletteName} 主色调` : '',
+            light || ['冷调侧光', '逆光轮廓', '柔和顶光'][i % 3],
+            media[i % media.length],
+            a?.texture || '环境细节保持一致',
+          ].filter(Boolean).join('｜'),
+          motionDesc: `${pick(moveBank, i)}，${motionBank[i % 4]}`,
+          audioDesc: `${audioBank[i % audioBank.length]}`,
+          duration: clipSeconds,
           characters: [theme.chars[i % theme.chars.length].name],
         })),
       };
@@ -209,31 +268,50 @@ function mockGenerate(intent, vars = {}) {
       };
     }
     case 'charExtract': {
-      // 用启发式候选名 / 主题角色映射成完整角色属性结构，零 Key 可跑通角色提取
+      // 零 Key 兜底：只给「能从原著片段回溯」的占位设定，绝不编造人设。
+      // 旧实现按候选序号轮流塞「男/女、18/25/30 岁、主角/反派」并生成模板外貌，
+      // 结果会被路由当成 LLM 产物写入项目（source=llm），既误导用户，也会污染音色分配，
+      // 还因来源不是 heuristic 导致后续真实 LLM 无法覆盖这些占位值。
       const candidates = Array.isArray(vars.candidates) && vars.candidates.length
         ? vars.candidates : theme.chars.map((c) => ({ name: c.name, hits: 1 }));
-      const mains = ['#3a506b', '#6b4f8a', '#7a6fc4', '#3f6b5c', '#8a4f4f', '#4f6b8a'];
+      const fragments = (Array.isArray(vars.fragments) ? vars.fragments : [])
+        .map((f) => String(f?.text || ''));
+      /** 从原文片段里截一句含角色名的完整原文（一定能在原著中逐字定位） */
+      const quoteFor = (name) => {
+        for (const frag of fragments) {
+          const at = frag.indexOf(name);
+          if (at < 0) continue;
+          let start = at;
+          for (let i = at - 1; i >= 0 && at - i <= 160; i -= 1) {
+            if (/[。！？!?\n]/.test(frag[i])) { start = i + 1; break; }
+          }
+          let end = at + name.length;
+          for (let i = end; i < frag.length && i - at <= 160; i += 1) {
+            if (/[。！？!?\n]/.test(frag[i])) { end = i + 1; break; }
+          }
+          const q = frag.slice(start, end).trim().slice(0, 120);
+          if (q.includes(name)) return q;
+        }
+        return '';
+      };
       return {
-        characters: candidates.slice(0, 8).map((c, i) => ({
-          name: c.name,
-          aliases: [],
-          role: ['主角', '关键配角', '反派', '线索人物'][i % 4],
-          gender: ['男', '女'][i % 2],
-          age: ['18岁上下', '25岁上下', '30岁上下', '16岁上下'][i % 4],
-          personality: '动机连贯，立场鲜明，能在冲突中保持稳定的性格特征。',
-          appearance: theme.chars.find((t) => t.name === c.name)?.appearance
-            || `${c.name}的外貌由角色属性驱动，${theme.styleHint} 画面下辨识度高。`,
-          // static/dynamic 二分：跨镜头恒定的外貌 vs 随场景变化的造型
-          staticFeatures: `${c.name}面部轮廓清晰、眉眼辨识度高，发型与发色固定，体型匀称`,
-          dynamicFeatures: `服装随场景更换，主色为 ${mains[i % mains.length]}，配饰简洁`,
-          hair: '发型颜色与整体配色一致',
-          costume: '与身份相符的日常服装，颜色呼应主配色',
-          props: '随身物件待补充',
-          style: `${theme.styleHint} 画风，${['主角', '关键配角', '反派', '线索人物'][i % 4]}气质，${['深蓝灰', '蓝紫', '紫蓝', '墨绿'][i % 4]}主调 + 暖橙点缀，全身造型统一`,
-          relations: i > 0 ? [{ target: candidates[0].name, label: '同伴' }] : [],
-          palette: ['#0b111c', mains[i % mains.length], '#ff9a5c'],
-          viewPrompt: `${c.name}的标志性外观，${theme.styleHint} 画风，主色 ${mains[i % mains.length]}`,
-        })),
+        characters: candidates.slice(0, 12).map((c) => {
+          const name = String(c.name || '');
+          // hint 是候选抽取时从原著首现位置截出的原句；退化时再从片段里找
+          const quote = String(c.hint || '') || quoteFor(name);
+          return {
+            name,
+            aliases: [],
+            role: '原著角色（占位）',
+            // 性别 / 年龄 / 性格 / 配色 / 画风 / 关系一律留空：原文没写就不猜
+            gender: '', age: '', personality: '', hair: '', costume: '', props: '',
+            style: '', viewPrompt: '', palette: [], relations: [],
+            appearance: quote ? `原著依据：${quote}` : '待补全 · 原著片段中未定位到该角色的外貌描写',
+            staticFeatures: quote ? `原著原文：${quote}` : '待补全 · 未从原著片段识别出固定外貌特征',
+            dynamicFeatures: '待补全 · 原著片段中未明确描写服饰与随身物件',
+            evidence: quote ? [{ quote, kind: 'mention' }] : [],
+          };
+        }),
       };
     }
     case 'cameras': {
@@ -377,9 +455,67 @@ function mockGenerate(intent, vars = {}) {
         }),
       };
     }
+    case 'voiceAssign': {
+      // 零 Key 确定性匹配：把角色列表交给启发式打分器，在给定音色库里各挑最佳，输出与 LLM 同构
+      const characters = Array.isArray(vars.characters) ? vars.characters : [];
+      const voices = Array.isArray(vars.voices) ? vars.voices : [];
+      const matched = matchVoicesForCharacters(characters, voices);
+      return {
+        assignments: matched
+          .filter((m) => m.voiceId)
+          .map((m) => ({
+            characterName: m.characterName,
+            voiceId: m.voiceId,
+            voiceName: m.voiceName,
+            reason: m.reason,
+          })),
+        source: 'heuristic',
+      };
+    }
+    case 'directorTreatment': {
+      // 零 Key 的导演阐述只依据项目里真实存在的字段拼装，不编造剧情细节；
+      // director-agent 会把 source 标为 heuristic，前端如实提示「配置模型后可由 LLM 重写」。
+      // __mockKeys 必须打上：导演智能体靠它判断「这是模板而非 LLM 输出」，
+      // 进而改用导演风格基线；漏打会让选谁都拿到这份通用方案。
+      const title = String(vars.title || '').trim().slice(0, 40) || shortTitle(idea) || '未命名影片';
+      const gist = String(vars.logline || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+        || String(idea).replace(/\s+/g, ' ').trim().slice(0, 120)
+        || theme.scenes[0].summary;
+      const style = String(vars.style || '').trim() || theme.styleHint;
+      const episodes = Array.isArray(vars.episodes) ? vars.episodes.length : 0;
+      const characters = Array.isArray(vars.characters) ? vars.characters.length : 0;
+      return withMockKeys({
+        title: `《${title}》导演阐述 · ${style}`,
+        logline: gist,
+        tone: `${theme.genre}基调 · 情绪递进克制、关键段落留白`,
+        visualStyle: `${style} 画风 · 冷暖对比布光，主色随场次推进渐变，避免跨镜头色温跳变`,
+        pacing: episodes
+          ? `全片 ${episodes} 集，每集以「建立空间 → 冲突升级 → 结尾钩子」三段推进，单镜头控制在 4–6 秒`
+          : '以「建立空间 → 冲突升级 → 结尾钩子」三段推进，单镜头控制在 4–6 秒',
+        shotStrategy: '先全景建立人物关系，再以过肩与特写交替推进；全程遵守 180 度轴线，运动镜头承接上一镜头的动势',
+        audioStrategy: characters
+          ? `按 ${characters} 位角色的音色分配结果铺设对白，环境声压低以突出人声，转场处保留连续底噪`
+          : '对白优先，环境声压低以突出人声，转场处保留连续底噪',
+        continuityRules: [
+          '角色面部、发型、服装与主配色跨镜头保持一致',
+          '同一场戏的光位与色温不随切镜改变',
+          '遵守 180 度轴线，反打机位不越轴',
+          '每组首帧以前一镜头尾帧为空间锚点',
+        ],
+        risks: [
+          '人物身份漂移：用定妆参考图与公共提示词锁定造型',
+          '镜头衔接断裂：显式生成跨机位转场片段',
+        ],
+      });
+    }
     default:
       return { text: `${intent} 的模拟输出`, seed };
   }
+}
+
+/** 给纯模板产物打上补位来源标记，供上层判断「这是模板而非 LLM 输出」 */
+function withMockKeys(obj) {
+  return { ...obj, __mockKeys: Object.keys(obj) };
 }
 
 /** AI 小说 Mock 素材：确定性段落模板，围绕主题角色与场景生成可读正文 */
@@ -447,6 +583,9 @@ function extractJSON(text = '') {
 export function createProviders(settings = {}, log = () => {}, onUsage = null) {
   const mode = settings.provider === 'openai' && settings.baseUrl && settings.apiKey ? 'openai' : 'mock';
   const comfy = settings.comfy || null;
+  // 成片真实性策略由项目 runtime 下发；real 模式下 composer 不会生成预览成片，
+  // 这里同时把策略透传给片段产物标记，供验收逐片段核对「ComfyUI 是否真的被调用」。
+  const filmPolicy = normalizeFilmPolicy(settings.runtime?.filmPolicy ?? comfy?.filmPolicy);
   const comfyWorkflows = { image: null, video: null };
   if (comfy?.enabled) {
     for (const kind of ['image', 'video']) {
@@ -457,6 +596,19 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     }
   }
   const comfyActive = Boolean(comfyWorkflows.image || comfyWorkflows.video);
+  // 导演风格（美学档案）：由编排器 / 导演智能体通过 settings.aesthetic 下发。
+  // 只认已解析好的纯数据对象，不在这里再读项目，避免 provider 与业务层耦合。
+  const aesthetic = settings.aesthetic && settings.aesthetic.id ? settings.aesthetic : null;
+  /** 把导演风格拼进出图 / 出片提示词；没有选风格时原样返回（行为与升级前一致） */
+  const stylePrompts = (prompt, extraNegative = '') => {
+    if (!aesthetic) return { prompt: String(prompt ?? ''), negative: String(extraNegative ?? '') };
+    const out = aestheticPrompt(aesthetic.id, {
+      base: prompt, paletteKey: aesthetic.paletteKey, extraNegative,
+    });
+    return { prompt: out.positive, negative: out.negative };
+  };
+  /** Mock 出图用的调色板：有风格用风格色板，否则退回内置风格名 */
+  const styleArg = (style) => (aesthetic?.svg ? aesthetic.svg : (style || settings.style || 'cinematic'));
   const delay = (ms, signal) => new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
     if (signal) signal.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('已取消', 'AbortError')); }, { once: true });
@@ -469,7 +621,11 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     });
   }
 
-  /** 画布资产 → ComfyUI 可上传的二进制；SVG 渲染成等价 PNG 占位 */
+  /**
+   * 画布资产 → ComfyUI 可上传的二进制；SVG 渲染成等价 PNG 占位。
+   * 一次可取多张（角色定妆需要「正面 + 3/4 侧 + 面部」多参考），
+   * 逐张独立转换，任何一张缺失都不影响其余参考图可用。
+   */
   function referenceBuffer(url, opts = {}) {
     if (!url) return null;
     const m = String(url).match(/\/assets\/([A-Za-z0-9_.-]+)/);
@@ -478,12 +634,38 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     const buf = readAsset(name);
     if (!buf) return null;
     if (/\.svg$/i.test(name)) {
+      // Mock 模式下角色定妆图是 SVG，槽位只收位图。这里按「视图语义」栅格化：
+      // 角色视图画成对应角度的人形，其余（分镜 / 转场 / 海报）仍用分镜占位帧。
+      // 旧实现一律转成风景占位图，会让下游拿着一张无关画面当角色参考。
+      const isCharacter = Boolean(opts.view) || opts.kind === 'character' || opts.kind === 'character-view';
+      const buffer = isCharacter
+        ? characterViewFrame({
+          view: opts.view || 'front', palette: opts.palette || [], style: opts.style,
+          seed: `${opts.seed || ''}-${name}`, label: opts.label || '',
+        })
+        : placeholderFrame({ seed: `${opts.seed || ''}-${name}`, shotNo: opts.shotNo || 1, style: opts.style });
       return {
-        buffer: placeholderFrame({ seed: `${opts.seed || ''}-${name}`, shotNo: opts.shotNo || 1, style: opts.style }),
-        name: `${name.replace(/\.svg$/i, '')}.png`, converted: true,
+        buffer, name: `${name.replace(/\.svg$/i, '')}.png`, converted: true,
+        synthetic: true, view: isCharacter ? (opts.view || 'front') : null,
       };
     }
-    return { buffer: buf, name, converted: false };
+    return { buffer: buf, name, converted: false, synthetic: false, view: opts.view || null };
+  }
+
+  /** 多参考图 → [{buffer,name}]，按传入顺序对应工作流的多个 LoadImage 插槽
+   *  条目可以是 URL 字符串，也可以是 {url, view, palette, label} —— 后者让 SVG 转 PNG 时
+   *  能按正确的视角／配色栅格化，而不是退化成风景占位图。 */
+  function referenceBuffers(urls = [], opts = {}) {
+    return (Array.isArray(urls) ? urls : [urls])
+      .map((u, i) => {
+        const item = typeof u === 'string' ? { url: u } : (u || {});
+        return referenceBuffer(item.url, {
+          ...opts, seed: `${opts.seed || ''}-ref${i}`,
+          view: item.view || opts.view, palette: item.palette || opts.palette,
+          label: item.label || opts.label, kind: item.kind || opts.kind,
+        });
+      })
+      .filter((r) => r && r.buffer);
   }
 
   /** 论文式(6)：原著分块 → BM25 召回 → 归一化重排 → 相关片段 */
@@ -566,6 +748,9 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     // 式(6) 检索是确定性算法，不经过 LLM：既避免长篇原著撑爆上下文，也保证 Mock/真实模型行为一致
     if (intent === 'context') return localContext(vars);
     let fellBack = false;
+    // 导演风格统一兜底：调用方（分镜 / 场景 / 事件）没显式传 aesthetic 时，
+    // 用本项目生效的风格补上，避免「有的智能体吃到了风格、有的没吃到」。
+    if (aesthetic && !vars.aesthetic) vars = { ...vars, aesthetic };
     if (mode === 'openai') {
       try {
         // __images：多模态图片输入（dataURL），不进文本 payload，走 OpenAI image_url 消息
@@ -621,29 +806,58 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     }
     await delay(140 + (hash(intent + JSON.stringify(vars)) % 260), signal);
     const mock = mockGenerate(intent, vars);
-    // 回退显式化：真实模型失败才打 __fallback（Mock 模式本身就是 Mock，不算回退）
+    // 零 Key 的角色抽取只是「按原文片段生成的启发式占位」，不是 LLM 成果：
+    // 显式打标让路由把 source 定为 heuristic，前端也能如实提示「配置模型后可重提」，
+    // 避免把模板角色冒充 AI 提取结果写进项目（同时保证后续真实 LLM 可以覆盖占位值）。
+    if (mode === 'mock' && intent === 'charExtract') return { ...mock, __mock: true };
+    // 回退显式化：真实模型失败才打 __fallback（Mock 模式本身不算「失败回退」）
     return fellBack ? { ...mock, __fallback: true } : mock;
   }
 
   async function image(opts = {}, signal) {
     const { kind = 'keyframe', style = 'cinematic', label = '', seed = '', shotNo = 1,
       size = '中景', angle = '平视', movement = '固定', prompt = '', characters = [] } = opts;
+    // 导演风格介入点 ①：正向提示词追加主色 + 视觉语法，负向追加该风格的固定否定词。
+    // 未选风格技能时 stylePrompts 原样返回，行为与升级前完全一致。
+    const styled = stylePrompts(opts.prompt ?? prompt, opts.negative || '');
+    const finalPrompt = styled.prompt;
+    const finalNegative = styled.negative;
+    // Mock 出图用导演调色板：不同导演风格画出来的 SVG 真的不一样，而不是只换文字
+    const mockPalette = styleArg(style);
+    // ComfyUI 的 style 变量仍传原风格名，避免把对象塞进工作流 JSON
+    const styleName = typeof mockPalette === 'string' ? mockPalette : (style || settings.style || 'cinematic');
+
+    // 参考图：角色定妆 / 关键帧都可能带多张（正面 + 3/4 侧 + 面部特写），
+    // 按顺序对应工作流的多个 LoadImage 插槽；单张时沿用旧行为（应用到全部插槽）。
+    // 条目可为字符串 URL 或 {url, view, palette, label}，便于 SVG→PNG 时按视角栅格化。
+    const refItems = Array.isArray(opts.refs) ? opts.refs.filter(Boolean) : [opts.refs].filter(Boolean);
+    const refUrls = refItems.map((r) => (typeof r === 'string' ? r : r?.url)).filter(Boolean);
+    const refBuffers = referenceBuffers(refItems, {
+      seed, shotNo, style: mockPalette,
+      palette: opts.palette, label: label || opts.name, kind,
+    });
 
     // 主路径：本地 ComfyUI「导出(API)」工作流
     if (comfyWorkflows.image) {
       try {
-        const ref = referenceBuffer((opts.refs || [])[0], { seed, shotNo, style });
-        // 角色多视图提示词已含视图角度，不再叠加景别/机位默认值
-        const fullPrompt = kind === 'character-view' ? `${prompt}｜${style}` : `${prompt}｜${size}｜${angle}｜${movement}｜${style}`;
+        // 角色多视图提示词已含视图角度与风格锁，不再叠加景别/机位默认值
+        const fullPrompt = kind === 'character-view' || kind === 'character-sheet'
+          ? `${finalPrompt}｜${styleName}`
+          : `${finalPrompt}｜${size}｜${angle}｜${movement}｜${styleName}`;
         const result = await runComfy('image', {
-          prompt: fullPrompt, seed: `${kind}-${seed}-${shotNo}`, style, shotNo,
+          prompt: fullPrompt, negative: finalNegative,
+          seed: `${kind}-${seed}-${shotNo}`, style: styleName, shotNo,
           filenamePrefix: `lingximanju_${kind}_${shotNo}`,
-          imageBuffer: ref?.buffer, imageName: ref?.name,
+          imageRefs: refBuffers,
+          imageBuffer: refBuffers[0]?.buffer, imageName: refBuffers[0]?.name,
         }, signal);
         return {
           url: result.primary.url, width: comfy.width, height: comfy.height,
           provider: 'comfyui', promptId: result.promptId,
+          source: 'comfyui', isRealImage: true,
+          workflow: String(comfy.imageWorkflowName || 'image'),
           applied: result.applied.length, assets: result.assets,
+          refsUsed: refBuffers.length, refsRequested: refUrls.length,
         };
       } catch (err) {
         if (comfy.strict) throw err;
@@ -655,56 +869,81 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
       try {
         const res = await fetch(settings.imageEndpoint, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt, size: '1280x720', n: 1 }), signal,
+          body: JSON.stringify({ prompt: finalPrompt, negative_prompt: finalNegative, size: '1280x720', n: 1 }), signal,
         });
         if (res.ok) {
           const json = await res.json();
           const url = json?.data?.[0]?.url || json?.url;
-          if (url) return { url, width: 1280, height: 720, provider: 'remote' };
+          if (url) return { url, width: 1280, height: 720, provider: 'remote', refsUsed: 0, refsRequested: refUrls.length };
           const b64 = json?.data?.[0]?.b64_json;
-          if (b64) return { url: writeAsset(`${uid('img')}.png`, Buffer.from(b64, 'base64')), width: 1280, height: 720, provider: 'remote' };
+          if (b64) return { url: writeAsset(`${uid('img')}.png`, Buffer.from(b64, 'base64')), width: 1280, height: 720, provider: 'remote', refsUsed: 0, refsRequested: refUrls.length };
         }
       } catch (err) { log('warn', `图像接口失败，已回退自绘 SVG：${err.message}`); }
     }
-    await delay(180 + (hash(seed + prompt) % 320), signal);
+    await delay(180 + (hash(seed + finalPrompt) % 320), signal);
     let svg;
-    if (kind === 'character') svg = characterSVG({ name: label, appearance: prompt, style, seed });
-    else if (kind === 'character-view') svg = characterViewSVG({ name: label, appearance: prompt, view: opts.view, palette: opts.palette, style, seed });
-    else if (kind === 'transition') svg = transitionSVG({ from: opts.from, to: opts.to, style, seed });
-    else if (kind === 'poster') svg = posterSVG({ title: label, shotCount: opts.shotCount || 0, duration: opts.duration || 0, style });
-    else svg = storyboardSVG({ title: label, shotNo, size, angle, movement, prompt, style, characters, seed, kind });
-    return { url: writeAsset(`${uid('img')}.svg`, svg), width: 640, height: 360, provider: 'mock' };
+    // Mock 自绘使用导演调色板（mockPalette），提示词用 finalPrompt：同一镜头换导演风格画面会不同
+    if (kind === 'character') svg = characterSVG({ name: label, appearance: finalPrompt, style: mockPalette, seed });
+    else if (kind === 'character-view') svg = characterViewSVG({ name: label, appearance: finalPrompt, view: opts.view, palette: opts.palette, style: mockPalette, seed });
+    else if (kind === 'character-sheet') svg = characterSheetSVG({ name: label, appearance: finalPrompt, views: opts.views, palette: opts.palette, style: mockPalette, seed });
+    else if (kind === 'transition') svg = transitionSVG({ from: opts.from, to: opts.to, style: mockPalette, seed });
+    else if (kind === 'poster') svg = posterSVG({ title: label, shotCount: opts.shotCount || 0, duration: opts.duration || 0, style: mockPalette });
+    else svg = storyboardSVG({ title: label, shotNo, size, angle, movement, prompt: finalPrompt, style: mockPalette, characters, seed, kind });
+    return {
+      url: writeAsset(`${uid('img')}.svg`, svg), width: 640, height: 360, provider: 'mock',
+      // Mock 自绘不消费参考图：如实标注，避免把「有参考图」误当成「参考图已生效」
+      refsUsed: 0, refsRequested: refUrls.length,
+      styleApplied: aesthetic ? aesthetic.id : null,
+      note: refUrls.length ? 'Mock 自绘占位不消费参考图；接入 ComfyUI 出图工作流后参考图按 LoadImage 插槽生效' : '',
+    };
   }
 
   async function video(opts = {}, signal) {
     const frames = opts.frames || [];
     const duration = Number(opts.duration) || 5;
+    // 导演风格介入点 ②：视频提示词同样追加风格串与否定词，
+    // 保证「上一镜关键帧 + 运动描述」出的片段也符合该导演的光线与色彩语法。
+    const styledVideo = stylePrompts(opts.prompt || '', opts.negative || '');
+    const videoPrompt = styledVideo.prompt;
+    const videoNegative = styledVideo.negative;
+    const videoStyleName = typeof styleArg(opts.style) === 'string' ? styleArg(opts.style) : 'cinematic';
 
     // 主路径：本地 ComfyUI 图生视频 / 首尾帧工作流
     // 只导出导演包时跳过本地视频渲染（成片交给导演工作台生成），避免浪费 GPU
     if (comfyWorkflows.video && comfy.outputMode !== 'director-pack') {
       try {
         const first = frames.find(Boolean);
-        const ref = referenceBuffer(first, { seed: opts.prompt, shotNo: opts.shotNo || 1, style: opts.style });
+        const ref = referenceBuffer(first, { seed: opts.prompt, shotNo: opts.shotNo || 1, style: styleArg(opts.style) });
         const result = await runComfy('video', {
-          prompt: opts.prompt || '', motion: opts.prompt || '',
+          prompt: videoPrompt, negative: videoNegative,
+          motion: videoPrompt,
           seed: `clip-${first}-${opts.shotNo || 1}`,
           frames: Math.round(duration * (comfy.fps || 24)), duration,
-          shotNo: opts.shotNo || 1, style: opts.style,
+          shotNo: opts.shotNo || 1, style: videoStyleName,
           filenamePrefix: `lingximanju_clip_${opts.shotNo || 1}`,
           imageBuffer: ref?.buffer, imageName: ref?.name,
         }, signal);
-        const videoAsset = result.assets.find((a) => a.kind === 'video') || result.primary;
+        const videoAsset = result.assets.find((a) => a.kind === 'video');
+        // 工作流只出图时绝不能把图片当视频片段：真实模式必须拿到视频文件
+        if (!videoAsset) {
+          throw new Error(`ComfyUI 工作流已执行（${result.promptId}）但没有视频产物，请确认输出节点是 SaveVideo / VHS_VideoCombine`);
+        }
         const posterAsset = result.assets.find((a) => a.kind === 'image');
         return {
           url: videoAsset.url, file: videoAsset.file, assets: result.assets,
           poster: posterAsset?.url || first || null,
           frames, duration, promptId: result.promptId,
           provider: 'comfyui', synthetic: false,
-          note: '由本地 ComfyUI 工作流生成的真实视频片段。',
+          source: 'comfyui', isRealVideo: true,
+          workflow: String(comfy.videoWorkflowName || 'video'),
+          filmPolicy,
+          note: `由 ComfyUI「${comfy.videoWorkflowName || '视频工作流'}」真实生成（prompt_id ${result.promptId}）。`,
         };
       } catch (err) {
-        if (comfy.strict) throw err;
+        // 用户确实接了视频工作流时，real 策略不允许把失败静默伪装成片段：
+        // 抛错让节点标红，直接看到是哪一段的 ComfyUI 出问题。
+        // 完全没有配置工作流时仍走 mock，但验收会明确判「真实片段 0/N」并给出配置指引。
+        if (comfy.strict || (filmPolicy === 'real' && comfyWorkflows.video)) throw err;
         log('warn', `ComfyUI 视频生成失败，已回退帧序列预览：${err.message}`);
       }
     }
@@ -716,7 +955,8 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
       duration,
       synthetic: true,
       provider: 'mock',
-      note: 'Mock 模式以关键帧序列模拟镜头预览；在设置里导入 ComfyUI 视频工作流后返回真实片段。',
+      source: 'mock', isRealVideo: false,
+      note: 'Mock 模式以关键帧序列模拟镜头预览，不是 AI 生成视频；导入 ComfyUI 视频工作流后返回真实片段。',
     };
   }
 
@@ -796,5 +1036,5 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     }
   }
 
-  return { mode, comfyActive, generate, image, video, judge, detectTheme, testConnection };
+  return { mode, comfyActive, filmPolicy, generate, image, video, judge, detectTheme, testConnection };
 }

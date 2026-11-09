@@ -21,6 +21,25 @@ export function palette(style = 'cinematic') {
   return PALETTES[style] || PALETTES.cinematic;
 }
 
+/**
+ * 导演风格调色板：style 可以是内置风格名，也可以直接传一份
+ * { sky, ground, fog, accent, text } 覆盖（由 director-styles 档案提供），
+ * 让 Mock 出图在选不同导演时真的画出不同颜色，而不是只换提示词。
+ */
+function resolvePalette(style) {
+  if (style && typeof style === 'object' && Array.isArray(style.sky)) {
+    const base = PALETTES.cinematic;
+    return {
+      sky: style.sky.slice(0, 3).concat(base.sky.slice(style.sky.length)).slice(0, 3),
+      ground: style.ground || base.ground,
+      fog: style.fog || base.fog,
+      accent: style.accent || base.accent,
+      text: style.text || base.text,
+    };
+  }
+  return palette(style);
+}
+
 function esc(s = '') {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -43,7 +62,7 @@ export function storyboardSVG(opts = {}) {
     movement = '固定', prompt = '', style = 'cinematic', characters = [],
     seed = '', kind = 'keyframe',
   } = opts;
-  const p = palette(style);
+  const p = resolvePalette(style);
   const seedNum = hash(`${seed}|${prompt}|${shotNo}|${kind}`);
   const rnd = (n, min = 0, max = 1) => min + ((seedNum >> n) % 1000) / 1000 * (max - min);
   const w = 640, h = 360;
@@ -111,7 +130,7 @@ export function storyboardSVG(opts = {}) {
 /** 角色三视图：正面 / 侧面 / 背面 + 色板 */
 export function characterSVG(opts = {}) {
   const { name = '角色', appearance = '', style = 'cinematic', seed = '' } = opts;
-  const p = palette(style);
+  const p = resolvePalette(style);
   const w = 640, h = 360;
   const figure = (cx, flip = 1) => `<g transform="translate(${cx} 0) scale(${flip} 1)" fill="#0b111c" opacity=".9">
       <circle cx="0" cy="106" r="22"/>
@@ -132,26 +151,36 @@ export function characterSVG(opts = {}) {
   return svgFrame({ w, h, inner });
 }
 
-/** 角色多视图单张定妆：正面 / 侧面 / 背面之一 + 角色配色色板 */
+/** 角色多视图单张定妆：正面 / 3/4 侧 / 侧面 / 背面 / 面部特写之一 + 角色配色色板 */
 export function characterViewSVG(opts = {}) {
   const { name = '角色', appearance = '', view = 'front', palette: charColors = [], style = 'cinematic', seed = '' } = opts;
-  const p = palette(style);
+  const p = resolvePalette(style);
   const w = 640, h = 360;
-  const label = { front: '正面', side: '侧面', back: '背面' }[view] || '正面';
+  const label = { front: '正面', threeQuarter: '3/4 侧', side: '侧面', back: '背面', closeup: '面部特写' }[view] || '正面';
   const swatches = (charColors.length ? charColors : ['#0b111c', p.sky[1], p.accent]).slice(0, 5);
-  const narrow = view === 'side' ? 0.62 : 1;
-  const figure = `<g transform="translate(320 0) scale(${narrow} 1)" fill="#0b111c" opacity=".9">
+  // 各视角用不同的横向压缩模拟转身幅度：3/4 侧 0.84、侧面 0.62、背面镜像
+  const narrow = { side: 0.62, threeQuarter: 0.84 }[view] || 1;
+  const isFace = view === 'closeup';
+  const bodyFigure = `<g transform="translate(320 0) scale(${narrow} 1)" fill="#0b111c" opacity=".9">
       <circle cx="0" cy="106" r="22"/>
       <path d="M-30 132 Q0 120 30 132 L38 258 L-38 258 Z"/>
       <path d="M-38 258 L-24 320 L-8 320 L-6 258 Z M38 258 L24 320 L8 320 L6 258 Z"/>
       ${view === 'back' ? '' : `<rect x="-34" y="136" width="68" height="10" fill="${p.accent}" opacity=".55"/>`}
+    </g>`;
+  // 面部特写：只画头肩，眼睛与鼻梁用最小笔画交代「这是近景参考」
+  const faceFigure = `<g transform="translate(320 0)" fill="#0b111c" opacity=".92">
+      <ellipse cx="0" cy="168" rx="58" ry="74"/>
+      <path d="M-96 320 Q-70 236 -34 226 L34 226 Q70 236 96 320 Z"/>
+      <ellipse cx="0" cy="152" rx="26" ry="34" fill="${p.sky[1]}" opacity=".55"/>
+      <circle cx="-22" cy="150" r="4" fill="${p.accent}" opacity=".8"/>
+      <circle cx="22" cy="150" r="4" fill="${p.accent}" opacity=".8"/>
     </g>`;
   const inner = `<rect width="640" height="360" fill="${p.sky[0]}"/>
     <rect x="0" y="0" width="640" height="46" fill="#080b12" opacity=".85"/>
     <text x="20" y="30" fill="${p.accent}" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="17" font-weight="700">${esc(name)} · 角色多视图 · ${label}</text>
     <g>
       <rect x="242" y="60" width="156" height="250" rx="10" fill="${p.sky[1]}" opacity=".28" stroke="rgba(255,255,255,.12)"/>
-      ${figure}
+      ${isFace ? faceFigure : bodyFigure}
       <text x="320" y="302" text-anchor="middle" fill="${p.text}" font-size="12" font-family="PingFang SC,sans-serif" opacity=".8">${label}</text>
     </g>
     <text x="20" y="340" fill="${p.text}" opacity=".72" font-size="12" font-family="PingFang SC,sans-serif">${esc(appearance || '造型由角色属性驱动')}</text>
@@ -159,10 +188,44 @@ export function characterViewSVG(opts = {}) {
   return svgFrame({ w, h, inner });
 }
 
+/** 角色定妆板：多视角并排在一张图里，供视频模型作为「角色设定板」参考 */
+export function characterSheetSVG(opts = {}) {
+  const { name = '角色', appearance = '', views = ['front', 'threeQuarter', 'side', 'back'], palette: charColors = [], style = 'cinematic', seed = '' } = opts;
+  const p = resolvePalette(style);
+  const w = 640, h = 360;
+  const list = (Array.isArray(views) && views.length ? views : ['front', 'threeQuarter', 'side', 'back']).slice(0, 5);
+  const labels = { front: '正面', threeQuarter: '3/4 侧', side: '侧面', back: '背面', closeup: '面部' };
+  const cellW = Math.floor(600 / list.length);
+  const swatches = (charColors.length ? charColors : ['#0b111c', p.sky[1], p.accent]).slice(0, 5);
+  const cells = list.map((v, i) => {
+    const x = 20 + i * cellW;
+    const cx = x + cellW / 2;
+    const narrow = { side: 0.62, threeQuarter: 0.84 }[v] || 1;
+    const scale = Math.min(0.8, cellW / 168);
+    const face = v === 'closeup';
+    const figure = face
+      ? `<g transform="translate(${cx} 0) scale(${scale})" fill="#0b111c" opacity=".92">
+          <ellipse cx="0" cy="170" rx="52" ry="66"/><path d="M-88 318 Q-62 238 -32 228 L32 228 Q62 238 88 318 Z"/></g>`
+      : `<g transform="translate(${cx} 0) scale(${scale * narrow} ${scale})" fill="#0b111c" opacity=".9">
+          <circle cx="0" cy="106" r="22"/><path d="M-30 132 Q0 120 30 132 L38 258 L-38 258 Z"/>
+          <path d="M-38 258 L-24 320 L-8 320 L-6 258 Z M38 258 L24 320 L8 320 L6 258 Z"/>
+          ${v === 'back' ? '' : `<rect x="-34" y="136" width="68" height="10" fill="${p.accent}" opacity=".55"/>`}</g>`;
+    return `<g><rect x="${x}" y="56" width="${cellW - 8}" height="256" rx="8" fill="${p.sky[1]}" opacity=".22" stroke="rgba(255,255,255,.10)"/>${figure}
+      <text x="${cx}" y="300" text-anchor="middle" fill="${p.text}" font-size="11" font-family="PingFang SC,sans-serif" opacity=".78">${labels[v] || v}</text></g>`;
+  }).join('');
+  const inner = `<rect width="640" height="360" fill="${p.sky[0]}"/>
+    <rect x="0" y="0" width="640" height="46" fill="#080b12" opacity=".85"/>
+    <text x="20" y="30" fill="${p.accent}" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="17" font-weight="700">${esc(name)} · 角色设定板 · ${list.length} 视图</text>
+    ${cells}
+    <text x="20" y="340" fill="${p.text}" opacity=".72" font-size="12" font-family="PingFang SC,sans-serif">${esc(appearance || '同一角色多视角，供关键帧与视频作为身份参考')}</text>
+    <g transform="translate(${620 - swatches.length * 18} 330)">${swatches.map((c, i) => `<circle cx="${i * 18}" cy="0" r="7" fill="${c}"/>`).join('')}</g>`;
+  return svgFrame({ w, h, inner });
+}
+
 /** 转场/空间锚点图：左右机位 + 中间平滑过渡带 */
 export function transitionSVG(opts = {}) {
   const { from = '机位 A', to = '机位 B', style = 'cinematic', seed = '' } = opts;
-  const p = palette(style);
+  const p = resolvePalette(style);
   const inner = `<rect width="640" height="360" fill="${p.sky[0]}"/>
     <rect x="0" y="0" width="300" height="360" fill="${p.sky[1]}" opacity=".55"/>
     <rect x="340" y="0" width="300" height="360" fill="${p.sky[2]}" opacity=".30"/>
@@ -180,7 +243,7 @@ export function transitionSVG(opts = {}) {
 /** 成片海报 */
 export function posterSVG(opts = {}) {
   const { title = '未命名影片', shotCount = 0, duration = 0, style = 'cinematic' } = opts;
-  const p = palette(style);
+  const p = resolvePalette(style);
   const inner = `<rect width="640" height="360" fill="${p.sky[0]}"/>
     <circle cx="500" cy="90" r="150" fill="${p.accent}" opacity=".18" filter="url(#glow)"/>
     <rect x="0" y="230" width="640" height="130" fill="${p.ground}" opacity=".8"/>

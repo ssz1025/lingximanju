@@ -108,14 +108,16 @@ function configStripHTML(settings, comfy) {
   const llmOk = llmReady(settings);
   const videoOk = Boolean(comfy?.videoWorkflow);
   const imageOk = Boolean(comfy?.imageWorkflow);
+  // 音色抽卡工作流是可选项：没有它预设音色照样能分配、能试听，所以不计入「未就绪」
+  const audioOk = Boolean(comfy?.audioWorkflow);
   const allOk = llmOk && videoOk && imageOk;
   const label = llmOk ? llmReadyLabel(settings) : null;
   return `<div class="hv-config ${allOk ? 'ok' : 'warn'}">
     <span class="hv-config-ico">${allOk ? '✓' : '⚠'}</span>
     <div class="hv-config-text"><strong>${allOk ? '模型已就绪' : '模型尚未配置完整'}</strong>
       <small>${allOk
-      ? `文本模型 ${esc(label.name)} · 本地 ComfyUI 出图与视频工作流均已导入`
-      : `文本大模型${llmOk ? '已配置' : '未配置（用内置模板）'} · ComfyUI 出图${imageOk ? '已导入' : '未导入'} / 视频${videoOk ? '已导入' : '未导入'} · 不配置也能完整体验流程`}</small></div>
+      ? `文本模型 ${esc(label.name)} · 本地 ComfyUI 出图与视频工作流均已导入${audioOk ? ' · 音色抽卡已就绪' : ' · 音色抽卡未配置（可选）'}`
+      : `文本大模型${llmOk ? '已配置' : '未配置（用内置模板）'} · ComfyUI 出图${imageOk ? '已导入' : '未导入'} / 视频${videoOk ? '已导入' : '未导入'} · 音色抽卡${audioOk ? '已导入' : '未导入'}（可选） · 不配置也能完整体验流程`}</small></div>
     <button class="btn sm" data-act="settings">⚙ ${allOk ? '查看模型设置' : '去配置模型'}</button>
   </div>`;
 }

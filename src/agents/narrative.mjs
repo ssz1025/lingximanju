@@ -6,6 +6,7 @@ import { buildCharacterPrompt } from '../core/characters.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
   saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
 import { topoLayers } from '../core/graph.mjs';
+import { resolveRuntimeSpec, allocateShots, shotSequenceStarts } from '../core/runtime-spec.mjs';
 
 const textOf = (v) => String(v || '').trim();
 const brief = (s, n = 46) => (String(s || '').length > n ? `${String(s).slice(0, n)}…` : String(s || ''));
@@ -76,10 +77,19 @@ defineAgent({
     const script = findScript(ctx) || { scenes: [], characters: [] };
     const context = ctx.upstream.find((n) => n.data?.context)?.data?.context || null;
     const sceneLimit = Math.max(1, Math.min(4, Number(ctx.node.data.sceneLimit) || 2));
-    const shotsPerScene = Math.max(2, Math.min(5, Number(ctx.node.data.shotsPerScene) || 3));
+    // 短剧时长规格：全片镜头总数必须精确等于片段总数（30s / 3s → 10 个镜头）
+    const runtime = ctx.settings?.runtime?.schema === 1 ? ctx.settings.runtime : resolveRuntimeSpec(ctx.project);
     ctx.progress(0.25);
     const result = await ctx.providers.generate('events', { scenes: script.scenes.slice(0, sceneLimit), idea: script.logline }, ctx.signal);
     const events = (result.events || []).slice(0, sceneLimit);
+    // 先摊平全部场景，再按「总片段数」分配每场景镜头预算，避免各场景各自取默认值导致片段数失控
+    const sceneGroups = events.map((e) => (e.scenes && e.scenes.length
+      ? e.scenes
+      : [{ title: e.title, location: '内景', time: '夜', summary: e.summary }]));
+    const sceneCount = sceneGroups.reduce((a, g) => a + g.length, 0);
+    const budgets = allocateShots(sceneCount, runtime);
+    const sequenceStarts = shotSequenceStarts(sceneCount, runtime);
+    let flatIndex = 0;
     ctx.log('think', `拆解为 ${events.length} 个事件，按 processChain 保持因果顺序`);
     ctx.progress(0.55);
 
@@ -118,24 +128,31 @@ defineAgent({
       }, ctx.node.id, 'flow');
       created.push(eventNode.id);
       // 式(5)：事件 → 场景 → 镜头递归展开——事件下所有场景都要生成场景节点，不能只取 scenes[0]
-      const sceneSpecs = (event.scenes && event.scenes.length)
-        ? event.scenes
-        : [{ title: event.title, location: '内景', time: '夜', summary: event.summary }];
+      const sceneSpecs = sceneGroups[i];
       for (const sceneSpec of sceneSpecs) {
+        const shotCount = budgets[flatIndex] || 0;
+        const sequenceStart = sequenceStarts[flatIndex] || 1;
+        flatIndex += 1;
+        // 片段数少于场景数时，多出来的场景不生成镜头，保证全片片段数精确
+        if (!shotCount) continue;
         const sceneNode = ctx.addNodeAndEdge({
           type: 'scene', agent: 'storyboard',
           title: `场景 ${sceneIndex + 1} · ${sceneSpec.location || sceneSpec.title}`,
-          data: { scene: sceneSpec, script, context, relevantChunks, fragments, index: sceneIndex, shotsPerScene, depth: 2,
+          data: { scene: sceneSpec, script, context, relevantChunks, fragments, index: sceneIndex,
+            shotCount, sequenceStart, clipSeconds: runtime.clipSeconds, depth: 2,
             summary: brief(sceneSpec.summary, 40) },
         }, eventNode.id, 'flow');
         created.push(sceneNode.id);
         // 预生成镜头概要，供机位依赖图与一致性报告使用；片段随 shots 提示词下发（式 6）
         const shots = await ctx.providers.generate('shots', {
-          scene: sceneSpec, count: shotsPerScene, idea: script.logline,
+          scene: sceneSpec, count: shotCount, clipSeconds: runtime.clipSeconds, idea: script.logline,
           fragments,
         }, ctx.signal);
-        shotPlan.push({ event: i + 1, scene: sceneIndex + 1, location: sceneSpec.location, shots: shots.shots || [],
-          fragmentsUsed: (relevantChunks || []).length });
+        const planned = (shots.shots || []).slice(0, shotCount).map((s, k) => ({
+          ...s, shotNo: sequenceStart + k, sequence: sequenceStart + k, duration: runtime.clipSeconds,
+        }));
+        shotPlan.push({ event: i + 1, scene: sceneIndex + 1, location: sceneSpec.location, shots: planned,
+          shotCount, sequenceStart, fragmentsUsed: (relevantChunks || []).length });
         sceneIndex += 1;
       }
     }
@@ -146,7 +163,8 @@ defineAgent({
       knowledgeChunks: chunks.length, fragmentsPerEvent: perEventFragments.map((f) => f.length),
       hierarchy: ['事件', '场景', '镜头'], eventCount: events.length,
       sceneCount: sceneIndex, plannedShots,
-      spawned: created, summary: `${events.length} 事件 → ${sceneIndex} 场景 → ${plannedShots} 镜头`,
+      runtime: { clipCount: runtime.clipCount, clipSeconds: runtime.clipSeconds, totalSeconds: runtime.totalSeconds },
+      spawned: created, summary: `${events.length} 事件 → ${sceneIndex} 场景 → ${plannedShots} 镜头（${runtime.clipSeconds}s/段 · ${runtime.totalSeconds}s）`,
     });
     ctx.log('info', `画布已展开 ${created.length} 个规划节点；事件专属原文片段（FRAGMENT）已随节点下发`);
   },
@@ -222,13 +240,38 @@ defineAgent({
   async run(ctx) {
     const d = ctx.node.data;
     const scene = d.scene || { location: '场景', summary: '' };
-    const count = Math.max(2, Math.min(5, Number(d.shotsPerScene) || 3));
+    const runtime = ctx.settings?.runtime?.schema === 1 ? ctx.settings.runtime : resolveRuntimeSpec(ctx.project);
+    const clipSeconds = Number(d.clipSeconds) || runtime.clipSeconds;
+    const sequenceStart = Number(d.sequenceStart) || 1;
+    // 镜头数来自 decomposer 按片段总数下发的预算，不再各场景各自取默认 2~5
+    const count = Math.max(1, Math.min(runtime.clipCount, Number(d.shotCount ?? d.shotsPerScene) || 3));
     ctx.progress(0.2);
+    // 导演风格随上下文下发（编排器注入 settings.aesthetic）；
+    // 分镜阶段就要带上主色 / 光线 / 媒介，否则后续出图只能看见镜头本身而看不见风格。
+    const aesthetic = ctx.settings?.aesthetic || null;
     const res = await ctx.providers.generate('shots', {
-      scene, count, idea: d.script?.logline,
+      scene, count, clipSeconds, idea: d.script?.logline,
       fragments: d.fragments || formatFragments(d.relevantChunks, 4),
+      aesthetic,
     }, ctx.signal);
-    const shots = res.shots || [];
+    const shots = (res.shots || []).slice(0, count).map((s, i) => ({
+      ...s, sequence: sequenceStart + i, shotNo: sequenceStart + i, duration: clipSeconds,
+      // 每镜写入风格锚点：出图 / 出片 / 导演包都会读 shot.aesthetic，保证风格真的落到画面上
+      aestheticId: aesthetic?.id || null,
+      paletteName: aesthetic?.paletteName || null,
+      medium: aesthetic?.medium?.length ? aesthetic.medium[(sequenceStart + i) % aesthetic.medium.length] : null,
+    }));
+    // LLM 少给镜头时补齐，保证「片段数 = clipCount」严格成立（零 Key mock 会正好给 count 个）
+    const template = shots[shots.length - 1] || {
+      size: '中景', angle: '平视', movement: '固定',
+      ffDesc: `${scene.location || scene.title || '场景'}｜延续上一镜头的空间与光线`,
+      motionDesc: '镜头保持，角色动作延续', audioDesc: '环境音延续', characters: [],
+    };
+    while (shots.length < count) {
+      const i = shots.length;
+      shots.push({ ...template, sequence: sequenceStart + i, shotNo: sequenceStart + i,
+        duration: clipSeconds, ffDesc: `${template.ffDesc}（续镜 ${i + 1}）` });
+    }
     const charNode = ctx.project.nodes.find((n) => n.type === 'character');
     const cameraNode = ctx.project.nodes.find((n) => n.type === 'camera');
     const finalNode = ctx.project.nodes.find((n) => n.type === 'final');
@@ -259,7 +302,7 @@ defineAgent({
 
       const videoNode = ctx.addNodeAndEdge({
         type: 'video', agent: 'video', title: `视频片段 · ${shot.shotNo}`,
-        data: { shot },
+        data: { shot, clipSeconds, sequence: shot.sequence },
       }, reviewNode.id, 'flow');
       if (finalNode) ctx.addEdges([{ from: videoNode.id, to: finalNode.id, kind: 'flow' }]);
 

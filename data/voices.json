@@ -1,0 +1,196 @@
+{
+  "schema": 1,
+  "updatedAt": 1794168268968,
+  "voices": [
+    {
+      "id": "vox_mw89gofb1ojvw",
+      "name": "沉稳旁白·中年男声",
+      "gender": "男",
+      "ageGroup": "中年",
+      "tags": [
+        "沉稳",
+        "旁白",
+        "威严",
+        "讲故事"
+      ],
+      "language": "zh-CN",
+      "sampleText": "这是一个发生在雨夜的故事，真相藏在最不起眼的角落。",
+      "rate": 0.92,
+      "pitch": 0.8,
+      "note": "适合开篇旁白与权威长者",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb2gsy1",
+      "name": "清亮少年·青年男声",
+      "gender": "男",
+      "ageGroup": "青年",
+      "tags": [
+        "活泼",
+        "阳光",
+        "少年",
+        "热血"
+      ],
+      "language": "zh-CN",
+      "sampleText": "交给我吧！这条路我熟，保证没问题！",
+      "rate": 1.05,
+      "pitch": 1.35,
+      "note": "适合热血主角与少年角色",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb3kbli",
+      "name": "磁性反派·中年男声",
+      "gender": "男",
+      "ageGroup": "中年",
+      "tags": [
+        "磁性",
+        "成熟",
+        "反派",
+        "冷峻"
+      ],
+      "language": "zh-CN",
+      "sampleText": "你以为，你看到的才是全部吗？",
+      "rate": 0.9,
+      "pitch": 0.7,
+      "note": "适合反派、幕后黑手",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb4zh36",
+      "name": "儒雅书生·青年男声",
+      "gender": "男",
+      "ageGroup": "青年",
+      "tags": [
+        "儒雅",
+        "温和",
+        "书生",
+        "冷静"
+      ],
+      "language": "zh-CN",
+      "sampleText": "此中道理，容我慢慢道来。",
+      "rate": 0.95,
+      "pitch": 1.05,
+      "note": "适合军师、学者、暖男",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb52msw",
+      "name": "苍老智者·老年男声",
+      "gender": "男",
+      "ageGroup": "老年",
+      "tags": [
+        "苍老",
+        "智慧",
+        "长者",
+        "沉稳"
+      ],
+      "language": "zh-CN",
+      "sampleText": "孩子，有些答案，要等你走够远才看得见。",
+      "rate": 0.85,
+      "pitch": 0.6,
+      "note": "适合爷爷、导师、史官",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb69ku0",
+      "name": "温柔少女·青年女声",
+      "gender": "女",
+      "ageGroup": "青年",
+      "tags": [
+        "温柔",
+        "甜美",
+        "清新",
+        "治愈"
+      ],
+      "language": "zh-CN",
+      "sampleText": "别怕，我一直都在你身边呀。",
+      "rate": 1,
+      "pitch": 1.4,
+      "note": "适合女主、妹妹、治愈系",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb79lub",
+      "name": "知性御姐·中年女声",
+      "gender": "女",
+      "ageGroup": "中年",
+      "tags": [
+        "知性",
+        "冷静",
+        "御姐",
+        "成熟"
+      ],
+      "language": "zh-CN",
+      "sampleText": "数据不会说谎，我们只需要读懂它。",
+      "rate": 0.96,
+      "pitch": 1.1,
+      "note": "适合女强、记者、分析师",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb8e1pj",
+      "name": "英气女将·青年女声",
+      "gender": "女",
+      "ageGroup": "青年",
+      "tags": [
+        "英气",
+        "飒爽",
+        "果断",
+        "女强"
+      ],
+      "language": "zh-CN",
+      "sampleText": "列队！今日，我们不退半步。",
+      "rate": 1.02,
+      "pitch": 1.15,
+      "note": "适合女将、侠女、队长",
+      "tts": null,
+      "updatedAt": 1794168268967
+    },
+    {
+      "id": "vox_mw89gofb9lb68",
+      "name": "俏皮萝莉·儿童女声",
+      "gender": "女",
+      "ageGroup": "儿童",
+      "tags": [
+        "俏皮",
+        "可爱",
+        "活泼",
+        "天真"
+      ],
+      "language": "zh-CN",
+      "sampleText": "嘿嘿，这个秘密我只告诉你一个人哦！",
+      "rate": 1.08,
+      "pitch": 1.6,
+      "note": "适合妹妹、精灵、吉祥物",
+      "tts": null,
+      "updatedAt": 1794168268968
+    },
+    {
+      "id": "vox_mw89gofcawvtr",
+      "name": "中性叙述·中性声线",
+      "gender": "中性",
+      "ageGroup": "青年",
+      "tags": [
+        "中性",
+        "冷静",
+        "纪录片",
+        "旁白"
+      ],
+      "language": "zh-CN",
+      "sampleText": "接下来，我们把镜头转向故事的背面。",
+      "rate": 0.98,
+      "pitch": 1,
+      "note": "适合纪录片旁白与无性别角色",
+      "tts": null,
+      "updatedAt": 1794168268968
+    }
+  ]
+}

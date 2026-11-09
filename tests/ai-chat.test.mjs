@@ -93,6 +93,11 @@ function firstActBtn(msgEl, i = 0) {
   return btn;
 }
 
+/** 对话已改为整页视图：页面宿主 → .page-content 才是对话主体 */
+function pageContent() {
+  return modalRoot.children.at(-1).querySelector('.page-content');
+}
+
 /* ---- 用例 ---- */
 
 test('开场消息动作按钮初始可点；忙等开始全体置灰，结束恢复', () => {
@@ -100,7 +105,7 @@ test('开场消息动作按钮初始可点；忙等开始全体置灰，结束�
     welcome: { text: 'hi', actions: [{ label: '✦ 一键生成封面', act: 'a' }, { label: '⇧ 上传参考图', act: 'b' }] },
     actions: { a: async () => {}, b: async () => {} },
   });
-  const list = modalRoot.children.at(-1).querySelector('[data-aichat="list"]');
+  const list = pageContent().querySelector('[data-aichat="list"]');
   const btn = firstActBtn(list.children.at(-1));
   assert.equal(btn.disabled, false, '初始可点');
   ui.setBusy(true);
@@ -139,7 +144,7 @@ test('动作按钮点击后该消息按钮消费式禁用：处理器恰好一�
     welcome: { text: 'x', actions: [{ label: '✦ 生成封面', act: 'gen' }] },
     actions: { gen: async () => { calls += 1; } },
   });
-  const list = modalRoot.children.at(-1).querySelector('[data-aichat="list"]');
+  const list = pageContent().querySelector('[data-aichat="list"]');
   const btn = firstActBtn(list.children.at(-1));
   await click(btn);
   await flush();
@@ -151,7 +156,7 @@ test('动作按钮点击后该消息按钮消费式禁用：处理器恰好一�
 
 test('建议 chips：忙等期间置灰、结束后恢复（修复「经历一次忙等即永久禁用」）', () => {
   const ui = openAIChat({ welcome: { text: 'x', suggestions: ['换个风格', '更悬疑一点'] } });
-  const list = modalRoot.children.at(-1).querySelector('[data-aichat="list"]');
+  const list = pageContent().querySelector('[data-aichat="list"]');
   const chip = list.children.at(-1).querySelectorAll('[data-aichat-chip]')[0];
   assert.equal(chip.disabled, false, '初始可点');
   ui.setBusy(true);
@@ -166,7 +171,7 @@ test('发送链路：send → onSend 收到文本与历史，忙等包裹完整�
     welcome: { text: 'w' },
     onSend: async ({ text, history }) => { seen.push({ text, historyLen: history.length }); },
   });
-  const backdrop = modalRoot.children.at(-1);
+  const backdrop = pageContent();
   const input = backdrop.querySelector('[data-aichat="input"]');
   const sendBtn = backdrop.querySelector('[data-aichat="send"]');
   input.value = '深蓝夜空下的城市天际线';

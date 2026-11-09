@@ -150,41 +150,122 @@ export function validateNovelInput(text, opts = {}) {
   };
 }
 
+/* ---- 候选角色名启发式：说话/动作动词前的中文名 + 对话冒号前的中文名 ---- */
+// 说话动词 + 高频动作动词：只有对话的小说能靠「XX说」抽人，纯描写段（「林晚推门而入」）
+// 需要靠动作动词才能把首位角色抓出来。长动词排前面，配合惰性量词取到正确边界。
+const SPEECH_VERBS = '说道|笑道|喊道|叫道|低声|轻声|抬眼|看向|转身|拿出|递给|皱眉|笑了|沉默|点头|摇头|听见|想起|站在|坐下|走进|走出|握住|放下|接过|推开|推门|迈步|跨进|掀开|拂袖|抬手|低头|抬头|回身|起身|止步|驻足|打量|端详|说|道|问|答|望|盯|瞥|叹|把|将|回|应|推|拉|迈|跨|掀|抽|举|扬|俯|仰|退|蹲|倚|靠|抿|蹙|拂|瞧|瞅|扫|走|跑|看|站|坐';
+// 常见叙述词 / 非人名词（旧表扩充：方位、时间、指代、量词、动作补语）
+const NAME_STOP = new Set([
+  '他们', '我们', '自己', '忽然', '这时', '没有', '一个', '什么', '只是', '已经', '因为', '于是',
+  '然后', '如果', '虽然', '但是', '还是', '这个', '那个', '似乎', '仿佛', '声音', '窗外', '雨水',
+  '片刻', '终于', '其实', '当时', '随后', '接着', '突然', '所有', '一切', '对方', '两人', '众人',
+  '有人', '不知', '不觉', '缓缓', '轻轻', '慢慢', '微微', '依旧', '仍然', '立刻', '马上', '出来',
+  '进来', '过去', '现在', '以后', '之前', '这里', '那里', '心里', '眼中', '手里', '脸上', '身后',
+  '一阵', '一声', '一次', '一句', '一直', '一边', '一起', '这些', '那些', '如此', '这样', '那样',
+  '因为', '所以', '可是', '不过', '而且', '并且', '于是', '随即', '顿时', '忽地', '猛地', '只得',
+  '却见', '只见', '但见', '听得', '说罢', '话音', '半晌', '良久', '此时', '此刻', '当下', '次日',
+  '第二天', '门外', '门内', '屋外', '屋内', '桌上', '地上', '天上', '远处', '近处', '四周',
+]);
+// 名字前的身份/修饰前缀：剥掉后才是真正的人名（「少年阿杰说」→「阿杰」）
+const NAME_PREFIX = /^(?:少年|少女|年轻|年迈|年老|老|小|那位|那|这位|这|一位|一个|身穿|穿着|白衣|黑衣|年|忽然|这时|随后|接着|突然|于是|然后|片刻|终于|其实|当时|依旧|仍然|立刻|马上|缓缓|轻轻|慢慢|微微|只见|却见|但见)+/;
+// 常见姓氏：命中则更像真人名，加权排序；非姓氏的孤例需要更多证据才入选
+const SURNAMES = '王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤';
+// 虚词 / 指代 / 地点组织后缀：含这些的「名字」基本是句子碎片，不是人名
+const BAD_NAME_RE = /[的地得了着过们是很最这那每某所有\s\dA-Za-z]/;
+const PLACE_SUFFIX = /(?:城|镇|村|府|局|校|店|宫|寺|山|河|街|路|院|楼|站|国|军|队|帮|客栈|酒楼|茶馆|花园|广场|码头|车站|大街|小巷)$/;
+// 说话/动作动词的尾字：对话冒号前的「林晚笑道」「阿杰说」不是人名，必须剔除
+const VERB_TAIL_RE = /(?:说|道|问|答|笑|喊|叫|望|盯|瞥|叹|把|将|回|应|摇|看|听|想|站|坐|走|握|放|接|推|点|转|拿|递|进|出|声|低|轻|抬|忽|然|后|着)$/;
+const IN_NAME_VERB_RE = /[说问答喊叫]/;
+
+function cleanCandidateName(raw) {
+  let name = String(raw || '').trim();
+  // 反复剥前缀（可能叠加，如「那位少年阿杰」）
+  for (let i = 0; i < 3; i += 1) {
+    const stripped = name.replace(NAME_PREFIX, '');
+    if (!stripped || stripped === name || stripped.length < 2) break;
+    name = stripped;
+  }
+  if (name.length < 2 || name.length > 4) return '';
+  return name;
+}
+
+function firstSentenceOf(src, name) {
+  const at = src.indexOf(name);
+  if (at < 0) return '';
+  let start = at;
+  for (let i = at - 1; i >= 0 && at - i <= 160; i -= 1) {
+    if (/[。！？!?\n「」“”]/.test(src[i])) { start = i + 1; break; }
+  }
+  let end = at + name.length;
+  for (let i = end; i < src.length && i - at <= 160; i += 1) {
+    if (/[。！？!?\n]/.test(src[i])) { end = i + 1; break; }
+  }
+  return src.slice(start, end).trim().slice(0, 120);
+}
+
 /**
  * 从原著抽取候选角色（式(1) 输入归一 / 角色一致性前置）。
- * 零依赖的频次启发式：取「XX说/道/问/看向…」与「XX：『…』」前的 2–3 字中文名，
- * 过滤常见叙述词。抽不到时返回空数组，由 Provider 用主题角色兜底。
+ *
+ * 零依赖的频次启发式，相较旧实现：
+ *  - 全书扫描（旧实现只取前 60000 字，长篇中后段角色必然漏掉）
+ *  - 名字放宽到 2–4 字并剥离身份修饰前缀，修正「少年阿杰说」被截成「年阿杰」的边界误捕
+ *  - 名字前是标点/行首的「严格边界」命中加权更高；常见姓氏加权；虚词/地点后缀过滤
+ *  - 每位候选附首现原文句子作为 evidence（可溯源），供零 Key 兜底与证据校验复用
+ *
+ * 抽不到时返回空数组，由 Provider 用主题角色兜底。返回字段向后兼容：
+ * name / role / hits / appearance 不变，新增 evidence / firstAt / strict。
  */
 export function extractCharacters(text, limit = 4) {
-  const s = String(text ?? '').slice(0, 60000);
-  const STOP = new Set([
-    '他们', '我们', '自己', '忽然', '这时', '没有', '一个', '什么', '只是', '已经', '因为', '于是',
-    '然后', '如果', '虽然', '但是', '还是', '这个', '那个', '似乎', '仿佛', '声音', '窗外', '雨水',
-    '片刻', '终于', '其实', '当时', '随后', '接着', '突然', '所有', '一切', '对方', '两人', '众人',
-    '有人', '不知', '不觉', '缓缓', '轻轻', '慢慢', '微微', '依旧', '仍然', '立刻', '马上', '出来',
-    '进来', '过去', '现在', '以后', '之前', '这里', '那里', '心里', '眼中', '手里', '脸上', '身后',
-    '一阵', '一声', '一次', '一句', '一直', '一边', '一起', '这些', '那些', '如此', '这样', '那样',
-  ]);
-  const freq = new Map();
-  const patterns = [
-    /([\u4e00-\u9fa5]{2,3})(?=(?:说道|说|道|问|答|低声|轻声|抬眼|看向|转身|把|将|拿出|递给|皱眉|笑了|沉默|点头|摇头|听见|想起|站在|坐下|走进|走出))/g,
-    /([\u4e00-\u9fa5]{2,3})\s*[：:]\s*[「“"']/g,
-  ];
-  for (const re of patterns) {
+  const s = String(text ?? '');
+  if (!s) return [];
+  const freq = new Map();      // name → { hits, strict }
+  const add = (raw, strict) => {
+    const name = cleanCandidateName(raw);
+    if (!name || NAME_STOP.has(name) || BAD_NAME_RE.test(name) || PLACE_SUFFIX.test(name)) return;
+    if (VERB_TAIL_RE.test(name) || IN_NAME_VERB_RE.test(name)) return;
+    if (/^[第这那每某所有]/.test(name)) return;
+    const cur = freq.get(name) || { hits: 0, strict: 0 };
+    cur.hits += 1;
+    if (strict) cur.strict += 1;
+    freq.set(name, cur);
+  };
+
+  const HAN = '[\\u4e00-\\u9fa5]';
+  // 量词用惰性 {2,4}?：先按最短人名匹配，避免「林晚笑道」被贪婪截成「林晚笑」+「道」
+  // ① 边界模式用 lookbehind（不消耗前一个字符），避免匹配跳跃把后面真正的人名吞掉
+  const boundaryRe = new RegExp(`(?<![\\u4e00-\\u9fa5])(${HAN}{2,4}?)(?=(?:${SPEECH_VERBS}))`, 'g');
+  // ② 对话冒号：「林晚：“……”」，冒号天然是边界
+  const dialogueRe = new RegExp(`(${HAN}{2,4}?)\\s*[：:]\\s*[「“"']`, 'g');
+  // ③ 姓氏锚定：长文本连写（名字前无标点）时从常见姓氏起匹配，补回「顾长风说」这类
+  // 总长限 2–3 字（姓 + 1~2 字），避免「老王把钥匙递给…」被截成「王把钥匙」
+  const surnameRe = new RegExp(`([${SURNAMES}]${HAN}{1,2}?)(?=(?:${SPEECH_VERBS}))`, 'g');
+
+  for (const [re, strict] of [[boundaryRe, true], [dialogueRe, true], [surnameRe, false]]) {
     let m;
-    while ((m = re.exec(s))) {
-      const name = m[1];
-      if (STOP.has(name) || /[第这那每某]/.test(name[0])) continue;
-      freq.set(name, (freq.get(name) || 0) + 1);
-    }
+    while ((m = re.exec(s))) add(m[1], strict);
   }
-  return [...freq.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([name, hits]) => ({
-      name, role: '原著角色', hits,
+  if (!freq.size) return [];
+
+  const ranked = [...freq.entries()]
+    .map(([name, v]) => {
+      const surname = SURNAMES.includes(name[0]);
+      const score = v.hits + v.strict * 2 + (surname ? 2 : 0);
+      return { name, ...v, surname, score };
+    })
+    // 非姓氏、只出现一次且无严格边界命中的孤例视为噪声（但保证至少留下得分最高者）
+    .filter((v) => v.hits >= 2 || v.strict > 0 || v.surname)
+    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.name.localeCompare(b.name, 'zh'))
+    .slice(0, Math.max(1, limit));
+
+  return ranked.map(({ name, hits, strict }) => {
+    const quote = firstSentenceOf(s, name);
+    return {
+      name, role: '原著角色', hits, strict,
+      firstAt: s.indexOf(name),
+      evidence: quote ? [{ quote, kind: 'mention' }] : [],
       appearance: `原著中出现的「${name}」· 服装 / 发型 / 随身物件跨镜头保持一致`,
-    }));
+    };
+  });
 }
 
 /* ---------------------------------------------------------------------------
