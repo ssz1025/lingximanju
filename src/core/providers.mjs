@@ -4,7 +4,7 @@
 // - comfyui：图片 / 视频直接提交本地 ComfyUI 导出的 API 格式 workflow（主路径）
 import { uid, writeAsset, readAsset } from './store.mjs';
 import { hash, storyboardSVG, characterSVG, characterViewSVG, characterSheetSVG, transitionSVG, posterSVG } from './artwork.mjs';
-import { parseWorkflow, runWorkflow } from './comfyui.mjs';
+import { parseWorkflow, runWorkflow, parseAgentParamReply } from './comfyui.mjs';
 import { resolveInterface } from './comfy-config.mjs';
 import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './knowledge.mjs';
@@ -1176,6 +1176,37 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
   });
 
   /**
+   * 接口参数 Agent：只有当该接口的可视化输入参数表里标了「由 Agent 生成」时才触发。
+   * 真实 LLM 模式下按本次画面内容产出参数；mock / 调用失败时用档案里填的兜底值，
+   * 任何情况都不阻断出图。结果转成 nodeOverrides，沿用既有注入链路（零改注入器）。
+   */
+  async function agentParamOverrides(cfg, vars, signal) {
+    const plan = Array.isArray(cfg?.paramPlan) ? cfg.paramPlan : [];
+    if (!plan.length) return [];
+    const fallback = plan.filter((p) => p.fallback !== undefined && p.fallback !== '')
+      .map((p) => ({ node: p.node, input: p.input, value: p.fallback }));
+    if (mode !== 'openai') return fallback;   // Mock 项目不发无谓请求
+    const fields = plan.map((p) => ({ node: p.node, input: p.input, 名称: p.label || p.input, 要求: p.hint || '' }));
+    const system = '你是 ComfyUI 工作流参数配置助手。只输出严格 JSON：{"params":[{"node":"节点id","input":"输入名","value":"参数值"}]}，不要解释、不要 Markdown 代码块。只为列出的字段给值，node 与 input 必须原样照抄；value 只能是字符串或数字，不要写对象、数组或 {{占位符}}。';
+    const user = JSON.stringify({
+      接口: cfg.imageWorkflowName || cfg.videoWorkflowName || cfg.audioWorkflowName || '',
+      本次画面提示词: String(vars?.prompt ?? '').slice(0, 900),
+      负向提示词: String(vars?.negative ?? cfg.negativePrompt ?? '').slice(0, 300),
+      画幅: `${cfg.width || ''}x${cfg.height || ''}`,
+      需要生成的参数: fields,
+    });
+    try {
+      const reply = await callLLM(system, user, signal, { intent: 'interface-params' });
+      const rows = parseAgentParamReply(reply, plan);
+      log('info', `接口参数 Agent 生成 ${rows.length}/${plan.length} 项`);
+      return rows.length ? rows : fallback;
+    } catch (err) {
+      log('warn', `接口参数 Agent 失败，回退档案兜底值：${err.message}`);
+      return fallback;
+    }
+  }
+
+  /**
    * 按「板块 + 本次指定接口」解析一份 ComfyUI 接口档案后执行。
    * 优先级：请求 interfaceId > 板块绑定 > 类别 activeId > 旧镜像字段。
    * 档案自带的请求参数 / 节点覆盖 / 显式绑定全部随 cfg 进入注入器。
@@ -1197,6 +1228,9 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
         scope: resolved.scope, via: resolved.via, warnings: resolved.warnings,
       },
     };
+    // 输入参数表里标为「由 Agent 生成」的槽位在这里补齐；接口没标记时零额外开销。
+    const agentOverrides = await agentParamOverrides(cfg, vars, signal);
+    if (agentOverrides.length) cfg.nodeOverrides = [...(cfg.nodeOverrides || []), ...agentOverrides];
     const r = await runWorkflow(cfg, workflow, { ...vars, cfg }, {
       signal, log, bindings: resolved.bindings,
       // 提交即把 prompt_id 交给上层落盘：服务重启后能凭它把已完成的结果认回来

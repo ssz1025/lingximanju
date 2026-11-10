@@ -94,7 +94,7 @@ export function repaintInterfacePickers(data = roster) {
     const list = interfacesForScope(data, scopeId);
     const saved = pickedInterfaceId(scopeId);
     sel.innerHTML = `<option value="">${esc(defaultLabel(data, scopeId))}</option>${list.map((e) =>
-      `<option value="${esc(e.id)}">${esc(e.name)}${e.capability ? ` · ${esc(e.capability)}` : ''}${e.active ? ' · 默认' : ''}</option>`).join('')}`;
+      `<option value="${esc(e.id)}">${esc(e.name)}${e.capability ? ` · ${esc(e.capability)}` : ''}${e.inputCount ? ` · ${e.inputCount} 输入` : ''}${e.active ? ' · 默认' : ''}</option>`).join('')}`;
     sel.value = [...sel.options].some((o) => o.value === saved) ? saved : '';
     sel.title = pickerTitle(scopeId);
     // 档案被删光 / 只剩一个时下拉失去意义，直接隐藏，不留一个空控件

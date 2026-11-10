@@ -71,6 +71,70 @@
 
 运行时链路：`POST /upload/image`（上传首帧 / 角色参考，SVG 自动渲染成 PNG）→ `POST /prompt` → 轮询 `GET /history/{prompt_id}` → `GET /view` 下载产物到 `data/assets/` → 回填到画布节点。每次运行的 `filename_prefix` 带唯一后缀，避免自定义输出节点复用同名文件。支持超时、取消、`node_errors` 可读化；`strict=false`（默认）时失败自动回退 Mock 并在日志标注。
 
+### 2.6 修改接口 JSON 与可视化输入参数（模型设置双入口）
+
+设置弹窗「模型、ComfyUI 与最终产物设置」的**两个 Tab 都能进入**：第一个 Tab「模型与运行」底部有「🔌 ComfyUI 接口与输入参数」卡片，展示 11 个生成服务各自当前使用的接口，两个按钮直接跳到接口档案 / 服务绑定；第二个 Tab 的「🔌 媒体生成接口档案」卡片是实际编辑区。
+
+**改接口文件**：点任一档案的「✎ 接口 JSON」→ 展开可编辑文本域（内容就是导入的那份「导出(API)」JSON）→ 直接改节点 / 写 `{{prompt}}` 占位符 → 「💾 保存 JSON」写回档案；也可「⇧ 用文件替换」载入新文件后再保存，或「⌗ 格式化」整理排版。保存时走 `parseWorkflow` 校验（界面保存格式会被明确拒绝），若该档案是当前生效接口，**镜像字段 `*Workflow` 同步更新**。改过节点 id / 输入名后，失效的参数表行会给出告警并在编译时自动跳过，不会把工作流图连坏。
+
+**可视化输入参数**：点「⚙ 输入参数」→ 后端 `describeInterfaceInputs()` 自动扫描这份 JSON 的**全部节点输入**，逐行列出「节点 id · 输入名 / 节点类型 / 当前值 / 推断角色 / 建议内置变量」，每行选一种取值来源：
+
+| 来源 | 行为 |
+|---|---|
+| `auto` 自动识别（默认） | 不生成任何覆盖，完全沿用原有「显式绑定 > 占位符 > 自动识别」注入链；新导入的接口默认全是这一档 |
+| `builtin` 内置变量 | 写 `{{prompt}}` / `{{seed}}` / `{{width}}` / `{{model}}` … 占位符，运行时由系统变量填充 |
+| `fixed` 固定值 | 把值写死到该节点输入（值里仍可含占位符） |
+| `agent` 由 Agent 生成 | 生图时把该字段连同接口名、本次画面提示词、负向词、画幅与填写的「要求」交给 LLM，让它产出本次参数 |
+| `skip` 保持原值 | 用工作流里写死的原值锁定该槽位，自动识别不再改写 |
+
+连线型输入（`images` / `positive` 这类 `[节点id, 0]`）只允许 `auto` / `skip`，避免覆盖图连接。表格保存为档案的 `inputSchema` 字段（只落非默认行），`resolveInterface()` 把它编译成 `nodeOverrides` 复用既有注入器，**注入器本身零改动**。
+
+### 2.7 工作流库内联参数表（上传即展开 · 可查看每项 · 可调顺序）
+
+在「出图工作流库（关键帧 / 角色 / 转场 / 海报）」上传新工作流后，参数**当场可视化**，不必再切到接口档案卡去找：
+
+- 每条库项行内都有「⚙ 参数（N）」与「✎ JSON」。`N` 是这份 JSON 里**需要人填的参数数**（连线槽位已扣除：实测 Krea2 类工作流 66 输入 → 38 项、多参考生图 74 → 40、视频 49 → 36），点开就是与接口档案卡**完全相同**的那张表（两处共用同一套渲染与保存，只有一份代码）。
+- **上传后自动展开第一个新增条目的参数表**并滚动到可见位置，同时照旧启动串行试跑；一次导入多份时只展开首个，其余提示行内「⚙ 参数」。
+- **每份工作流的参数完全由它自己的 JSON 决定**，没有任何固定参数清单：多图 / 多参考素材 / 参考文本 / 自定义节点全部按原样列出。
+- **查看每个参数**：点行内「ⓘ」展开详情——原始值、类型、节点类型与标题、推断角色与建议内置变量、**该节点全部输入**（便于看清同节点其它槽位）、媒体/多值/布尔的额外提示。
+- **调整顺序**：每行有 `⠿` 拖拽把手与 `↑` `↓` 按钮，两种方式都支持；改动只改界面顺序，「保存输入参数与顺序」时按当前可见顺序整体回写 `inputOrder`。点「↺ 恢复默认顺序」清空顺序表，回到工作流原始扫描顺序。
+
+顺序存放在档案的 `inputOrder` 字段（元素是 `node::input` 键）。它**只是显示语义**：注入器按槽位精确写值，与顺序无关；唯一影响是「由 Agent 生成」的待办会按你排好的顺序交给 LLM，提示词更贴近人工整理。老配置没有该字段 → 空数组 → 完全按扫描顺序，行为与升级前一致。
+
+### 2.8 参数表只显示需要填写的参数 · 控件按类型匹配
+
+参数表的目的是「让我知道这次要填什么」，所以**连线槽位不再成行出现**：`type === 'link'`（`[节点id, 输出序号]`）由工作流内部连接驱动，既不可配也不展示，只在表头留一行统计「已隐藏 M 个连线槽位」。`describeInterfaceInputs` 为此补了 `editable` 字段（连线 `false`），库项按钮的「⚙ 参数（N）」也改成只数可编辑项（`inputCount`），另给 `linkCount`。
+
+**输入控件按参数类型匹配**（`public/panels.js` 的 `inputControlHTML`），不再是清一色单行文本框：
+
+| 参数类型 | 控件 | 判定依据 |
+|---|---|---|
+| 长文本 / 提示词 | **多行文本域** | `CLIPTextEncode.text`、值含换行、长度 > 80 |
+| 短文本 | 单行文本框 | 其余字符串槽位 |
+| 数字 | `input[type=number]`（`step=any`） | 原值是数字 |
+| 布尔 | true / false 下拉 | 原值是布尔 |
+| 多值数组 | 多行文本域（JSON 数组或逗号分隔） | 原值是数组（不是连线） |
+| **图片 / 视频 / 音频** | **「⇧ 上传」+「📁 从资源库选择」+ 已选素材清单** | 节点类型 → 输入名 → 扩展名三级判定 |
+
+媒体判定（`mediaKindOf`）依次看：① 节点类型（`LoadImage` / `LoadImageMask` → image，`VHS_LoadVideo` / `LoadVideo` → video，`LoadAudio` / `VHS_LoadAudio` → audio）；② 输入名白名单（`audio` / `video` / `image` 等）；③ 当前值扩展名。**权重文件（`.safetensors` / `.ckpt` / `.pt`）永远不判为媒体**，模型名槽位仍是文本框。
+
+媒体槽位的行为：
+
+- **「⇧ 上传」双写**：文件同时写进 `data/assets/`（进资源库、可复用可预览）与 ComfyUI 输入目录，参数表写回 ComfyUI 侧文件名。走 `POST /api/comfyui/interfaces/:id/media`，入参 `{media, node, input, dataUrl, name}`。
+- **「📁 从资源库选择」**：复用已有素材，只推 ComfyUI、不重复落盘（入参 `{media, node, input, asset}`）。多值参数可多选，按勾选顺序对应工作流里的多个槽位。
+- 上传 / 选库会把该行来源自动切到「固定值」（否则写了素材也不会生效）；**手动移除素材不会改来源**，避免产生「固定值 = 空」把工作流原有素材清掉。选了固定值却一个素材都没有的行，保存时不会落盘。
+- ComfyUI 不可达时上传仍返回 200：本地资源库已保存，响应带 `warning`，恢复后重传即可。
+
+**类型还原**是这轮顺带修的真 bug：参数表里 `value` 一律是字符串，写回工作流时现在按原值类型还原——数字 `"123"` → `123`、布尔 `"true"/"1"/"0"` → `true/false`、数组仍走 JSON / 逗号解析（`coerceFixed`）。升级前布尔与数字槽位会把字符串提交给 ComfyUI，触发节点类型校验失败。
+
+
+> **数组参数修复**：升级前 `isLink` 只判 `length >= 2`，把 `["a.png","b.png"]` 这类多图数组误当成连线锁死，导致多图参数改不了。现在连线判定收紧为 `[节点id, 输出序号]` 恰好两项且第二项为数字；多值参数可用 JSON 数组（`["a.png","b.png"]`）或逗号分隔简写作为固定值，也能交给 Agent 生成。
+
+
+**生图 Agent 自动配参只有一个兜底点**：`createProviders` 的 `runComfy()`。`resolveInterface()` 把「由 Agent 生成」的字段放进 `cfg.paramPlan`，`runComfy` 在提交前仅当有这些标记时调用一次 LLM（`intent: 'interface-params'`），解析成 `nodeOverrides` 追加进本次配置；Mock 项目不触发 LLM（直接用档案兜底值），真实 LLM 调用失败 / 返回不可解析时同样回落兜底值，**绝不阻断出图**。没有任何标记的接口零额外开销。所有生成入口（封面 / 角色 / 分镜 / 视频 / 音色 / 试跑）都自动获得这套行为，新增入口也只需沿用 `runComfy`。
+
+配置落在全局 `data/comfyui.json` 各库项的 `inputSchema` 字段；老配置每次读取幂等补空数组，工作流本体、镜像与既有 `params` / `nodeOverrides` 均不受影响。
+
 ### 3. 两种最终产物
 
 在设置里把「产物模式」选为 `两种都要` / `只生成成片视频` / `只导出导演包`。成片节点（检查器）与顶栏「▤ 导演包」都可下载。
@@ -117,7 +181,10 @@ extra/manifest.json / README.md    来源信息与导入步骤
 | GET | `/api/projects/:id/film` | 下载拼接后的成片 MP4 |
 | GET | `/api/comfyui/interfaces` | 全部接口档案概览（含参数 / 节点覆盖 / 能力 / 板块绑定，不含工作流本体）+ 板块清单 |
 | POST | `/api/comfyui/interfaces` | 导入接口文件：`{kind, name, workflow, capability?, params?, nodeOverrides?, bindings?}` 或 `{kind, items:[...]}` |
-| PUT | `/api/comfyui/interfaces/:id` | 局部更新档案（改名 / 合并 params，传 null 清空某参数 / 节点覆盖 / 绑定 / 能力；`active:true` 设为默认） |
+| PUT | `/api/comfyui/interfaces/:id` | 局部更新档案（改名 / 合并 params，传 null 清空某参数 / 节点覆盖 / 绑定 / 能力 / 输入参数表 `inputSchema` / 显示顺序 `inputOrder`；`active:true` 设为默认） |
+| GET | `/api/comfyui/interfaces/:id/schema` | 单份接口详情：工作流 JSON 本体 + 按 `inputOrder` 排好的全部输入清单 + 内置变量 + 已保存的参数表与顺序 |
+| PUT | `/api/comfyui/interfaces/:id/workflow` | 修改 / 替换该档案的接口 JSON（`parseWorkflow` 校验；选中项同步镜像；返回新输入清单与失效参数告警） |
+| POST | `/api/comfyui/interfaces/:id/media` | 参数表媒体槽位取值：`{asset}` 复用资源库 / `{dataUrl, name}` 本地上传；双写 `data/assets/` 与 ComfyUI 输入目录，返回 `{asset, url, comfyName, warning?}`。上限 32MB，类型必须与槽位一致 |
 | DELETE | `/api/comfyui/interfaces/:id` | 删除档案，自动清掉指向它的板块绑定；删的是选中项时同步清镜像 |
 | PUT | `/api/comfyui/bindings` | 保存板块绑定：整表 `{bindings:{cover:'wf_x'}}` 或单条 `{scope, interfaceId}`；传空 id 解绑；跨类别绑定返回 400 |
 

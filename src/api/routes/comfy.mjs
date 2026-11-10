@@ -3,10 +3,15 @@ import { json, readBody } from '../http.mjs';
 import { MATCH } from './match.mjs';
 import {
   loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems, kindOf, WORKFLOW_KINDS,
-  resolveInterface, findInterface, interfaceOverview, MEDIA_SCOPES, scopeKind,
+  resolveInterface, findInterface, interfaceOverview, MEDIA_SCOPES, scopeKind, applyInputOrder,
 } from '../../core/comfy-config.mjs';
-import { parseWorkflow, analyzeWorkflow, describeWorkflow, describeAudioWorkflow, testConnection, runWorkflow } from '../../core/comfyui.mjs';
+import {
+  parseWorkflow, analyzeWorkflow, describeWorkflow, describeAudioWorkflow,
+  describeInterfaceInputs, BUILTIN_INPUT_VARS, testConnection, runWorkflow, uploadFile,
+} from '../../core/comfyui.mjs';
 import { emit } from '../../core/events.mjs';
+import { writeAssetBinary, readAsset } from '../../core/store.mjs';
+import { registerAsset } from '../../core/assets.mjs';
 
 const TEST_PROMPT = 'cinematic test shot, consistent character, soft light';
 const TEST_AUDIO_TEXT = '这是一段音色试听，用来判断声线是否适合这个角色。';
@@ -44,6 +49,38 @@ function testResultDetails(r) {
       warnings: Array.isArray(plan.warnings) ? plan.warnings : [],
     },
   };
+}
+
+/* ---------------- 参数表媒体槽位：上传 / 资源库复用（本地资源库 + ComfyUI 双写） ---------------- */
+
+const MEDIA_LABEL = { image: '图片', video: '视频', audio: '音频' };
+const MEDIA_EXT = {
+  image: /^(png|jpg|jpeg|webp|bmp|gif|tif|tiff)$/i,
+  video: /^(mp4|webm|mov|mkv|m4v)$/i,
+  audio: /^(mp3|wav|ogg|m4a|flac|aac|opus)$/i,
+};
+/** 上传体积上限：视频素材常比图大得多，32MB 足够覆盖参考片段 */
+const MEDIA_MAX_BYTES = 32 * 1024 * 1024;
+const extOf = (name) => (String(name).toLowerCase().match(/\.([a-z0-9]{1,5})$/) || ['', ''])[1];
+
+/** dataURL（base64）→ {buf, ext}；格式与声明不符直接拒绝，避免把坏文件推进 ComfyUI */
+function parseMediaPayload(dataUrl, media, prefix = '') {
+  const m = /^data:(image|video|audio)\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(String(dataUrl || '').trim());
+  if (!m) throw new Error(`${prefix}仅支持 base64 dataURL（图片 / 视频 / 音频）`);
+  const declared = m[1].toLowerCase();
+  if (media && declared !== media) throw new Error(`${prefix}该槽位要${MEDIA_LABEL[media]}，收到的是${MEDIA_LABEL[declared] || declared}`);
+  const sub = m[2].toLowerCase();
+  const ext = sub === 'jpeg' ? 'jpg' : sub === 'quicktime' ? 'mov' : sub === 'mpeg' ? 'mp3'
+    : sub === 'x-matroska' ? 'mkv' : sub === 'x-m4v' ? 'm4v' : sub.split('+')[0];
+  if (!(MEDIA_EXT[media] || MEDIA_EXT.image).test(ext) && !Object.values(MEDIA_EXT).some((re) => re.test(ext))) {
+    throw new Error(`${prefix}不支持的文件格式 .${ext}`);
+  }
+  const buf = Buffer.from(m[3], 'base64');
+  if (!buf.length) throw new Error(`${prefix}文件内容为空`);
+  if (buf.length > MEDIA_MAX_BYTES) {
+    throw new Error(`${prefix}文件 ${(buf.length / 1048576).toFixed(1)}MB，超过 ${MEDIA_MAX_BYTES / 1048576}MB 上限`);
+  }
+  return { buf, ext };
 }
 
 /**
@@ -188,6 +225,112 @@ export async function handleComfy(req, res, url) {
       config, summary: comfySummary(config),
     }), true;
   }
+  // ---------- 接口 JSON 本体与输入参数清单：设置页「编辑接口 JSON / 可视化输入参数」 ----------
+  const schemaHit = pathname.match(MATCH.interfaceSchema);
+  if (schemaHit && method === 'GET') {
+    const id = decodeURIComponent(schemaHit[1]);
+    const found = findInterface(loadComfyConfig(), id);
+    if (!found) return json(res, { error: '接口档案不存在' }, 404), true;
+    const { entry, kind } = found;
+    return json(res, {
+      id, name: entry.name, kind, capability: entry.capability || '',
+      workflow: entry.workflow,
+      inputs: applyInputOrder(describeInterfaceInputs(entry.workflow), entry.inputOrder || []),
+      inputSchema: entry.inputSchema || [],
+      inputOrder: entry.inputOrder || [],
+      builtinVars: BUILTIN_INPUT_VARS,
+    }), true;
+  }
+  const workflowHit = pathname.match(MATCH.interfaceWorkflow);  if (workflowHit && method === 'PUT') {
+    const id = decodeURIComponent(workflowHit[1]);
+    const cfg = loadComfyConfig();
+    const found = findInterface(cfg, id);
+    if (!found) return json(res, { error: '接口档案不存在' }, 404), true;
+    const body = await readBody(req);
+    let wf;
+    try { wf = parseWorkflow(body.workflow, '接口工作流'); }
+    catch (err) { return json(res, { error: `接口 JSON 无效：${err.message}` }, 400), true; }
+    const { kind, entry } = found;
+    const libKey = `${kind}WorkflowLib`;
+    const activeKey = `${kind}ActiveId`;
+    const flowKey = `${kind}Workflow`;
+    const patch = { [libKey]: (cfg[libKey] || []).map((e) => (e.id === id ? { ...e, workflow: wf } : e)) };
+    // 选中项放进补丁即触发 saveComfyConfig 的镜像回填；老配置只留镜像时按内容同源同步
+    if (cfg[activeKey] === id) patch[activeKey] = id;
+    else if (cfg[flowKey] && JSON.stringify(cfg[flowKey]) === JSON.stringify(entry.workflow)) {
+      patch[flowKey] = wf;
+      patch[`${kind}WorkflowName`] = entry.name;
+    }
+    const config = saveComfyConfig(patch);
+    const inputs = describeInterfaceInputs(wf);
+    const warnings = (entry.inputSchema || []).filter((r) =>
+      !inputs.some((i) => i.node === r.node && i.input === r.input))
+      .map((r) => `参数表里的 ${r.node}.${r.input} 在新接口 JSON 中不存在，已自动跳过`);
+    return json(res, {
+      ok: true, id, workflow: wf, inputs, warnings,
+      config, summary: comfySummary(config),
+    }), true;
+  }
+  // ---------- 参数表媒体槽位：一次上传双写「本地资源库 + ComfyUI 输入目录」 ----------
+  const mediaHit = pathname.match(MATCH.interfaceMedia);
+  if (mediaHit && method === 'POST') {
+    const id = decodeURIComponent(mediaHit[1]);
+    const cfg = loadComfyConfig();
+    const found = findInterface(cfg, id);
+    if (!found) return json(res, { error: '接口档案不存在' }, 404), true;
+    const body = await readBody(req, MEDIA_MAX_BYTES + 4 * 1024 * 1024);
+    const media = MEDIA_LABEL[body.media] ? String(body.media) : 'image';
+    const node = String(body.node || '').trim().slice(0, 40);
+    const input = String(body.input || '').trim().slice(0, 60);
+
+    // 来源一：资源库已有素材（只给文件名），只推 ComfyUI，不重复落盘
+    // 来源二：本地上传的 dataURL，先写 data/assets 并登记索引，再推 ComfyUI
+    let buf = null;
+    let assetName = '';
+    let assetUrl = '';
+    let warning = '';
+    try {
+      if (body.asset) {
+        assetName = String(body.asset).trim();
+        if (!/^[a-zA-Z0-9_.-]+$/.test(assetName)) throw new Error('资源名不合法');
+        const ext = extOf(assetName);
+        if (!MEDIA_EXT[media].test(ext) && !Object.values(MEDIA_EXT).some((re) => re.test(ext))) {
+          throw new Error(`「${assetName}」不是${MEDIA_LABEL[media]}文件`);
+        }
+        buf = readAsset(assetName);
+        if (!buf) throw new Error(`资源「${assetName}」不存在或已被删除`);
+        assetUrl = `/assets/${assetName}`;
+      } else if (body.dataUrl) {
+        const parsed = parseMediaPayload(body.dataUrl, media, `${MEDIA_LABEL[media]}上传：`);
+        buf = parsed.buf;
+        assetName = `iface_${id}_${Date.now().toString(36)}_${String(body.name || '').replace(/[^A-Za-z0-9_.-]/g, '').slice(-40) || `m.${parsed.ext}`}`;
+        if (!MEDIA_EXT[media].test(extOf(assetName))) assetName = `${assetName.replace(/\.$/, '')}.${parsed.ext}`;
+        assetUrl = writeAssetBinary(assetName, buf);
+        assetName = assetUrl.slice('/assets/'.length);
+        registerAsset({ file: assetName, kind: media === 'audio' ? 'audio' : media, name: String(body.name || '').slice(0, 60) || assetName, tags: ['接口参数'] });
+      } else {
+        return json(res, { error: '需要 asset（资源库文件名）或 dataUrl（上传内容）' }, 400), true;
+      }
+    } catch (err) {
+      return json(res, { error: err.message }, 400), true;
+    }
+
+    // 推到 ComfyUI 输入目录：失败不阻断，参数表写回本地名并提示（ComfyUI 起来后重传即可）
+    let comfyName = assetName;
+    try {
+      const up = await uploadFile(cfg, buf, assetName, AbortSignal.timeout(30000));
+      comfyName = up.subfolder ? `${up.subfolder}/${up.name}` : up.name;
+    } catch (err) {
+      warning = `已保存到本地资源库，但推送到 ComfyUI 失败：${err.message}。ComfyUI 恢复后重新上传即可。`;
+    }
+    emit('log', { source: 'comfy-media', level: warning ? 'warn' : 'info',
+      message: `参数素材 ${node || '?'}.${input || '?'} ← ${assetName}${warning ? '（未推送）' : ''}` });
+    return json(res, {
+      ok: true, media, node, input,
+      asset: assetName, url: assetUrl,
+      comfyName, warning: warning || null,
+    }), true;
+  }
   const ifaceHit = pathname.match(MATCH.interfaceItem);
   if (ifaceHit && (method === 'PUT' || method === 'DELETE')) {
     const id = decodeURIComponent(ifaceHit[1]);
@@ -221,6 +364,8 @@ export async function handleComfy(req, res, url) {
       }
       if (body.nodeOverrides !== undefined) next.nodeOverrides = body.nodeOverrides;
       if (body.bindings !== undefined) next.bindings = body.bindings;
+      if (body.inputSchema !== undefined) next.inputSchema = body.inputSchema;
+      if (body.inputOrder !== undefined) next.inputOrder = body.inputOrder;
       if (body.capability !== undefined) next.capability = String(body.capability).trim().slice(0, 40);
       return next;
     });

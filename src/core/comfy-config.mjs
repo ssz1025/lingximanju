@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, uid } from './store.mjs';
-import { parseWorkflow } from './comfyui.mjs';
+import { parseWorkflow, describeInterfaceInputs, isBuiltinVarKey } from './comfyui.mjs';
 
 const FILE = path.join(DATA_DIR, 'comfyui.json');
 
@@ -126,6 +126,186 @@ export function normalizeNodeOverrides(raw) {
   return out;
 }
 
+/**
+ * 接口输入参数表（可视化编辑的产物）：每行对应工作流里一个「节点 id + 输入名」。
+ * source 决定该输入的取值来源：
+ *   auto    → 未设置（默认）：完全沿用系统原有的自动识别 / 占位符注入；
+ *   builtin → 写 {{varName}} 占位符，运行时由系统内置变量填充；
+ *   fixed   → 写死 value（值里仍可含占位符）；
+ *   agent   → 交给生图 Agent 按本次画面内容生成（value 作为兜底值）；
+ *   skip    → 保持工作流里写死的原值，锁定不让自动识别改写。
+ * 旧配置没有这个字段 → 空数组，行为与升级前完全一致。
+ */
+export const INPUT_SOURCES = ['auto', 'builtin', 'fixed', 'agent', 'skip'];
+
+/**
+ * 参数表显示顺序：纯展示语义，元素是 `node::input` 键。
+ * 单独存一个数组而不塞进 inputSchema，因为后者只记录「非默认来源」的行，
+ * 用它存顺序会让大量「自动识别」参数无法参与排序。
+ * 缺省/非法 → 去重后取有效项；空数组 = 按工作流扫描顺序（升级前的行为）。
+ */
+export function normalizeInputOrder(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const v of raw.slice(0, 400)) {
+    const key = String(v ?? '').trim().slice(0, 120);
+    if (!key || !key.includes('::')) continue;
+    const [node, input] = key.split('::');
+    if (!node.trim() || !input.trim() || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
+/** 按用户顺序重排输入清单；未出现在顺序表里的（工作流新增的）统一排到末尾 */
+export function applyInputOrder(inputs = [], order = []) {
+  const norm = normalizeInputOrder(order);
+  if (!norm.length) return inputs;
+  const rank = new Map(norm.map((k, i) => [k, i]));
+  const known = [];
+  const rest = [];
+  for (const it of inputs) {
+    if (rank.has(`${it.node}::${it.input}`)) known.push(it); else rest.push(it);
+  }
+  known.sort((a, b) => rank.get(`${a.node}::${a.input}`) - rank.get(`${b.node}::${b.input}`));
+  return [...known, ...rest];
+}
+
+export function normalizeInputSchema(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw.slice(0, 80)) {
+    if (!item || typeof item !== 'object') continue;
+    const node = String(item.node ?? '').trim().slice(0, 40);
+    const input = String(item.input ?? '').trim().slice(0, 60);
+    if (!node || !input) continue;
+    const source = INPUT_SOURCES.includes(String(item.source || '')) ? String(item.source) : 'auto';
+    const varName = isBuiltinVarKey(item.varName) ? String(item.varName).trim() : '';
+    let value = item.value;
+    if (value === null || value === undefined) value = '';
+    else if (typeof value === 'object') value = '';
+    else if (typeof value === 'string') value = value.slice(0, 2000);
+    out.push({
+      node, input, source, varName, value,
+      label: String(item.label || '').trim().slice(0, 120),
+      hint: String(item.hint || '').trim().slice(0, 300),
+    });
+  }
+  return out;
+}
+
+/**
+ * 连线槽位判定（与 comfyui.mjs 的 isLink 同口径）：[节点id, 输出序号] 恰好两项且第二项为数字。
+ * 不能把「数组」一律当连线：多图 / 多素材参数本身就是数组，那样会被锁死改不了。
+ */
+const isLinkVal = (v) => Array.isArray(v) && v.length === 2
+  && (typeof v[0] === 'string' || typeof v[0] === 'number')
+  && typeof v[1] === 'number';
+
+/**
+ * 把可视化参数表编译成注入器能直接消费的 nodeOverrides + Agent 待办。
+ * 与工作流本体比对：节点/输入已不存在或为连线时跳过并给 warnings，
+ * 避免改过接口 JSON 之后旧配置把图连坏。
+ */
+export function compileInputSchema(schema = [], workflow = {}) {
+  const overrides = [];
+  const paramPlan = [];
+  const warnings = [];
+  for (const row of normalizeInputSchema(schema)) {
+    const node = workflow?.[row.node];
+    if (!node || !node.inputs || !(row.input in node.inputs)) {
+      warnings.push(`输入 ${row.node}.${row.input} 不在当前接口 JSON 中，已跳过`);
+      continue;
+    }
+    const current = node.inputs[row.input];
+    const linked = isLinkVal(current);
+    const isArr = !linked && Array.isArray(current);
+    // 固定值与 Agent 兜底值按原值类型还原：数组 / 布尔 / 数字，避免 ComfyUI 类型校验失败
+    const kind = isArr ? 'array' : typeof current === 'boolean' ? 'boolean'
+      : typeof current === 'number' ? 'number' : 'none';
+    if (linked && row.source !== 'skip') {
+      warnings.push(`输入 ${row.node}.${row.input} 是连线槽位，已保留原连接`);
+      continue;
+    }
+    if (row.source === 'builtin') {
+      if (!row.varName) { warnings.push(`输入 ${row.node}.${row.input} 未选择内置变量，已跳过`); continue; }
+      overrides.push({ node: row.node, input: row.input, value: `{{${row.varName}}}` });
+    } else if (row.source === 'fixed') {
+      // 多图 / 多值数组参数：固定值按 JSON 数组写回，否则传单个字符串会被 ComfyUI 拒绝
+      overrides.push({ node: row.node, input: row.input, value: coerceFixed(row.value, kind, row, warnings) });
+    } else if (row.source === 'agent') {
+      paramPlan.push({
+        node: row.node, input: row.input,
+        label: row.label || row.input, hint: row.hint,
+        fallback: row.value === '' ? undefined : coerceFixed(row.value, kind, row, warnings),
+        multiple: isArr,
+        kind,
+      });
+    } else if (row.source === 'skip' && !linked) {
+      // skip：用工作流里的原值生成覆盖，标记 touched 后自动识别不会再改写它。
+      // auto 必须落空（完全沿用原有自动识别），不能也生成锁定覆盖。
+      overrides.push({ node: row.node, input: row.input, value: current });
+    }
+  }
+  return { overrides, paramPlan, warnings };
+}
+
+/** 数组型输入的可视化值按 JSON 解析；解析失败保留原文并提示，不阻断保存 */
+function parseFixedValue(value, isArr, row, warnings) {
+  if (!isArr) return value;
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed;
+    warnings.push(`输入 ${row.node}.${row.input} 需要 JSON 数组，已按单项处理`);
+    return [parsed];
+  } catch {
+    // 允许逗号分隔的简写（多图场景手写更方便）
+    return text.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+  }
+}
+
+/**
+ * 固定值的类型还原：参数表里 value 一律是字符串，写回工作流时按原值类型转换。
+ * - 数组：JSON 数组文本 / 逗号简写 → 真数组（ComfyUI 拒绝把数组收成字符串）
+ * - 布尔：真值原样返回；字符串 "true"/"false"/"1"/"0" → 真布尔（下拉框回传的是字符串）
+ * - 数字：真值原样返回；字符串数字 → Number（数值槽位写成字符串会被 ComfyUI 拒绝）
+ */
+function coerceFixed(value, kind, row, warnings) {
+  if (kind === 'array') return parseFixedValue(value, true, row, warnings);
+  if (kind === 'none') return value;
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (kind === 'boolean') {
+    if (/^(true|1|是|开|yes|on)$/i.test(text)) return true;
+    if (/^(false|0|否|关|no|off)$/i.test(text)) return false;
+    if (!text) return value;
+    warnings.push(`输入 ${row.node}.${row.input} 需要布尔值（true / false），已保留原文`);
+    return value;
+  }
+  if (kind === 'number') {
+    if (!text) return value;
+    const num = Number(text);
+    if (Number.isFinite(num)) return num;
+    warnings.push(`输入 ${row.node}.${row.input} 需要数字，已保留原文`);
+    return value;
+  }
+  return value;
+}
+
+/** 手写 nodeOverrides 与可视化参数表合并时，同一槽位以后者为准 */
+function mergeNodeOverrides(hand, compiled) {
+  const map = new Map();
+  for (const o of [...(hand || []), ...(compiled || [])]) {
+    if (o && o.node && o.input) map.set(`${o.node}::${o.input}`, o);
+  }
+  return [...map.values()];
+}
+
 /** 板块绑定表：只保留已知板块与合法 id，不校验 id 是否存在（导入顺序不丢绑定） */
 function normalizeScopeBindings(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
@@ -187,6 +367,8 @@ function normalize(raw) {
         params: normalizeInterfaceParams(item.params),
         nodeOverrides: normalizeNodeOverrides(item.nodeOverrides),
         bindings: normalizeEntryBindings(item.bindings),
+        inputSchema: normalizeInputSchema(item.inputSchema),
+        inputOrder: normalizeInputOrder(item.inputOrder),
         capability: String(item.capability || '').trim().slice(0, 40),
         lastTest: item.lastTest && typeof item.lastTest === 'object' ? {
           ok: Boolean(item.lastTest.ok),
@@ -214,7 +396,7 @@ function normalize(raw) {
             name: String(cfg[`${kind}WorkflowName`] || '').trim() || '未命名工作流',
             workflow: mirror,
             createdAt: Date.now(),
-            params: {}, nodeOverrides: [], bindings: [], capability: '',
+            params: {}, nodeOverrides: [], bindings: [], inputSchema: [], inputOrder: [], capability: '',
             lastTest: null,
           });
           cfg[activeKey] = id;
@@ -307,7 +489,19 @@ export function resolveInterface(cfg = {}, opts = {}) {
   const workflow = entry ? entry.workflow : (cfg?.[`${kind}Workflow`] || null);
   if (workflow && via === 'none') via = 'mirror';
   const params = normalizeInterfaceParams(entry?.params);
-  const nodeOverrides = normalizeNodeOverrides(entry?.nodeOverrides);
+  const inputSchema = normalizeInputSchema(entry?.inputSchema);
+  // 可视化输入参数表编译成节点覆盖（内置变量 / 固定值 / 锁定原值），
+  // 标为「由 Agent 生成」的字段留到 runComfy 里按本次画面内容产出。
+  const compiled = compileInputSchema(inputSchema, workflow || {});
+  warnings.push(...compiled.warnings);
+  // Agent 待办按用户调好的参数顺序排列，提示词更贴近人工整理的顺序（注入本身与顺序无关）
+  const inputOrder = normalizeInputOrder(entry?.inputOrder);
+  if (inputOrder.length) {
+    const moved = applyInputOrder(compiled.paramPlan, inputOrder);
+    compiled.paramPlan.length = 0;
+    compiled.paramPlan.push(...moved);
+  }
+  const nodeOverrides = mergeNodeOverrides(normalizeNodeOverrides(entry?.nodeOverrides), compiled.overrides);
   const extraValues = params.extra || {};
   // 档案自带的显式绑定优先于全局绑定：图生图 / 多参考生图常需要不同的注入点
   const bindings = (Array.isArray(entry?.bindings) && entry.bindings.length
@@ -317,6 +511,9 @@ export function resolveInterface(cfg = {}, opts = {}) {
     ...params,
     extraValues,
     nodeOverrides,
+    inputSchema,
+    inputOrder,
+    paramPlan: compiled.paramPlan,
     [`${kind}Workflow`]: workflow,
     [`${kind}WorkflowName`]: entry ? entry.name : (cfg?.[`${kind}WorkflowName`] || ''),
   };
@@ -324,7 +521,8 @@ export function resolveInterface(cfg = {}, opts = {}) {
     config, workflow, bindings,
     interfaceId: entry?.id || null,
     interfaceName: entry ? entry.name : (cfg?.[`${kind}WorkflowName`] || ''),
-    kind, scope, via, params, nodeOverrides, extraValues, warnings,
+    kind, scope, via, params, nodeOverrides, extraValues, inputSchema, inputOrder,
+    paramPlan: compiled.paramPlan, warnings,
   };
 }
 
@@ -394,6 +592,7 @@ export function interfaceOverview(cfg = loadComfyConfig()) {
   for (const kind of WORKFLOW_KINDS) {
     const lib = Array.isArray(cfg[`${kind}WorkflowLib`]) ? cfg[`${kind}WorkflowLib`] : [];
     for (const e of lib) {
+      const slots = describeInterfaceInputs(e.workflow || {});
       out.push({
         id: e.id, name: e.name, kind,
         nodes: Object.keys(e.workflow || {}).length,
@@ -402,6 +601,11 @@ export function interfaceOverview(cfg = loadComfyConfig()) {
         params: e.params || {},
         nodeOverrides: e.nodeOverrides || [],
         bindings: e.bindings || [],
+        inputSchema: e.inputSchema || [],
+        inputOrder: e.inputOrder || [],
+        // 参数表只列需要人填的槽位：inputCount = 可编辑项，linkCount = 被隐藏的连线槽位
+        inputCount: slots.filter((i) => i.editable).length,
+        linkCount: slots.filter((i) => !i.editable).length,
         active: cfg[`${kind}ActiveId`] === e.id,
         boundScopes: Object.entries(cfg.scopeBindings || {})
           .filter(([, id]) => id === e.id).map(([scope]) => scope),
@@ -466,6 +670,8 @@ export function addLibraryItems(cfg, kind, items) {
       params: normalizeInterfaceParams(item?.params),
       nodeOverrides: normalizeNodeOverrides(item?.nodeOverrides),
       bindings: normalizeEntryBindings(item?.bindings),
+      inputSchema: normalizeInputSchema(item?.inputSchema),
+      inputOrder: normalizeInputOrder(item?.inputOrder),
       capability: String(item?.capability || '').trim().slice(0, 40),
     };
     lib.push(entry);

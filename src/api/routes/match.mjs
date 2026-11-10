@@ -51,6 +51,11 @@ export const MATCH = {
   libItem: /^\/api\/comfyui\/library\/(image|video|audio)\/([^/]+)$/,
   // 媒体生成接口档案：单个档案的改参数 / 删除（列表与导入走字面路径）
   interfaceItem: /^\/api\/comfyui\/interfaces\/([^/]+)$/,
+  // 接口输入参数清单（含工作流本体，供设置页可视化编辑）与接口 JSON 替换
+  interfaceSchema: /^\/api\/comfyui\/interfaces\/([^/]+)\/schema$/,
+  interfaceWorkflow: /^\/api\/comfyui\/interfaces\/([^/]+)\/workflow$/,
+  // 参数表媒体槽位（图片 / 视频 / 音频）的上传与资源库复用：一次上传双写本地资源库与 ComfyUI 输入目录
+  interfaceMedia: /^\/api\/comfyui\/interfaces\/([^/]+)\/media$/,
   // 音色库（全局，多项目共享）：字面动作优先于 :id 模式
   voicesSeed: /^\/api\/voices\/seed$/,
   voicesSample: /^\/api\/voices\/sample$/,

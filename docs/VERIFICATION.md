@@ -318,3 +318,42 @@
 | 验证 | 新增 `tests/nav-episode.test.mjs` **10/10**：短标签格式与全局集号 / 展开态标签 / 收起态两行与 title / 切集跨季同步 / 空分集兜底 / 卡片内控制区顺序与定稿入口 / 主内容不再含顶部条 / CSS 不再 sticky / 63 个 `data-act` 不变 / 第 28 节仍无硬编码字号圆角。**`npm test` 732/732 通过**；`node scripts/check.mjs` 通过 |
 | 视觉 | Playwright 真实应用 `?project=prj_mw9v9e8g26wci` 深 / 浅 × 展开 / 收起 × 1000px 窄屏，截图 `/tmp/pwtest/navep-*.png`、`/tmp/pwtest/rail-*.png`：导航条与 40px 状态轨均显示 `第1季-1` 且无裁切；`.epb` 计算样式 `position: relative`、`box-shadow: none`、确在 `.pv-card.sx-wrap` 内且位于卡头之后；主滚动容器下滚 900px 后 `epb.top` 由 2393 → 1493（随内容走，不再吸顶）；`docOverflow=0`、0 pageerror |
 | 边界 | 后端、数据结构、接口、`episodeQueue` / 定稿 / 锁定 / 自动推进、角色复用、`localStorage` 偏好、63 个事件入口均未改动 |
+
+## 2026-11-10 · 接口 JSON 可视化编辑 + 生图 Agent 按所选接口自动配参
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「『模型、ComfyUI 与最终产物设置』模型设置中，修改导入的 comfyui 接口 json 文件，导入后可以可视化编辑需要输入的参数；需要生图的服务，可以选择修改使用的本地 comfyui 接口，生图的 agent 自动根据选择的接口配置参数」。按「规划先行」先给书面方案（现状差距 / 涉及文件 / 7 个修改点 / 影响与兼容 / 4 个风险 / 3 个待拍板项），用户拍板：**按方案执行 + 两个 Tab 都放入口 + Agent 配参按标记触发** |
+| 输入清单 | `src/core/comfyui.mjs` 新增 `describeInterfaceInputs(wf)`：全量扫描每个节点输入（含连线槽位），输出类型 / 当前值 / 节点标题 / 推断角色 / 建议内置变量，复用 `analyzeWorkflow` 的连线回溯识别；`BUILTIN_INPUT_VARS` 19 个内置变量、`parseAgentParamReply()` 兼容 4 种 LLM 回复形态 |
+| 参数表 | `src/core/comfy-config.mjs` 新增 `inputSchema`（`auto/builtin/fixed/agent/skip` 五种来源）、`normalizeInputSchema` 幂等清洗、`compileInputSchema(schema, workflow)` 编译成 `nodeOverrides` + `paramPlan`；`resolveInterface()` 与手写 nodeOverrides 按槽位合并（可视化优先），失效槽位 / 连线槽位跳过并给 warnings；`interfaceOverview` 带 `inputSchema` 与 `inputCount`。**老配置无字段 = 空表 = 行为完全不变** |
+| 接口 JSON | `GET /api/comfyui/interfaces/:id/schema` 返回工作流本体 + 输入清单 + 内置变量；`PUT /api/comfyui/interfaces/:id/workflow` 校验 `parseWorkflow` 后写回库项，选中项同步镜像，旧参数表失效行给告警。档案 PUT 支持 `inputSchema` |
+| Agent 配参 | `src/core/providers.mjs` 的 `runComfy()` 是唯一兜底点：仅当 `cfg.paramPlan` 非空且为真实 LLM 模式时调用一次 `callLLM`（按接口名 / 本次提示词 / 负向词 / 画幅 / 字段要求生成参数），解析后追加 `nodeOverrides`；Mock 项目零额外调用，LLM 失败 / 输出不可解析回落档案兜底值，不阻断出图。注入器零改动 |
+| 前端 | `public/panels.js`：模型与运行 Tab 新增服务接口摘要卡 + 两个跳转入口；接口档案卡片新增「✎ 接口 JSON」（可编辑文本域 / 文件替换 / 格式化 / 保存）与「⚙ 输入参数」（自动表格 + 来源下拉动态切控件 + 保存）、「⇧ 导入接口 JSON」；`public/interface-picker.js` 下拉补输入数；`public/styles.css` 第 30 节新增 `.mi-*` 样式（全部走设计令牌，浅 / 深主题跟随变量） |
+| 验证 | 新增 `tests/interface-schema.test.mjs` **12 项**：输入扫描 / 归一化幂等 / 五来源编译 / resolveInterface 兼容 / injectWorkflow 真实写入 / 3 组 REST（schema、workflow、inputSchema）/ Agent 回复解析 / **fake LLM + fake ComfyUI 端到端 3 项**（标记才生成且参数真进 `/prompt`、无标记零 LLM 调用、LLM 失败回落兜底且不中断）。测试抓到并修复 `auto` 被误当 `skip` 生成锁定覆盖的实现 bug。**`npm test` 744/744**；`node scripts/check.mjs` **183 个文件**。真实 `data/comfyui.json` 未被写入，执行前备份为 `data/comfyui.json.bak-20261110-222814` |
+| 真实页面 | 独立端口 `45368` 起新服务（不打扰既有 45367），Playwright + 本机 Chrome 深 / 浅两套主题打开设置弹窗：①「模型与运行」Tab 的 11 个服务接口摘要与 2 个跳转按钮齐全，点击后正确切到 `#pane-comfy`；② 3 份真实接口档案全部渲染；③ 点「⚙ 输入参数」从真实 Krea2 工作流自动解析出 **66 行输入**，来源下拉 5 档、内置变量下拉、保存按钮齐全；④「✎ 接口 JSON」文本域载入 9909 字符 / 22 节点且 `JSON.parse` 通过、`readOnly=false`，保存 / 替换 / 格式化三个动作齐全；⑤ `docOverflow=0`、`bodyOverflow=0`、**0 pageerror / console error**。截图 `/tmp/pwtest/iface-dark.png`、`/tmp/pwtest/iface-light.png` |
+| 边界 | 板块绑定 / 请求级 interfaceId / 导演包导出 / 试跑 / 注入自检等既有链路均保持；新增入口如沿用 `runComfy` 即自动获得 Agent 配参能力 |
+| 工作流库内联参数表 | 上传新工作流后参数**当场可选**：出图工作流库每条行内新增「⚙ 参数（N）」「✎ JSON」，与接口档案卡共用同一套 `paintInputTable` / `paintJsonEditor` / `saveInputSchema`（容器化改造，只有一份代码）。导入成功后自动展开首个新增条目参数表并滚动到位，同时照旧启动串行试跑（多文件只展开首个并提示）。参数**完全由每份工作流自己的 JSON 决定**，无固定清单 |
+| 单项查看 | 每行「ⓘ」展开详情：原始值 / 类型 / 节点类型与标题 / 推断角色 / 建议内置变量 / **该节点全部输入** / 连线与多值额外提示；行首类型标签区分 `text` `number` `array`(标注条数) `link` |
+| 顺序调整 | 每行 `⠿` 拖拽把手 + `↑` `↓` 按钮（两种方式都支持，首行禁 ↑、末行禁 ↓，拖动后自动重算）；保存时按当前可见顺序整体回写档案 `inputOrder`（`node::input` 键，去重、上限 400、缺省空数组 = 扫描顺序）；「↺ 恢复默认顺序」清空后重取。纯显示语义，注入器零改动 |
+| 数组误判修复 | 旧 `isLink` 只判 `length >= 2`，把 `["a.png","b.png"]` 多图数组误当连线锁死。现收紧为 `[节点id, 输出序号]` 恰好两项且第二项为数字（`comfyui.mjs` 的 `isLink`、`comfy-config.mjs` 的 `isLinkVal` 同口径）；多值参数可用 JSON 数组或逗号简写作固定值，也可交给 Agent（`paramPlan` 带 `multiple`） |
+| 验证（本轮） | `tests/interface-schema.test.mjs` 追加 **6 项**（数组判 `array` 而非 `link`、JSON 数组定值还原、逗号简写、Agent 多值标记、`normalizeInputOrder` 去重丢非法、`applyInputOrder` 重排未知项留尾、`inputOrder` 落盘）。**`npm test` 750/750**、`node scripts/check.mjs` 183 文件通过 |
+| 真实页面（本轮） | 独立端口 `45372` / `45373` 起新服务，Playwright 打开设置 →「本地 ComfyUI / 最终产物」：3 条库项各有「⚙ 参数（66）」；点开后 **66 行**，`mi-order` / `mi-grip` / `mi-info` 均 66 个；ⓘ 详情正确显示 `29.filename_prefix` 的原始值、角色 `outputPrefix`、建议 `{{filename_prefix}}` 与同节点全部输入；↑↓ 与拖拽均真实改变顺序（`orderBefore`/`orderAfter`/`dragAfter` 逐项核对）；保存后 `GET /:id/schema` 回读到完整 `inputOrder` 且 `inputs` 按新序返回；「↺ 恢复默认顺序」后 `inputOrder=[]` 且首项回到 `29::filename_prefix`；`docOverflowX=0`、**0 pageerror**。截图 `/tmp/pwtest/lib-params-dark.png`、`lib-params-light.png` |
+| 边界（本轮） | `inputSchema` 五来源语义 / 板块绑定 / 请求级 interfaceId / Agent 配参兜底 / 镜像字段全部保持；`inputOrder` 为纯新增可选字段，老配置读取幂等补空数组，行为不变 |
+
+## 2026-11-10 · 参数表只显示需填写的参数 + 控件按类型匹配（上传 / 选库）
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「可以编辑的参数只展示需要输入的内容，其他比如连线等是不需要展示的；并且修改参数对应的输入方式，文本框对应文本框，图片、视频、音频等对应上传或者选择资源」。按「规划先行」先给只读调研 + 书面方案，用户拍板两条口径：**上传落点 = 本地资源库 + ComfyUI 双写**、**被隐藏的连线槽位只留一行统计提示**（不做折叠开关） |
+| 输入分类 | `src/core/comfyui.mjs` 的 `describeInterfaceInputs` 新增 3 个字段：`editable = !linked`（前端据此过滤连线）、`media ∈ image / video / audio / ''`、`multiline`。`mediaKindOf()` 三级判定：① 节点类型（`LoadImage`→image、`VHS_LoadVideo`/`LoadVideo`→video、`LoadAudio`→audio）；② 输入名白名单（audio / video / image / mask_image…）；③ 当前值扩展名兜底。**权重文件 `.safetensors` / `.ckpt` / `.pt` 永不判媒体**，模型名槽位仍是文本框。`isLongText()`：`CLIPTextEncode.text` / 含换行 / 长度 > 80 |
+| 类型还原 | 参数表 `value` 一律以字符串承载，写回工作流前按原值类型还原：新增 `coerceFixed(value, kind)` —— `number` `"123"`→`123`、`boolean` `"true"/"1"/"是"/"开"`→真布尔与 `"false"/"0"`→假、`array` 仍走 `parseFixedValue`（JSON 数组 / 逗号简写）、其余原样。**这是修掉的真 bug**：升级前布尔与数字槽位会把字符串提交给 ComfyUI，触发节点类型校验失败；`paramPlan` 同步带 `kind` |
+| 媒体落点 | 新 API `POST /api/comfyui/interfaces/:id/media`：`{asset}` 复用资源库 / `{dataUrl, name}` 上传；双写 `data/assets/`（`registerAsset` 打「接口参数」标签）+ ComfyUI 输入目录（`uploadFile`），返回 `{asset, url, comfyName, warning?}`。32 MB 上限，`parseMediaPayload` 校验 dataURL 声明类型必须与槽位一致；**ComfyUI 不可达仍 200 + warning**，不阻断保存。`uploadImage` 抽通用 `uploadFile`（按扩展名给 multipart Content-Type，实测 `/upload/image` 端点通吃视频 / 音频），`uploadImage` 退化为薄封装，注入器零改动 |
+| 前端表格 | `public/panels.js`：`paintInputTable` 只渲染 `editable` 项，表头写「N 项」+「已隐藏 M 个连线槽位」；新增 `inputControlHTML` 按类型给控件（长文本 → textarea、数字 → `type=number`、布尔 → true/false 下拉、多值 → JSON textarea、媒体 → 上传 + 资源库 + 素材 chips、其余 → 文本框）；`data-show` 声明各控件在哪些来源下可见，`syncCfgVisibility` 统一刷新；`bindMediaUI` 用事件委托处理 `media-upload` / `media-pick` / `media-drop`，资源库走**动态 `import('./asset-manager.js')`** 绕开 panels ⇄ asset-manager 循环依赖；`prefixLibActions` 的 keep 集合补 3 个媒体动作，使库内联表格拿到同名按钮 |
+| 交互细节 | ① 媒体行「⇧ 上传 / 📁 资源库」**始终可见**，否则「自动识别」档下按钮被 `hidden` 挡住（Playwright 报 element is not visible）；上传 / 选库后自动切到「固定值」 ② **手动移除素材不改来源**（`applyMedia(row, i, files, switchSource=false)`），否则产生「固定值 = 空」把工作流原素材清掉 ③ 未配置固定值时素材清单**回落到工作流当前值**，否则右侧「当前值」有文件名、左侧清单写「未选图片」，看起来像数据丢了 ④ `collectInputRows` 对「媒体 + 固定值 + 空值」返回 null，不落盘 |
+| 计数口径 | `interfaceOverview` 的 `inputCount` 改为只数 `editable`，新增 `linkCount`；库项按钮「⚙ 参数（N）」数字随之变小（**66→38 / 74→40 / 49→36**，隐藏连线 28 / 34 / 13） |
+| 验证 | `npm test` **760/760**（新增 10 项：连线 `editable=false`、媒体三级判定含「权重文件不算媒体」、长文本 `multiline`、布尔固定值还原、数字固定值还原、`interfaceOverview` 计数、`POST /media` 上传双写、资源库复用、非法入参被拒、ComfyUI 不可达降级）；`npm run check` **183 个文件**；`tests/interface-schema.test.mjs` **28/28**。两个老断言由 `'0.5'` 改为 `0.5`，属类型还原生效而非回归 |
+| 真实链路 | `POST /media` → 本地素材落盘 75 字节、资源库登记 `{"kind":"image","name":"e2e_probe.png","tags":["接口参数"]}`、ComfyUI 侧 `/view` 取回 **HTTP 200**、`warning: null` |
+| 真实页面 | Playwright 直连 **45367**（用户实际在用端口）真实页面：① Krea2 **38 行 / 0 连线行**、表头含「已隐藏 28 个连线槽位」、2 个 textarea、16 个数值框、切「固定值」控件可见 1 个 / 切「自动识别」可见 0 个 ② A1-3 **40 行**含 1 个「图片·素材」行、`⇧ 上传` 与 `📁 资源库` 各 1 个、素材 chip 显示 `女主1_v1.png`、点 📁 真实打开资源库弹窗、ⓘ 详情含双写说明 ③ 上传 e2e：来源 `auto` → `fixed`、保存回读 `inputSchema` 内容正确且 `inputOrder` 40 项、移除素材不改来源；`docOverflowX=0`、**0 pageerror / 0 badRequest**。深 / 浅两主题截图 `/tmp/pwtest/typed-dark.png`、`typed-light.png`、`upload-e2e-dark.png` |
+| 数据安全 | 测试写入已还原：4 份工作流 `inputSchema` 与 `inputOrder` 全空、`69.image` 回 `女主1_v1.png`、`data/assets` 中 `iface_` 残留 0 个；备份 `data/comfyui.json.bak-20261110-230903` |
+| 服务 | 全程在 45367 重启到新代码，不另起端口——上一轮的教训是「另起端口让用户自己换」等于没修 |
+| 边界 | 五来源语义 / 板块绑定 / 请求级 interfaceId / Agent 配参兜底 / 镜像字段 / 注入器 / 排序语义均未变；`editable`、`media`、`multiline` 是纯新增可选字段，老配置读取幂等 |

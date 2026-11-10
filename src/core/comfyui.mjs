@@ -41,7 +41,14 @@ const NEGATIVE_RE = /negative|负面|反向|反提示|ngative/i;
 const PROMPT_TITLE_RE = /prompt|提示词|正向|用户|user|positive|画面|描述|caption/i;
 const TEXT_NODE_RE = /String|Multiline|CLIPTextEncode|TextBox|TextGenerate|Prompt|TextInput/i;
 
-const isLink = (v) => Array.isArray(v) && v.length >= 2 && (typeof v[0] === 'string' || typeof v[0] === 'number');
+/**
+ * 连线槽位判定：ComfyUI「导出(API)」里连线固定是 [节点id, 输出序号] 恰好两项，
+ * 且第二项一定是数字。旧实现只判 length >= 2，会把多图数组（["a.png","b.png"]）
+ * 误当成连线锁死，导致这类参数无法在可视化表格里编辑。
+ */
+const isLink = (v) => Array.isArray(v) && v.length === 2
+  && (typeof v[0] === 'string' || typeof v[0] === 'number')
+  && typeof v[1] === 'number';
 const nodeTitle = (n) => String(n?._meta?.title || '');
 const placeholderKeys = (str) => [...String(str).matchAll(PLACEHOLDER_RE)].map((m) => m[1]);
 const clip = (s, n = 90) => String(s ?? '').slice(0, n);
@@ -219,6 +226,219 @@ export function analyzeWorkflow(wf) {
     });
   }
   return found;
+}
+
+/* ------------------------------------------------------------------ *
+ * 接口输入参数 schema
+ *
+ * 导入一份「导出(API)」工作流后，把它需要填写的输入全量摊平成可视化清单：
+ * 每个节点输入一行，带类型 / 当前值 / 推断角色 / 建议绑定的内置变量。
+ * 与 analyzeWorkflow 的区别：后者只列自动识别到的注入点（给自检用），
+ * 这里列全部输入（含连线槽位），供设置页决定每个输入的取值来源：
+ * 内置变量 / 固定值 / 由 Agent 生成 / 不注入（保持工作流原值）。
+ * ------------------------------------------------------------------ */
+
+/** 内置变量：键可写进工作流字符串输入 {{key}}，也是设置页「内置变量」下拉的候选 */
+export const BUILTIN_INPUT_VARS = [
+  { key: 'prompt', label: '画面提示词 {{prompt}}' },
+  { key: 'negative_prompt', label: '负向提示词 {{negative_prompt}}' },
+  { key: 'seed', label: '随机种子 {{seed}}' },
+  { key: 'width', label: '宽 {{width}}' },
+  { key: 'height', label: '高 {{height}}' },
+  { key: 'steps', label: '采样步数 {{steps}}' },
+  { key: 'cfg', label: 'CFG {{cfg}}' },
+  { key: 'fps', label: '帧率 {{fps}}' },
+  { key: 'frames', label: '帧数 {{frames}}' },
+  { key: 'duration', label: '时长 {{duration}}' },
+  { key: 'filename_prefix', label: '产物前缀 {{filename_prefix}}' },
+  { key: 'model', label: '模型名 {{model}}' },
+  { key: 'image', label: '参考图 {{image}}' },
+  { key: 'title', label: '标题 {{title}}' },
+  { key: 'shot_no', label: '镜头号 {{shot_no}}' },
+  { key: 'motion', label: '运镜 {{motion}}' },
+  { key: 'voice', label: '说话人 {{voice}}' },
+  { key: 'language', label: '语言 {{language}}' },
+  { key: 'audioText', label: '朗读文案 {{audioText}}' },
+];
+
+/** 合法占位符键：内置变量 + 档案 extra 自定义键共用这一口径 */
+export const isBuiltinVarKey = (k) => /^[A-Za-z][\w.-]{0,40}$/.test(String(k || ''));
+
+/** 由输入名 / 角色 / 当前值推断该输入建议绑定的内置变量 */
+function suggestedVar(node, key, val, role) {
+  const keys = typeof val === 'string' ? placeholderKeys(val) : [];
+  if (keys.length) return keys[0];
+  if (/systemPrompt/i.test(role)) return '';
+  if (/^positive/i.test(role)) return 'prompt';
+  if (/^negative/i.test(role) || /negative/i.test(key)) return 'negative_prompt';
+  if (SEED_KEY_RE.test(key) || role === 'seed') return 'seed';
+  if (key === 'width' || role === 'width') return 'width';
+  if (key === 'height' || role === 'height') return 'height';
+  if (/^(steps|cfg)$/i.test(key) || role === 'steps' || role === 'cfg') return key.toLowerCase();
+  if (key === 'fps' || role === 'fps') return 'fps';
+  if (/^(num_frames|frame_count|length|total_frames)$/i.test(key) || role === 'frames') return 'frames';
+  if (key === 'filename_prefix' || role === 'outputPrefix') return 'filename_prefix';
+  if (/^(ckpt_name|model_name|model|unet_name|vae_name|clip_name|lora_name|checkpoint)$/i.test(key)) return 'model';
+  if (/^LoadImage/i.test(node.class_type) && key === 'image') return 'image';
+  if (VOICE_KEY_RE.test(key)) return 'voice';
+  if (LANG_KEY_RE.test(key)) return 'language';
+  if (TTS_TEXT_KEY_RE.test(key) && /TTS|Audio|Voice|Speech/i.test(node.class_type)) return 'audioText';
+  return '';
+}
+
+/* ------------------------------------------------------------------ *
+ * 参数表控件分类
+ *
+ * 参数表只展示「需要人来填」的槽位，并按类型匹配输入方式：
+ * 文本框 / 数字 / 是-否 / 多值，以及图片·视频·音频对应的「上传 / 从资源库选择」。
+ * 分类只用于前端渲染，不改 inputSchema 行结构（value 仍是字符串），
+ * 因此 compileInputSchema → nodeOverrides → injectWorkflow 链路不受影响。
+ * ------------------------------------------------------------------ */
+
+/** 媒体输入：ComfyUI 里这些节点类型的文件名槽位可以直接上传素材 */
+const MEDIA_NODE_RE = {
+  image: /^(LoadImage|LoadImageMask|LoadImageSet|VHS_LoadImagePath)$/i,
+  video: /^(VHS_LoadVideo|VHS_LoadVideoPath|LoadVideo|LoadVideoPath|LoadVideoUpload|VHS_LoadVideoUpload)$/i,
+  audio: /^(LoadAudio|VHS_LoadAudio|LoadAudioUpload|LoadAudioPath)$/i,
+};
+/** 输入名兜底：节点名不认识时按槽位名猜（audio / video / image 这类很常见） */
+const MEDIA_KEY_RE = {
+  image: /^(image|images|image_path|image_name|img|img_name|picture|photo|mask_image)$/i,
+  video: /^(video|videos|video_path|video_name|movie|film)$/i,
+  audio: /^(audio|audios|audio_path|audio_name|sound|sound_path|voice_file)$/i,
+};
+/** 媒体扩展名：权重文件（.safetensors / .ckpt / .pt）一律不按媒体处理 */
+const MEDIA_EXT_RE = {
+  image: /\.(png|jpg|jpeg|webp|bmp|gif|tif|tiff)$/i,
+  video: /\.(mp4|webm|mov|mkv|m4v|avi)$/i,
+  audio: /\.(mp3|wav|ogg|m4a|flac|aac|opus)$/i,
+};
+
+/**
+ * 判定该输入是否为「可上传的媒体槽位」。
+ * 先看节点类型（最准），再看输入名，最后看当前值的扩展名；都命中不了返回 ''。
+ * 数组型多素材只要元素全是同一类媒体，就按该类处理。
+ */
+function mediaKindOf(node, key, val) {
+  const cls = String(node?.class_type || '');
+  let kind = '';
+  // 1) 节点类型最准：LoadImage → image、VHS_LoadVideo → video、LoadAudio → audio
+  for (const [k, re] of Object.entries(MEDIA_NODE_RE)) {
+    if (re.test(cls)) { kind = k; break; }
+  }
+  // 2) 输入名细分：视频节点常同时收音频槽位，同大类时不覆盖，冲突时以节点类型为准
+  for (const [k, re] of Object.entries(MEDIA_KEY_RE)) {
+    if (!re.test(String(key))) continue;
+    if (!kind) kind = k;
+    break;
+  }
+  if (kind) return kind;
+  // 3) 扩展名兜底：既没有已知节点类型也没有已知输入名时，看当前值像什么文件
+  const probe = Array.isArray(val) ? val.find((x) => typeof x === 'string') : val;
+  if (typeof probe === 'string') {
+    for (const [k, re] of Object.entries(MEDIA_EXT_RE)) if (re.test(probe)) return k;
+  }
+  return '';
+}
+
+/** 长文本判定：提示词 / 换行 / 超过 80 字，用多行输入框更好写 */
+function isLongText(node, key, val) {
+  if (typeof val !== 'string') return false;
+  if (/CLIPTextEncode/i.test(node?.class_type || '') && /^text$/.test(String(key))) return true;
+  if (val.includes('\n')) return true;
+  return val.length > 80;
+}
+
+function inputValueText(v) {
+  if (isLink(v)) return `[连线 → 节点 ${v[0]}]`;
+  // 多图 / 多素材数组：列出内容，让用户在表格里直接看到每张参考图
+  if (Array.isArray(v)) return `[数组 ${v.length} 项] ${clip(v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('、'), 120)}`;
+  if (v && typeof v === 'object') return clip(JSON.stringify(v), 120);
+  if (typeof v === 'string') return clip(v, 160);
+  return String(v);
+}
+
+/** 全量扫描工作流输入，返回可视化清单（不含 _ 开头的说明节点） */
+export function describeInterfaceInputs(wf) {
+  const analyzed = analyzeWorkflow(wf || {});
+  const roleBySlot = new Map();
+  for (const f of analyzed) {
+    const k = `${f.node}::${f.input}`;
+    if (!roleBySlot.has(k)) roleBySlot.set(k, f.role || '');
+  }
+  const out = [];
+  for (const [id, node] of Object.entries(wf || {})) {
+    if (String(id).startsWith('_') || !node || !node.inputs) continue;
+    for (const [key, val] of Object.entries(node.inputs)) {
+      const linked = isLink(val);
+      // 数组但不是连线 = 多值参数（多图 / 多参考素材），必须可编辑；
+      // 用固定值时按 JSON 数组文本保存。
+      const isArr = !linked && Array.isArray(val);
+      const role = roleBySlot.get(`${id}::${key}`) || '';
+      const media = linked ? '' : mediaKindOf(node, key, val);
+      out.push({
+        node: id,
+        classType: String(node.class_type || ''),
+        nodeTitle: nodeTitle(node),
+        input: key,
+        type: linked ? 'link' : isArr ? 'array' : typeof val === 'number' ? 'number'
+          : typeof val === 'boolean' ? 'boolean' : typeof val === 'string' ? 'text' : 'other',
+        value: linked ? undefined : val,
+        valueText: inputValueText(val),
+        hasPlaceholder: typeof val === 'string' && placeholderKeys(val).length > 0,
+        role,
+        suggestedVar: linked ? '' : suggestedVar(node, key, val, role),
+        lockable: !linked,
+        multiple: isArr,
+        // 参数表只渲染需要人填的槽位：连线由工作流内部驱动，不展示也不可配
+        editable: !linked,
+        // 媒体槽位（image / video / audio）在表格里给「上传 / 从资源库选择」
+        media,
+        // 长文本用多行输入框：提示词、带换行的值、超长字符串
+        multiline: !linked && !media && isLongText(node, key, val),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 解析「参数 Agent」的回复 → 只保留 schema 里标为 agent 的槽位。
+ * 兼容 {params:[…]} / {values:[…]} / 数组 / {"节点::输入": 值} 四种形态，
+ * 缺失字段用档案里的兜底值；纯函数，便于离线回归。
+ */
+export function parseAgentParamReply(reply, plan = []) {
+  let obj = reply;
+  if (typeof reply === 'string') {
+    try { obj = JSON.parse(reply.replace(/```(?:json)?/gi, '').trim()); } catch { obj = null; }
+  }
+  const rows = Array.isArray(obj) ? obj
+    : Array.isArray(obj?.params) ? obj.params
+      : Array.isArray(obj?.values) ? obj.values : null;
+  const bySlot = new Map();
+  if (rows) {
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      const node = String(r.node ?? '').trim();
+      const input = String(r.input ?? '').trim();
+      if (!node || !input) continue;
+      const v = r.value ?? r.val;
+      if (v === undefined || v === null || typeof v === 'object') continue;
+      bySlot.set(`${node}::${input}`, v);
+    }
+  } else if (obj && typeof obj === 'object') {
+    for (const [k, v] of Object.entries(obj)) {
+      if (!k.includes('::') || v === undefined || v === null || typeof v === 'object') continue;
+      const [node, input] = k.split('::');
+      if (node && input) bySlot.set(k, v);
+    }
+  }
+  return (Array.isArray(plan) ? plan : []).map((p) => {
+    const key = `${p.node}::${p.input}`;
+    const value = bySlot.has(key) ? bySlot.get(key) : p.fallback;
+    return value === undefined || value === null || typeof value === 'object'
+      ? null : { node: p.node, input: p.input, value };
+  }).filter(Boolean);
 }
 
 /**
@@ -669,14 +889,32 @@ export async function testConnection(baseUrl, signal) {
   }
 }
 
-/** POST /upload/image，multipart 手写，无第三方依赖 */
-export async function uploadImage(config, buffer, filename = 'reference.png', signal) {
+/** 按扩展名给 multipart 的 Content-Type：视频 / 音频也走 /upload/image（该端点通吃文件上传） */
+const MIME_BY_EXT = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+  bmp: 'image/bmp', gif: 'image/gif', tif: 'image/tiff', tiff: 'image/tiff',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska', m4v: 'video/x-m4v',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  flac: 'audio/flac', aac: 'audio/aac', opus: 'audio/opus',
+};
+const mimeOf = (name, fallback = 'image/png') => {
+  const ext = String(name).toLowerCase().match(/\.([a-z0-9]{1,5})$/)?.[1];
+  return MIME_BY_EXT[ext] || fallback;
+};
+
+/**
+ * 通用文件上传：POST /upload/image（multipart 手写，无第三方依赖）。
+ * 参数表里的图片 / 视频 / 音频槽位都共用这一个函数，Content-Type 按扩展名给，
+ * 否则 ComfyUI 会按 PNG 收下 mp4 / mp3 导致节点读不出文件。
+ */
+export async function uploadFile(config, buffer, filename = 'reference.png', signal) {
   const base = config.baseUrl;
   const boundary = `----lingximanju${Date.now().toString(36)}`;
   const safeName = String(filename).replace(/[^A-Za-z0-9_.-]/g, '_');
+  const mime = mimeOf(safeName);
   const head = Buffer.from(
     `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${safeName}"\r\n` +
-    `Content-Type: image/png\r\n\r\n`, 'utf8');
+    `Content-Type: ${mime}\r\n\r\n`, 'utf8');
   const tail = Buffer.from(
     `\r\n--${boundary}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\ntrue\r\n` +
     `--${boundary}--\r\n`, 'utf8');
@@ -687,10 +925,19 @@ export async function uploadImage(config, buffer, filename = 'reference.png', si
     body,
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`参考图上传失败：${text.slice(0, 200)}`);
+  if (!res.ok) throw new Error(`文件上传失败：${text.slice(0, 200)}`);
   let out = {};
   try { out = JSON.parse(text); } catch { /* 有些版本返回纯文本 */ }
   return { name: out.name || safeName, subfolder: out.subfolder || '', type: out.type || 'input' };
+}
+
+/** POST /upload/image（图片专用薄封装，保持既有调用方与日志文案不变） */
+export async function uploadImage(config, buffer, filename = 'reference.png', signal) {
+  try {
+    return await uploadFile(config, buffer, filename, signal);
+  } catch (err) {
+    throw new Error(String(err.message).replace(/^文件上传失败/, '参考图上传失败'));
+  }
 }
 
 const sleep = (ms, signal) => new Promise((resolve, reject) => {

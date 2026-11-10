@@ -55,6 +55,12 @@ export async function openSettings(project, onSave) {
   let editingId = null;   // 正在编辑的档案 id；null = 新增
   // 媒体生成接口档案概览：GET /config 的 summary 与 /interfaces 同构，避免重复请求
   let ifaceData = { interfaces: [], scopeBindings: {}, scopes: [] };
+  /** 出图工作流库里已展开「⚙ 参数 / ✎ JSON」的条目：`kind:id`。
+   *  提前声明：renderLib 会在闭包里更早执行，晚声明的 const 会撞 TDZ */
+  const openLibIds = new Set();
+  const isLibOpen = (kind, id) => openLibIds.has(`${kind}:${id}`);
+  // 接口 schema 缓存（JSON 本体 + 输入清单）：接口档案卡与出图工作流库共用
+  const schemaCache = new Map();
   const applySummary = (summary) => {
     if (!summary) return;
     ifaceData = {
@@ -117,6 +123,16 @@ export async function openSettings(project, onSave) {
         <div class="field"><label>接口地址（留空使用本地生成）</label><input id="set-img" value="${esc(s.imageEndpoint || '')}" placeholder="https://.../images/generations"></div>
         <div class="cf-note">填写 OpenAI 兼容的 images/generations 地址后，出图会先走本地 ComfyUI，失败时改用该云端接口；留空则回退本地自绘。模型库只负责剧本 / 分镜 / 机位规划等文本生成。</div>
       </div>
+
+      <div class="cf-section" id="model-comfy-entry">
+        <h4>🔌 ComfyUI 接口与输入参数 <span class="cf-tag">应用级共享</span></h4>
+        <div class="cf-note">导入的每份 ComfyUI「导出(API)」JSON 都是一个生图接口：可以直接修改接口 JSON、可视化设置这份接口需要输入的参数，并决定封面 / 角色 / 分镜 / 视频 / 音色等生成服务各自使用哪个接口。生图 Agent 会按所选接口的参数表自动配置参数。</div>
+        <div class="cf-row" style="margin-top:9px">
+          <button class="btn primary sm" id="model-goto-iface" type="button">编辑接口 JSON / 输入参数 →</button>
+          <button class="btn sm" id="model-goto-bindings" type="button">查看服务 → 接口绑定</button>
+        </div>
+        <div id="model-iface-summary" class="mi-summary"></div>
+      </div>
     </div>
 
     <div class="settings-pane" id="pane-comfy" hidden>
@@ -131,8 +147,9 @@ export async function openSettings(project, onSave) {
 
       <div class="cf-section" id="iface-section">
         <h4>🔌 媒体生成接口档案 <span class="cf-tag">一份 API 工作流 + 一套请求参数</span></h4>
-        <div class="cf-note">每个接口档案就是一份 ComfyUI「导出(API)」工作流，可以单独设置负向词、宽高、步数、CFG、帧率帧数、模型名、自定义占位符与节点级覆盖；<b>参数留空表示沿用全局值</b>。下方「板块绑定」决定封面 / 定妆 / 关键帧 / 视频 / 音色各自用哪个接口；生成入口旁的下拉还能临时覆盖本次选择。</div>
+        <div class="cf-note">每个接口档案就是一份 ComfyUI「导出(API)」工作流：点「✎ 接口 JSON」可直接修改导入的文件，点「⚙ 输入参数」会<b>自动列出这份 JSON 里所有需要填写的输入</b>，逐项选择由内置变量 / 固定值 / 生图 Agent / 保持原值来提供。档案还可单独设置负向词、宽高、步数、CFG、帧率帧数、模型名、自定义占位符与节点级覆盖；<b>参数留空表示沿用全局值</b>。下方「板块绑定」决定封面 / 定妆 / 关键帧 / 视频 / 音色各自用哪个接口；生成入口旁的下拉还能临时覆盖本次选择。</div>
         <div class="cf-row" style="margin-top:9px">
+          <button class="btn" id="iface-import" type="button">⇧ 导入接口 JSON</button>
           <button class="btn" id="iface-refresh" type="button">↻ 刷新档案</button>
           <button class="btn primary" id="iface-save-bindings" type="button">保存板块绑定</button>
         </div>
@@ -478,14 +495,22 @@ export async function openSettings(project, onSave) {
     const testBtn = running
       ? `<button class="wf-test run" type="button" disabled><span class="wf-spin"></span>试跑中</button>`
       : `<button class="wf-test" type="button" data-act="test-one" title="只测试这一个工作流：向本地 ComfyUI 真实提交一次生成">▶ 测试</button>`;
-    return `<div class="wf-item ${active ? 'active' : ''}" data-id="${esc(e.id)}">
+    // 参数数来自接口概览（不在 cfg 原始库项里重复计算），没有就只显示「⚙ 参数」
+    const ov = (ifaceData.interfaces || []).find((x) => x.id === e.id);
+    const inputs = ov && ov.inputCount ? ov.inputCount : null;
+    const paramBtn = `<button class="btn sm" type="button" data-act="lib-inputs" title="自动解析这份工作流中需要填写的参数（连线槽位自动隐藏）并可视化配置">⚙ 参数${inputs ? `（${inputs}）` : ''}</button>`;
+    const open = openLibIds.has(`${kind}:${e.id}`);
+    return `<div class="wf-item ${active ? 'active' : ''} ${open ? 'lib-open' : ''}" data-id="${esc(e.id)}">
       <input type="radio" name="wf-pick-${kind}" ${active ? 'checked' : ''} data-act="pick" title="选中即当前生效">
       <span class="wf-name" data-act="expand" title="点击查看 / 复制 JSON · 双击重命名">${esc(e.name)}</span>
       <span class="wf-nodes">${Object.keys(e.workflow || {}).length} 节点</span>
       ${badge}
+      ${paramBtn}
+      <button class="btn sm" type="button" data-act="lib-json" title="直接修改这份导入的接口 JSON">✎ JSON</button>
       ${testBtn}
       <button class="wf-del" type="button" data-act="del" title="删除">✕</button>
       <textarea class="cf-code wf-json" rows="7" readonly hidden>${esc(JSON.stringify(e.workflow, null, 2))}</textarea>
+      <div class="iface-block lib-block" data-block="lib-inputs" ${open ? '' : 'hidden'}></div>
     </div>`;
   };
 
@@ -496,6 +521,18 @@ export async function openSettings(project, onSave) {
     box.innerHTML = lib.length
       ? lib.map((e) => libItemHTML(kind, e)).join('')
       : `<div class="wf-empty">暂无工作流 · 点「⇧ 导入 JSON」选择本地 ComfyUI「导出(API)」文件（可多选）</div>`;
+    // 重绘后恢复已展开的参数表 / JSON 编辑器（列表重绘不能把用户正在看的参数表收起来）
+    for (const item of box.querySelectorAll('.wf-item')) {
+      const e = lib.find((x) => x.id === item.dataset.id);
+      if (!e || !isLibOpen(kind, e.id)) continue;
+      const blk = item.querySelector('[data-block="lib-inputs"]');
+      if (!blk) continue;
+      blk.hidden = false;
+      const data = schemaCache.get(e.id);
+      if (!data) continue;
+      if (blk.dataset.mode === 'json') paintJsonEditor(blk, e); else paintInputTable(blk, e);
+      prefixLibActions(blk);
+    }
   };
 
   const applyConfig = (d) => {
@@ -504,6 +541,7 @@ export async function openSettings(project, onSave) {
     applySummary(d?.summary);
     renderInterfaces();
     renderBindings();
+    renderModelIfaceSummary();
     invalidateInterfaces().catch(() => {});
   };
 
@@ -584,7 +622,7 @@ export async function openSettings(project, onSave) {
   const setupLib = (kind) => {
     const box = root.querySelector(`#cf-lib-${kind}`);
     if (!box) return;
-    box.addEventListener('click', (ev) => {
+    box.addEventListener('click', async (ev) => {
       const item = ev.target.closest('.wf-item');
       if (!item) return;
       const entry = (cfg[libKey(kind)] || []).find((e) => e.id === item.dataset.id);
@@ -596,6 +634,11 @@ export async function openSettings(project, onSave) {
         if (ta) ta.hidden = !ta.hidden;
         return;
       }
+      if (act === 'lib-inputs' || act === 'lib-json') { libBlock(kind, item, entry, act === 'lib-json' ? 'json' : 'inputs'); return; }
+      if (act === 'lib-save-inputs') { libSave(kind, item, entry); return; }
+      if (act === 'lib-reset-order') { libResetOrder(kind, item, entry); return; }
+      if (act === 'lib-save-json') { libSaveJson(kind, item, entry); return; }
+      if (act === 'lib-format-json') { libFormatJson(item); return; }
       if (act === 'del') { requestDelete(kind, entry); return; }
       if (act === 'test-one') { testOne(kind, entry); return; }
       if (act === 'pick' && actEl.matches('input[type="radio"]') && cfg[activeKey(kind)] !== entry.id) {
@@ -743,6 +786,21 @@ export async function openSettings(project, onSave) {
           ? `<b class="ok">✓ ${summary}</b><div class="cf-code" style="margin-top:6px">${d.failed.map((x) => `<div><b class="err">✕ ${esc(x.name)}</b> ${esc(x.error)}</div>`).join('')}</div>`
           : `<b class="ok">✓ ${summary}</b> 已入库，开始自动串行试跑…`;
         toast(summary, d.failed.length ? '' : 'ok');
+        // 导入后当场把参数可视化展出：自动展开第一个新增条目的参数表（多文件时只展开首个，
+        // 其余提示逐个点开，避免一次拉取十几份完整参数清单）
+        if (d.added.length) {
+          const first = d.added[0];
+          openLibIds.add(`${kind}:${first.id}`);
+          renderLib(kind);
+          const item = root.querySelector(`#cf-lib-${kind} .wf-item[data-id="${first.id}"]`);
+          if (item) {
+            try {
+              await libBlock(kind, item, first, 'inputs', true);
+              item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            } catch { /* 展开失败不影响导入结果 */ }
+          }
+          if (d.added.length > 1) toast(`已展开「${first.name}」的参数，其余 ${d.added.length - 1} 份点行内「⚙ 参数」查看`, '');
+        }
         if (d.added.length) await testBatch(kind, d.added.map((x) => x.id));
       } catch (e) {
         box.innerHTML = `<b class="err">✕ 导入失败</b> ${esc(e.message)}`;
@@ -776,15 +834,427 @@ export async function openSettings(project, onSave) {
   ];
   const IFACE_KIND_LABEL = { image: '出图', video: '视频', audio: '音频' };
   const openIfaceIds = new Set();
+  const openJsonIds = new Set();      // 展开「✎ 接口 JSON」编辑器
+  const openInputIds = new Set();     // 展开「⚙ 输入参数」表格
+  const SOURCE_LABELS = {
+    auto: '自动识别（默认）', builtin: '内置变量', fixed: '固定值',
+    agent: '由 Agent 生成', skip: '保持原值（不注入）',
+  };
   let bindingsDirty = false;
 
   const ifaceById = (id) => (ifaceData.interfaces || []).find((e) => e.id === id) || null;
+
+  /** 按需拉取某份接口的 JSON 本体 + 自动解析出的输入清单 */
+  const loadSchema = async (id, force = false) => {
+    if (!force && schemaCache.has(id)) return schemaCache.get(id);
+    const d = await json(`/api/comfyui/interfaces/${encodeURIComponent(id)}/schema`, 'GET');
+    const data = {
+      workflow: d.workflow || {},
+      inputs: Array.isArray(d.inputs) ? d.inputs : [],
+      builtinVars: Array.isArray(d.builtinVars) ? d.builtinVars : [],
+      inputSchema: Array.isArray(d.inputSchema) ? d.inputSchema : [],
+      inputOrder: Array.isArray(d.inputOrder) ? d.inputOrder : [],
+    };
+    schemaCache.set(id, data);
+    return data;
+  };
+
+  const blockMsg = (item, kind, text, bad = false) => {
+    const el = item.querySelector(`[data-block="${kind}"] [data-msg]`);
+    if (el) { el.className = bad ? 'mi-msg err' : 'mi-msg ok'; el.textContent = text; }
+  };
+
+  /** 接口 JSON 编辑器：直接改导入的文件，保存 / 文件替换 / 格式化 */
+  function paintJsonEditor(box, e) {
+    const data = schemaCache.get(e.id);
+    if (!box || !data) return;
+    box.innerHTML = `
+      <div class="mi-head"><b>✎ 接口 JSON 文件</b> · ${esc(e.name)} · ${Object.keys(data.workflow || {}).length} 节点
+        <span class="cf-note">保存后写回该接口档案；若它是当前生效接口，镜像会同步更新。</span></div>
+      <textarea class="cf-code mi-json" rows="12" spellcheck="false">${esc(JSON.stringify(data.workflow, null, 2))}</textarea>
+      <div class="cf-row mi-actions">
+        <button class="btn primary sm" type="button" data-act="save-json">💾 保存 JSON</button>
+        <button class="btn sm" type="button" data-act="replace-json">⇧ 用文件替换</button>
+        <button class="btn sm" type="button" data-act="format-json">⌗ 格式化</button>
+        <span data-msg class="mi-msg"></span>
+      </div>
+      <div class="cf-note">任意字符串输入都可写 {{prompt}} {{negative_prompt}} {{seed}} {{width}} {{height}} 等占位符；改过节点 id / 输入名后，输入参数表会自动跳过失效的行。</div>`;
+  }
+
+  const sourceOptions = (i, current) => (i.type === 'link'
+    ? ['auto', 'skip'] : ['auto', 'builtin', 'fixed', 'agent', 'skip'])
+    .map((v) => `<option value="${v}" ${current === v ? 'selected' : ''}>${esc(SOURCE_LABELS[v])}</option>`).join('');
+
+  /* ---------- 参数表：只列需要人填的槽位，控件按类型匹配 ---------- */
+  const MEDIA_LABEL = { image: '图片', video: '视频', audio: '音频' };
+  const MEDIA_ACCEPT = { image: 'image/*', video: 'video/*', audio: 'audio/*' };
+  const TYPE_LABELS = { text: '文本', number: '数字', boolean: '是否', array: '多值', other: '其他', link: '连线' };
+
+  /** 多值参数的可视化值 → 素材列表（JSON 数组 / 逗号简写 / 单个文件名） */
+  function mediaFiles(i, raw) {
+    const text = String(raw ?? '').trim();
+    if (!text) return [];
+    if (!i.multiple) return [text];
+    try {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed.map((x) => String(x)).filter(Boolean) : [String(parsed)];
+    } catch {
+      return text.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  const filesToValue = (i, files) => (i.multiple ? JSON.stringify(files) : (files[0] || ''));
+
+  /** 媒体槽位的已选素材清单（可逐个移除，序号即对应工作流里的槽位顺序） */
+  function mediaChipsHTML(i, files) {
+    if (!files.length) {
+      return `<div class="mi-chip-empty">未选${MEDIA_LABEL[i.media] || '素材'} · 点「⇧ 上传」或「📁 资源库」</div>`;
+    }
+    return files.map((f, n) => `<span class="mi-chip" title="${esc(f)}">
+        <span class="mi-chip-n">${i.multiple ? n + 1 : '◉'}</span>
+        <span class="mi-chip-name">${esc(f)}</span>
+        <button class="mi-chip-x" type="button" data-act="media-drop" data-file="${esc(f)}" title="移除这个素材">✕</button>
+      </span>`).join('');
+  }
+  /** 按参数类型给输入控件：文本 / 长文本 / 数字 / 是否 / 多值 / 媒体（上传 + 资源库） */
+  function inputControlHTML(i, r, source) {
+    const value = r.value ?? '';
+    // 媒体槽位：上传或从资源库挑，选中的文件名同时是 ComfyUI 输入目录里的文件名。
+    // 素材清单与两个入口始终可见（自动识别档下也能直接上传，上传后自动切到「固定值」生效）
+    if (i.media) {
+      // 没配过固定值时回落到工作流当前值，否则右边「当前值」有文件名、左边清单却空着，看起来像丢了
+      const files = mediaFiles(i, value === '' ? (i.value ?? '') : value);
+      const label = MEDIA_LABEL[i.media] || '素材';
+      const pending = source === 'auto' || source === 'builtin';
+      const headNote = pending
+        ? `<span class="mi-media-note warn">当前来源不写素材 · 选好素材会自动切到「固定值」</span>`
+        : `<span class="mi-media-note">${i.multiple ? '多值：按序号对应工作流槽位' : ''}</span>`;
+      return `<div class="mi-media">
+        <div class="mi-chips">${mediaChipsHTML(i, files)}</div>
+        <div class="mi-media-btns">
+          <button class="btn sm" type="button" data-act="media-upload" title="从本机上传${label}：同时写入本地资源库与 ComfyUI 输入目录">⇧ 上传</button>
+          <button class="btn sm" type="button" data-act="media-pick" title="从资源库选择已有${label}">📁 资源库</button>
+          ${headNote}
+        </div>
+        <input data-cell="value" data-show="fixed,agent" class="mi-val mi-val-raw" type="text"
+          value="${esc(value)}" placeholder="${i.multiple ? 'JSON 数组或逗号分隔多个文件名' : `文件名（也可手写）`}"
+          ${source === 'fixed' || source === 'agent' ? '' : 'hidden'} ${pending ? 'data-media-pending="1"' : ''}>
+      </div>`;
+    }
+    if (i.type === 'boolean') {
+      const cur = String(value).trim().toLowerCase();
+      const on = cur === 'true' || cur === '1' ? 'true' : cur === 'false' || cur === '0' ? 'false' : '';
+      return `<select data-cell="value" data-show="fixed,agent" class="mi-val"
+        ${source === 'fixed' || source === 'agent' ? '' : 'hidden'}>
+        <option value="">（保持工作流原值）</option>
+        <option value="true" ${on === 'true' ? 'selected' : ''}>true · 启用</option>
+        <option value="false" ${on === 'false' ? 'selected' : ''}>false · 关闭</option>
+      </select>`;
+    }
+    if (i.type === 'number') {
+      return `<input data-cell="value" data-show="fixed,agent" class="mi-val" type="number" step="any"
+        value="${esc(value)}" placeholder="数字${source === 'agent' ? '（Agent 失败时的兜底值）' : ''}"
+        ${source === 'fixed' || source === 'agent' ? '' : 'hidden'}>`;
+    }
+    // 多行：提示词 / 长文本 / 多值数组都写得更顺
+    if (i.multiline || i.type === 'array') {
+      const rows = i.type === 'array' ? 2 : 3;
+      const ph = i.type === 'array' ? 'JSON 数组（如 ["a.png","b.png"]）或逗号分隔多项' : '可写占位符 {{prompt}}，也可直接写固定文本';
+      return `<textarea data-cell="value" data-show="fixed,agent" class="mi-val mi-tall" rows="${rows}" spellcheck="false"
+        placeholder="${esc(ph)}" ${source === 'fixed' || source === 'agent' ? '' : 'hidden'}>${esc(value)}</textarea>`;
+    }
+    return `<input data-cell="value" data-show="fixed,agent" class="mi-val" type="text" value="${esc(value)}"
+      placeholder="${source === 'agent' ? '兜底值（Agent 失败时用）' : '固定值 / 占位符'}"
+      ${source === 'fixed' || source === 'agent' ? '' : 'hidden'}>`;
+  }
+
+  /** 切来源时统一刷新控件可见性：按 data-show 声明的来源清单匹配；媒体行顺带更新提示语 */
+  function syncCfgVisibility(row, source) {
+    row.querySelectorAll('[data-show]').forEach((el) => {
+      el.hidden = !el.dataset.show.split(',').includes(source);
+    });
+    const note = row.querySelector('.mi-media-note');
+    if (note && row.dataset.media) {
+      const active = source === 'fixed' || source === 'agent';
+      const multi = row.dataset.multi === '1';
+      note.className = active ? 'mi-media-note' : 'mi-media-note warn';
+      note.textContent = active
+        ? (multi ? '多值：按序号对应工作流槽位' : '')
+        : '当前来源不写素材 · 选好素材会自动切到「固定值」';
+    }
+  }
+
+  /** 输入参数表：从接口 JSON 自动解析出的每个「需要人填」的输入一行
+   *  连线槽位（工作流内部连接驱动）不展示也不可配；媒体槽位给上传 / 资源库入口。
+   *  box 由调用方给（接口档案卡 / 出图工作流库共用这套渲染，避免维护两份表格） */
+  function paintInputTable(box, e) {
+    const data = schemaCache.get(e.id);
+    if (!box || !data) return;
+    box.dataset.eid = e.id;
+    const saved = new Map((data.inputSchema || []).map((r) => [`${r.node}::${r.input}`, r]));
+    const varOptions = (sel) => (data.builtinVars || []).map((v) =>
+      `<option value="${esc(v.key)}" ${sel === v.key ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+    // 只渲染需要输入的槽位：连线由工作流内部驱动
+    const all = data.inputs || [];
+    const slots = all.filter((i) => i.editable !== false && i.type !== 'link');
+    const linkCount = all.length - slots.length;
+    const rows = slots.map((i, idx) => {
+      const r = saved.get(`${i.node}::${i.input}`) || {};
+      const source = r.source || 'auto';
+      const typeLabel = i.media ? `${MEDIA_LABEL[i.media]}·素材`
+        : i.type === 'array' ? `多值(${(i.value || []).length})`
+          : i.multiline ? '长文本' : (TYPE_LABELS[i.type] || i.type);
+      // 行详情：该节点全部输入 + 该槽位的完整上下文，方便「查看每个参数」
+      const sibling = (Object.entries((data.workflow?.[i.node]?.inputs) || {})
+        .map(([k, v]) => `${k}=${Array.isArray(v) ? (isLinkShape(v) ? `→节点${v[0]}` : `[${v.length}项]`) : JSON.stringify(v)}`)
+        .join(' · '));
+      return `<div class="mi-row" data-slot="${esc(`${i.node}::${i.input}`)}" data-media="${esc(i.media || '')}" data-multi="${i.multiple ? '1' : '0'}" draggable="true">
+        <div class="mi-slot">
+          <button class="mi-grip" type="button" title="拖动调整顺序">⠿</button>
+          <b>${esc(i.node)}.${esc(i.input)}</b>
+          <span class="mi-type ${i.media ? 'media' : ''}">${esc(typeLabel)}</span>
+          <button class="mi-info" type="button" data-act="row-info" title="查看该参数的完整信息">ⓘ</button>
+          <small>${esc(i.classType || '')}${i.nodeTitle ? ` · ${esc(i.nodeTitle)}` : ''}${i.role ? ` · ${esc(i.role)}` : ''}</small>
+        </div>
+        <div class="mi-cur" title="${esc(i.valueText)}">${esc(i.valueText)}</div>
+        <select data-cell="source">${sourceOptions(i, source)}</select>
+        <div class="mi-cfg">
+          <select data-cell="varName" data-show="builtin" class="mi-var" ${source === 'builtin' ? '' : 'hidden'}>${varOptions(r.varName || i.suggestedVar || '')}</select>
+          ${inputControlHTML(i, r, source)}
+          <input data-cell="hint" data-show="agent" class="mi-hint" value="${esc(r.hint || '')}"
+            placeholder="给 Agent 的要求，如：按画面情绪挑 LoRA 强度" ${source === 'agent' ? '' : 'hidden'}>
+        </div>
+        <div class="mi-order">
+          <button class="btn xs" type="button" data-act="move-up" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
+          <button class="btn xs" type="button" data-act="move-down" ${idx === slots.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+        </div>
+        <div class="mi-detail" hidden>
+          <div><b>${esc(i.node)}.${esc(i.input)}</b> · 类型 ${esc(i.type)}${i.media ? ` · 媒体槽位（${esc(MEDIA_LABEL[i.media])}）` : ''} · 节点 ${esc(i.classType || '?')}${i.nodeTitle ? `（${esc(i.nodeTitle)}）` : ''}</div>
+          <div>原始值：<code>${esc(JSON.stringify(i.value))}</code></div>
+          ${i.role ? `<div>推断角色：<code>${esc(i.role)}</code>${i.suggestedVar ? ` · 建议变量 <code>{{${esc(i.suggestedVar)}}}</code>` : ''}</div>` : ''}
+          ${i.media ? `<div>媒体槽位：<b>⇧ 上传</b> 会把文件同时写进本地资源库与 ComfyUI 输入目录，再把这个文件名写进该槽位；<b>📁 资源库</b> 直接复用已有素材。</div>` : ''}
+          ${i.type === 'array' ? `<div>多值参数：固定值请写 JSON 数组（如 <code>["a.png","b.png"]</code>），也可用逗号分隔简写；${i.multiple ? '素材按顺序对应工作流里的多个槽位。' : ''}</div>` : ''}
+          ${i.type === 'boolean' ? '<div>布尔参数：下拉选 true / false（保存时按真布尔写回，不会是字符串）。</div>' : ''}
+          ${i.multiline ? '<div>长文本参数：已用多行输入框，可写占位符也可写固定文本。</div>' : ''}
+          <div>该节点全部输入：<code>${esc(sibling || '（无）')}</code></div>
+        </div>
+      </div>`;
+    }).join('');
+    box.innerHTML = `
+      <div class="mi-head"><b>⚙ 需要输入的参数</b> · ${slots.length} 项
+        <span class="cf-note">每份工作流的参数都不一样（多图 / 参考文本 / 自定义节点都按原样列出）；点 ⓘ 看单个参数详情，⠿ 拖动或 ↑↓ 调整顺序。</span>
+        ${linkCount ? `<span class="cf-tag" title="连线由工作流内部节点连接驱动，不需要填写，因此不在下表出现">已隐藏 ${linkCount} 个连线槽位</span>` : ''}</div>
+      <div class="mi-table">
+        <div class="mi-row mi-th"><div>节点 · 输入</div><div>当前值</div><div>取值来源</div><div>配置</div><div>顺序</div></div>
+        ${rows || '<div class="cf-note">这份接口没有需要填写的参数（全部是连线槽位）。</div>'}
+      </div>
+      <div class="cf-row mi-actions">
+        <button class="btn primary sm" type="button" data-act="save-inputs">保存输入参数与顺序</button>
+        <button class="btn sm" type="button" data-act="reset-order" title="恢复到工作流原始扫描顺序">↺ 恢复默认顺序</button>
+        <span data-msg class="mi-msg"></span>
+      </div>`;
+    box.querySelectorAll('.mi-row[data-slot] [data-cell="source"]').forEach((sel) => {
+      sel.addEventListener('change', () => syncCfgVisibility(sel.closest('.mi-row'), sel.value));
+    });
+    bindOrderUI(box);
+    bindMediaUI(box);
+  }
+
+  /* ---------- 媒体槽位：上传（双写）与资源库复用 ---------- */
+  const readAsDataURL = (file) => new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => reject(new Error('读取本地文件失败'));
+    fr.readAsDataURL(file);
+  });
+
+  /** 把素材写回该行：更新值输入框（collectInputRows 读它）、重绘清单。
+   *  switchSource=true 时（上传 / 从资源库选入）把来源切到「固定值」，
+   *  否则参数表会写着「自动识别」却悄悄把文件名带进保存 —— 反过来，手动移除素材不能改来源，
+   *  否则会得到一个「固定值 = 空」的配置，把工作流原本的素材清掉。 */
+  function applyMedia(row, i, files, switchSource = true) {
+    const raw = row.querySelector('[data-cell="value"]');
+    if (raw) raw.value = filesToValue(i, files);
+    const chips = row.querySelector('.mi-chips');
+    if (chips) chips.innerHTML = mediaChipsHTML(i, files);
+    const sel = row.querySelector('[data-cell="source"]');
+    if (switchSource && sel && (sel.value === 'auto' || sel.value === 'builtin')) sel.value = 'fixed';
+    if (sel) syncCfgVisibility(row, sel.value);
+  }
+
+  /** 上传 / 复用：统一交给后端「本地资源库 + ComfyUI 双写」，拿回 ComfyUI 侧文件名 */
+  async function pushMedia(box, row, i, payload) {
+    const btns = row.querySelectorAll('[data-act="media-upload"], [data-act="media-pick"]');
+    btns.forEach((b) => { b.disabled = true; });
+    try {
+      const d = await json(`/api/comfyui/interfaces/${encodeURIComponent(box.dataset.eid)}/media`, 'POST', {
+        ...payload, media: i.media, node: i.node, input: i.input,
+      });
+      const cur = mediaFiles(i, row.querySelector('[data-cell="value"]')?.value || '');
+      applyMedia(row, i, i.multiple ? [...cur.filter((f) => f !== d.comfyName), d.comfyName] : [d.comfyName]);
+      if (d.warning) toast(d.warning, '');
+      else toast(`${MEDIA_LABEL[i.media]}已就绪：${d.comfyName}`, 'ok');
+    } catch (err) {
+      toast(`${MEDIA_LABEL[i.media] || '素材'}设置失败：${err.message}`, 'err');
+    } finally {
+      btns.forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  function bindMediaUI(box) {
+    if (box.dataset.mediaBound === '1') return;   // 同一容器只绑一次，重绘时 DOM 一起换掉
+    box.dataset.mediaBound = '1';
+    box.addEventListener('click', async (ev) => {
+      const actEl = ev.target.closest('[data-act]');
+      if (!actEl || !box.contains(actEl)) return;
+      const act = actEl.dataset.act;
+      if (!['media-upload', 'media-pick', 'media-drop'].includes(act)) return;
+      const row = actEl.closest('.mi-row');
+      if (!row) return;
+      const data = schemaCache.get(box.dataset.eid);
+      const [node, input] = (row.dataset.slot || '').split('::');
+      const i = (data?.inputs || []).find((s) => s.node === node && s.input === input);
+      if (!i) return;
+      if (act === 'media-drop') {
+        // 移除只是把值改小：不把来源从「自动识别」拉成「固定值」，否则空固定值会清掉工作流原素材
+        const files = mediaFiles(i, row.querySelector('[data-cell="value"]')?.value || '')
+          .filter((f) => f !== actEl.dataset.file);
+        applyMedia(row, i, files, false);
+        return;
+      }
+      if (act === 'media-upload') {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = MEDIA_ACCEPT[i.media] || '*/*';
+        fileInput.onchange = async () => {
+          const f = fileInput.files?.[0];
+          if (!f) return;
+          if (f.size > 32 * 1024 * 1024) { toast(`文件 ${(f.size / 1048576).toFixed(1)}MB，超过 32MB 上限`, 'err'); return; }
+          try {
+            const dataUrl = await readAsDataURL(f);
+            await pushMedia(box, row, i, { dataUrl, name: f.name });
+          } catch (err) { toast(err.message, 'err'); }
+        };
+        fileInput.click();
+        return;
+      }
+      // 资源库选择：动态导入避免 panels ⇄ asset-manager 的循环依赖
+      try {
+        const mod = await import('./asset-manager.js');
+        const accept = i.media === 'image' ? 'image' : i.media === 'video' ? 'video' : 'all';
+        mod.openAssetLibrary({
+          mode: 'pick', multi: !!i.multiple, accept,
+          onPick: async (list) => {
+            const items = (Array.isArray(list) ? list : [list]).filter(Boolean);
+            const matched = items.filter((a) => (a.type || a.kind) === i.media);
+            if (!matched.length) { toast(`所选资源里没有${MEDIA_LABEL[i.media]}文件`, 'err'); return; }
+            for (const a of matched) await pushMedia(box, row, i, { asset: a.file });
+          },
+        });
+      } catch (err) {
+        toast(`打开资源库失败：${err.message}`, 'err');
+      }
+    });
+  }
+
+  /** 上下移 + 拖拽：两种方式都只改 DOM 顺序，保存时统一读当前可见顺序回写 */
+  function bindOrderUI(box) {
+    box.querySelectorAll('.mi-row[data-slot] [data-act="move-up"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const row = btn.closest('.mi-row');
+        const prev = row.previousElementSibling;
+        if (prev && prev.dataset.slot) { row.parentNode.insertBefore(row, prev); syncOrderBtns(box); }
+      });
+    });
+    box.querySelectorAll('.mi-row[data-slot] [data-act="move-down"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const row = btn.closest('.mi-row');
+        const next = row.nextElementSibling;
+        if (next && next.dataset.slot) { row.parentNode.insertBefore(next, row); syncOrderBtns(box); }
+      });
+    });
+    box.querySelectorAll('.mi-row[data-slot] [data-act="row-info"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const detail = btn.closest('.mi-row').querySelector('.mi-detail');
+        if (detail) detail.hidden = !detail.hidden;
+      });
+    });
+    let dragRow = null;
+    box.querySelectorAll('.mi-row[data-slot]').forEach((row) => {
+      row.addEventListener('dragstart', (ev) => {
+        dragRow = row;
+        row.classList.add('dragging');
+        ev.dataTransfer?.setData('text/plain', row.dataset.slot || '');
+        if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        box.querySelectorAll('.mi-row').forEach((r) => r.classList.remove('drop-target'));
+        dragRow = null;
+        syncOrderBtns(box);
+      });
+      row.addEventListener('dragover', (ev) => {
+        if (!dragRow || dragRow === row) return;
+        ev.preventDefault();
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+        row.classList.add('drop-target');
+      });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+      row.addEventListener('drop', (ev) => {
+        ev.preventDefault();
+        row.classList.remove('drop-target');
+        if (!dragRow || dragRow === row) return;
+        // 按指针落在目标行的上半 / 下半决定插到前面还是后面
+        const rect = row.getBoundingClientRect();
+        const after = ev.clientY > rect.top + rect.height / 2;
+        row.parentNode.insertBefore(dragRow, after ? row.nextElementSibling : row);
+        dragRow = null;
+        syncOrderBtns(box);
+      });
+    });
+  }
+
+  /** 首行禁用 ↑、末行禁用 ↓；拖动后重新算一遍 */
+  function syncOrderBtns(box) {
+    const rows = [...box.querySelectorAll('.mi-row[data-slot]')];
+    rows.forEach((row, i) => {
+      const up = row.querySelector('[data-act="move-up"]');
+      const down = row.querySelector('[data-act="move-down"]');
+      if (up) up.disabled = i === 0;
+      if (down) down.disabled = i === rows.length - 1;
+    });
+  }
+
+  /** 连线形态：[节点id, 输出序号]，第二项必须是数字 */
+  const isLinkShape = (v) => Array.isArray(v) && v.length === 2
+    && (typeof v[0] === 'string' || typeof v[0] === 'number') && typeof v[1] === 'number';
+
+  /** 读取参数表当前可见顺序（用户排序后的真实顺序） */
+  const collectInputOrder = (box) => [...box.querySelectorAll('.mi-row[data-slot]')]
+    .map((row) => row.dataset.slot).filter(Boolean);
+
+  /** 只有非默认来源的行才落盘，省得把整份工作流锁死 */
+  const collectInputRows = (box) => [...box.querySelectorAll('.mi-row[data-slot]')].map((row) => {
+    const [node, input] = row.dataset.slot.split('::');
+    const source = row.querySelector('[data-cell="source"]')?.value || 'auto';
+    if (source === 'auto') return null;
+    const value = row.querySelector('[data-cell="value"]')?.value ?? '';
+    // 媒体槽位选了「固定值」却一个素材都没有 → 视为没配（空字符串会清掉工作流里原本的素材）
+    if (row.dataset.media && source === 'fixed' && !String(value).trim()) return null;
+    return {
+      node, input, source,
+      varName: row.querySelector('[data-cell="varName"]')?.value || '',
+      value,
+      hint: row.querySelector('[data-cell="hint"]')?.value ?? '',
+      label: `${node}.${input}`,
+    };
+  }).filter(Boolean);
 
   function paramSummary(e) {
     const p = e.params || {};
     const keys = Object.keys(p).filter((k) => k !== 'extra' && p[k] !== '' && p[k] !== undefined && p[k] !== null);
     const bits = keys.slice(0, 5).map((k) => `${k}=${String(p[k]).slice(0, 16)}`);
     if (p.extra && Object.keys(p.extra).length) bits.push(`extra:${Object.keys(p.extra).length}`);
+    if (Array.isArray(e.inputSchema) && e.inputSchema.length) bits.push(`参数表:${e.inputSchema.length}`);
     if (!bits.length) return '沿用全局参数';
     return `${bits.join(' · ')}${keys.length > 5 ? ` …+${keys.length - 5}` : ''}`;
   }
@@ -819,6 +1289,8 @@ export async function openSettings(project, onSave) {
           ${e.capability ? `<span class="wf-badge">${esc(e.capability)}</span>` : ''}
           <span class="iface-summary">${e.nodes || 0} 节点 · ${esc(paramSummary(e))}</span>
           ${bound ? `<span class="wf-badge run" title="已绑定到这些板块">用于 ${esc(bound)}</span>` : ''}
+          <button class="btn sm" type="button" data-act="edit-json" title="直接查看 / 修改导入的接口 JSON 文件">✎ 接口 JSON</button>
+          <button class="btn sm" type="button" data-act="inputs" title="从接口 JSON 自动列出输入并可视化配置">⚙ 输入参数</button>
           <button class="wf-test" type="button" data-act="test" title="按该档案的参数真实试跑一次">▶ 测试</button>
           <button class="btn sm" type="button" data-act="save">保存档案</button>
         </div>
@@ -838,8 +1310,17 @@ export async function openSettings(project, onSave) {
             ${rowsHTML('binding', e.bindings)}
             <button class="btn sm" type="button" data-act="add-row" data-row="binding">＋ 添加一行</button></div>
         </div>
+        <div class="iface-block" data-block="json" ${openJsonIds.has(e.id) ? '' : 'hidden'}></div>
+        <div class="iface-block" data-block="inputs" ${openInputIds.has(e.id) ? '' : 'hidden'}></div>
       </div>`;
     }).join('');
+    // 重绘列表后按展开状态恢复两个编辑器（内容来自缓存，未保存的改动以用户最近一次输入为准）
+    for (const item of box.querySelectorAll('.iface-item')) {
+      const e = ifaceById(item.dataset.id);
+      if (!e) continue;
+      if (openJsonIds.has(e.id)) paintJsonEditor(item, e);
+      if (openInputIds.has(e.id)) paintInputTable(item.querySelector('[data-block="inputs"]'), e);
+    }
   }
 
   function renderBindings() {
@@ -899,7 +1380,157 @@ export async function openSettings(project, onSave) {
     } catch (err) { toast(`保存失败：${err.message}`, 'err'); }
   }
 
-  root.querySelector('#iface-lib')?.addEventListener('click', (ev) => {
+  /** 展开 / 收起某个档案的接口 JSON 编辑器或输入参数表（按需拉取，不重绘其它档案） */
+  const toggleIfaceBlock = async (item, e, kind) => {
+    const set = kind === 'json' ? openJsonIds : openInputIds;
+    const box = item.querySelector(`[data-block="${kind}"]`);
+    if (!box) return;
+    if (set.has(e.id)) { set.delete(e.id); box.hidden = true; box.innerHTML = ''; return; }
+    set.add(e.id);
+    box.hidden = false;
+    box.innerHTML = '<div class="cf-note">正在读取接口文件…</div>';
+    try {
+      await loadSchema(e.id);
+      if (!set.has(e.id) || !document.contains(item)) return;
+      if (kind === 'json') paintJsonEditor(box, e); else paintInputTable(box, e);
+    } catch (err) {
+      box.innerHTML = `<b class="err">✕ 读取接口文件失败</b> ${esc(err.message)}`;
+    }
+  };
+
+  /** 保存接口 JSON 本体；box 为编辑器容器，block 为提示消息所在的块名 */
+  const saveInterfaceJson = async (box, e, scopeItem, block = 'json') => {
+    const ta = box.querySelector('.mi-json');
+    if (!ta) return;
+    let wf;
+    try { wf = JSON.parse(ta.value); }
+    catch (err) { blockMsg(scopeItem, block, `✕ JSON 语法错误：${err.message}`, true); return; }
+    blockMsg(scopeItem, block, '正在保存…');
+    try {
+      const d = await json(`/api/comfyui/interfaces/${encodeURIComponent(e.id)}/workflow`, 'PUT', { workflow: wf });
+      const prev = schemaCache.get(e.id) || {};
+      schemaCache.set(e.id, { ...prev, workflow: d.workflow, inputs: d.inputs || [] });
+      applyConfig(d);
+      toast(`接口 JSON「${e.name}」已保存`, 'ok');
+      if (Array.isArray(d.warnings) && d.warnings.length) toast(`注意：${d.warnings[0]}`, '');
+    } catch (err) {
+      blockMsg(scopeItem, block, `✕ ${err.message}`, true);
+      toast(`接口 JSON 保存失败：${err.message}`, 'err');
+    }
+  };
+
+  /**
+   * 保存输入参数表：参数来源 + 显示顺序一起提交。
+   * box 为参数表容器（接口档案卡与出图工作流库共用），scopeItem 只用于定位提示消息。
+   */
+  const saveInputSchema = async (box, e, scopeItem, block = 'inputs') => {
+    const rows = collectInputRows(box);
+    // 全量顺序：即使全是「自动识别」，顺序也要能保存下来
+    const inputOrder = collectInputOrder(box);
+    blockMsg(scopeItem, block, '正在保存…');
+    try {
+      const d = await json(`/api/comfyui/interfaces/${encodeURIComponent(e.id)}`, 'PUT', { inputSchema: rows, inputOrder });
+      const prev = schemaCache.get(e.id) || {};
+      schemaCache.set(e.id, { ...prev, inputSchema: rows, inputOrder });
+      applyConfig(d);
+      toast(`「${e.name}」输入参数与顺序已保存（${rows.length} 项自定义 / ${inputOrder.length} 项排序）`, 'ok');
+    } catch (err) {
+      blockMsg(scopeItem, block, `✕ ${err.message}`, true);
+      toast(`输入参数保存失败：${err.message}`, 'err');
+    }
+  };
+
+  /** 恢复默认顺序：清空顺序表后重新渲染（后端按扫描顺序返回） */
+  const resetInputOrder = async (box, e, scopeItem, block = 'inputs') => {
+    blockMsg(scopeItem, block, '正在恢复默认顺序…');
+    try {
+      const d = await json(`/api/comfyui/interfaces/${encodeURIComponent(e.id)}`, 'PUT', { inputOrder: [] });
+      schemaCache.delete(e.id);
+      await loadSchema(e.id, true);
+      applyConfig(d);
+      paintInputTable(box, e);
+      toast(`「${e.name}」已恢复默认顺序`, 'ok');
+    } catch (err) {
+      blockMsg(scopeItem, block, `✕ ${err.message}`, true);
+      toast(`恢复顺序失败：${err.message}`, 'err');
+    }
+  };
+
+  /**
+   * 库内联块的顶部动作改名成 lib- 前缀，避免与档案卡处理器混淆；
+   * 行内的排序 / 详情按钮保持不变（它们已由 bindOrderUI 直接绑定，不走事件委托）。
+   */
+  function prefixLibActions(box) {
+    // 行内按钮保持原名：排序 / 详情由 bindOrderUI 绑定，媒体按钮由 bindMediaUI 绑定，都不走事件委托
+    const keep = new Set(['move-up', 'move-down', 'row-info', 'media-upload', 'media-pick', 'media-drop']);
+    box.querySelectorAll('[data-act]').forEach((el) => {
+      const act = el.dataset.act;
+      if (keep.has(act) || act.startsWith('lib-')) return;
+      el.dataset.act = `lib-${act}`;
+    });
+    const saveBtn = box.querySelector('[data-act="lib-save-inputs"]');
+    if (saveBtn) saveBtn.textContent = '保存输入参数与顺序';
+  };
+
+  /** 出图工作流库里的「⚙ 参数 / ✎ JSON」：与接口档案卡共用同一套渲染与保存，
+   *  只是容器换成该条目自己的 lib-inputs 块，展开状态记在 openLibIds 里以便重绘后恢复。
+   *  force=true 用于导入后自动展开（不因已展开而收起）。 */
+  async function libBlock(kind, item, entry, mode, force = false) {
+    const box = item.querySelector('[data-block="lib-inputs"]');
+    if (!box) return;
+    const key = `${kind}:${entry.id}`;
+    const closing = mode === 'json' && box.dataset.mode === 'json';
+    if (!force && box.dataset.open === '1' && closing) {
+      box.hidden = true; box.innerHTML = ''; box.dataset.open = ''; box.dataset.mode = '';
+      openLibIds.delete(key);
+      item.classList.remove('lib-open');
+      return;
+    }
+    // 已经以同一模式展开时直接复用，避免重复请求与重复渲染
+    if (force && box.dataset.open === '1' && box.dataset.mode === mode && schemaCache.has(entry.id)) {
+      box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      return;
+    }
+    box.hidden = false; box.dataset.open = '1'; box.dataset.mode = mode;
+    openLibIds.add(key);
+    item.classList.add('lib-open');
+    box.innerHTML = '<div class="cf-note">正在读取接口文件…</div>';
+    try {
+      const data = await loadSchema(entry.id);
+      if (!box.dataset.open) return;
+      if (mode === 'json') paintJsonEditor(box, entry);
+      else paintInputTable(box, entry);
+      prefixLibActions(box);
+      if (mode === 'inputs') {
+        const saveBtn = box.querySelector('[data-act="lib-save-inputs"]');
+        if (saveBtn) saveBtn.textContent = '保存输入参数与顺序';
+      }
+      void data;
+    } catch (err) {
+      box.innerHTML = `<b class="err">✕ 读取接口文件失败</b> ${esc(err.message)}`;
+    }
+  }
+
+  const libSave = (kind, item, entry) => {
+    const box = item.querySelector('[data-block="lib-inputs"]');
+    if (box) saveInputSchema(box, entry, item, 'lib-inputs');
+  };
+  const libResetOrder = (kind, item, entry) => {
+    const box = item.querySelector('[data-block="lib-inputs"]');
+    if (box) resetInputOrder(box, entry, item, 'lib-inputs');
+  };
+  const libSaveJson = (kind, item, entry) => {
+    const box = item.querySelector('[data-block="lib-inputs"]');
+    if (box) saveInterfaceJson(box, entry, item, 'lib-inputs');
+  };
+  const libFormatJson = (item) => {
+    const ta = item.querySelector('[data-block="lib-inputs"] .mi-json');
+    if (!ta) return;
+    try { ta.value = JSON.stringify(JSON.parse(ta.value), null, 2); blockMsg(item, 'lib-inputs', '已格式化'); }
+    catch (err) { blockMsg(item, 'lib-inputs', `✕ JSON 语法错误：${err.message}`, true); }
+  };
+
+  root.querySelector('#iface-lib')?.addEventListener('click', async (ev) => {
     const item = ev.target.closest('.iface-item');
     if (!item) return;
     const e = ifaceById(item.dataset.id);
@@ -909,6 +1540,45 @@ export async function openSettings(project, onSave) {
     if (act === 'toggle') {
       if (openIfaceIds.has(e.id)) openIfaceIds.delete(e.id); else openIfaceIds.add(e.id);
       renderInterfaces();
+      return;
+    }
+    if (act === 'edit-json' || act === 'inputs') {
+      await toggleIfaceBlock(item, e, act === 'edit-json' ? 'json' : 'inputs');
+      return;
+    }
+    if (act === 'save-json') {
+      const box = item.querySelector('[data-block="json"]');
+      if (box) await saveInterfaceJson(box, e, item);
+      return;
+    }
+    if (act === 'save-inputs') {
+      const box = item.querySelector('[data-block="inputs"]');
+      if (box) await saveInputSchema(box, e, item);
+      return;
+    }
+    if (act === 'reset-order') {
+      const box = item.querySelector('[data-block="inputs"]');
+      if (box) await resetInputOrder(box, e, item);
+      return;
+    }
+    if (act === 'replace-json') {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = '.json,application/json';
+      input.onchange = async () => {
+        const f = input.files?.[0];
+        if (!f) return;
+        const ta = item.querySelector('[data-block="json"] .mi-json');
+        if (ta) ta.value = await f.text();
+        blockMsg(item, 'json', `已载入「${f.name}」，点「💾 保存 JSON」写回`);
+      };
+      input.click();
+      return;
+    }
+    if (act === 'format-json') {
+      const ta = item.querySelector('[data-block="json"] .mi-json');
+      if (!ta) return;
+      try { ta.value = JSON.stringify(JSON.parse(ta.value), null, 2); blockMsg(item, 'json', '已格式化'); }
+      catch (err) { blockMsg(item, 'json', `✕ JSON 语法错误：${err.message}`, true); }
       return;
     }
     if (act === 'del-row') { actEl.closest('.iface-row')?.remove(); return; }
@@ -941,12 +1611,40 @@ export async function openSettings(project, onSave) {
       ifaceData = { interfaces: data.interfaces, scopeBindings: data.scopeBindings, scopes: data.scopes };
       renderInterfaces();
       renderBindings();
+      renderModelIfaceSummary();
       toast('接口档案已刷新', 'ok');
     } catch { toast('刷新失败', 'err'); }
   });
 
+  /** 「模型与运行」Tab 的只读摘要：11 个生图服务各自当前使用的接口 */
+  function renderModelIfaceSummary() {
+    const box = root.querySelector('#model-iface-summary');
+    if (!box) return;
+    box.innerHTML = `<div class="mi-services">${scopeList(ifaceData).map((s) => {
+      const boundId = ifaceData.scopeBindings?.[s.id] || '';
+      const bound = (ifaceData.interfaces || []).find((x) => x.id === boundId);
+      const fallback = (ifaceData.interfaces || []).find((x) => x.active && x.kind === s.kind);
+      const name = bound?.name || (fallback ? `默认 · ${fallback.name}` : '未配置');
+      return `<div class="mi-service"><span>${esc(s.label)}</span><b title="${esc(name)}">${esc(name)}</b></div>`;
+    }).join('')}</div>`;
+  }
+
+  /** 从「模型与运行」Tab 直接跳到接口档案 / 服务绑定，省得用户找 Tab */
+  const gotoComfyPane = (selector) => {
+    root.querySelector('.settings-tab[data-pane="comfy"]')?.click();
+    const el = root.querySelector(selector);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.classList.add('mi-flash');
+    setTimeout(() => el.classList.remove('mi-flash'), 1400);
+  };
+  root.querySelector('#model-goto-iface')?.addEventListener('click', () => gotoComfyPane('#iface-section'));
+  root.querySelector('#model-goto-bindings')?.addEventListener('click', () => gotoComfyPane('#iface-bindings'));
+  root.querySelector('#iface-import')?.addEventListener('click', () => importLib('image'));
+
   renderInterfaces();
   renderBindings();
+  renderModelIfaceSummary();
 }
 
 /* ---------- 新建项目 ---------- */
