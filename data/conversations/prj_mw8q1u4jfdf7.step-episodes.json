@@ -1,0 +1,78 @@
+{
+  "projectId": "prj_mw8q1u4jfdf7",
+  "projectName": "分步对话 HTTP 验证",
+  "schema": 1,
+  "stepId": "episodes",
+  "label": "第 2 步 · 分集拆解",
+  "createdAt": 1794196137664,
+  "updatedAt": 1794196137694,
+  "messages": [
+    {
+      "seq": 1,
+      "at": 1794196137664,
+      "role": "user",
+      "text": "把第 99 集改名为「无」",
+      "action": "episode-title",
+      "params": {
+        "no": 99,
+        "title": "「无」"
+      },
+      "calls": [
+        {
+          "name": "等价 HTTP 请求",
+          "method": "GET",
+          "path": "/api/projects/prj_mw8q1u4jfdf7/steps/episodes/chat",
+          "body": null,
+          "note": "本步对话记录"
+        }
+      ],
+      "artifacts": [],
+      "suggestions": [],
+      "tokens": {
+        "prompt": 0,
+        "completion": 0,
+        "total": 0,
+        "calls": 0
+      },
+      "durationMs": 0,
+      "ok": true,
+      "changed": false,
+      "reran": null
+    },
+    {
+      "seq": 2,
+      "at": 1794196137694,
+      "role": "assistant",
+      "text": "✗ 第 99 集不存在（当前 0 集）。",
+      "action": "episode-title",
+      "params": {
+        "no": 99,
+        "title": "「无」"
+      },
+      "calls": [],
+      "artifacts": [],
+      "suggestions": [
+        "按 1200 字一集，最多 4 集，重新拆",
+        "整部剧做成 8 集",
+        "把第 2 集改名为「雨夜的来信」"
+      ],
+      "tokens": {
+        "prompt": 0,
+        "completion": 0,
+        "total": 0,
+        "calls": 0
+      },
+      "durationMs": 30,
+      "ok": false,
+      "changed": false,
+      "reran": null
+    }
+  ],
+  "tokens": {
+    "prompt": 0,
+    "completion": 0,
+    "total": 0,
+    "calls": 0
+  },
+  "counter": 2
+}

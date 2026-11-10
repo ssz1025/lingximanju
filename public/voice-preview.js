@@ -7,7 +7,10 @@
  *   - 但 ComfyUI 抽卡出来的音色本身就是一段真实音频，再拿浏览器合成去「模拟」它
  *     等于把用户听到的东西换掉了 —— 所以带 audio 的音色一律直接播放该文件。
  *
- * 两种播放方式共用同一套状态订阅（speaking: boolean），UI 按钮只需关心「在响 / 没响」。
+ * 两种播放方式共用同一套状态订阅，UI 按钮只需关心「哪一条在响」。
+ * 状态回调拿到 { speaking, playId }：playId 是发起播放时传入的条目标识（如 voice:vox_1、
+ * draft:vdr_2），停止 / 播完时清空。一个音色可能同时出现在角色行和音色库两处，
+ * 用同一个 playId 就能让两处按钮一起进「停止」态，不必各自维护状态。
  * 仅在浏览器环境使用；顶层不触碰 window，可被静态分析安全导入。
  * ==========================================================================*/
 
@@ -17,19 +20,39 @@ export function isSpeechSupported() {
 }
 
 const _listeners = new Set();
-/** 订阅试听状态变化（speaking: boolean） */
+let _playId = '';   // 当前正在播放的条目标识（没有在播时为空串）
+
+/**
+ * 订阅试听状态变化。
+ * @param {(state:{speaking:boolean, playId:string}) => void} cb
+ * @returns {() => void} 取消订阅
+ */
 export function onSpeakState(cb) {
   _listeners.add(cb);
   return () => _listeners.delete(cb);
 }
 function emitState(speaking) {
-  _listeners.forEach((cb) => { try { cb(speaking); } catch { /* 忽略单个监听异常 */ } });
+  const payload = { speaking: Boolean(speaking), playId: speaking ? _playId : '' };
+  if (!speaking) _playId = '';
+  _listeners.forEach((cb) => { try { cb(payload); } catch { /* 忽略单个监听异常 */ } });
 }
 
-/** 当前是否正在朗读 / 播放音频 */
+/** 当前是否正在朗读 / 播放音频（真实音频样本与浏览器合成都算） */
 export function isSpeaking() {
-  if (_audio) return !_audio.paused && !_audio.ended;
+  // 两条通道是互斥的，但 _audio 单例一旦建过就一直在：只判 _audio 会把
+  // 「正在用浏览器合成朗读」误判成没在播，播放态按钮就永远出不来。
+  if (_audio && !_audio.paused && !_audio.ended) return true;
   return isSpeechSupported() && window.speechSynthesis.speaking;
+}
+
+/** 当前在播的条目标识；没在播时返回空串 */
+export function currentPlayId() {
+  return isSpeaking() ? _playId : '';
+}
+
+/** 指定条目是否正在播放（UI 用来决定按钮显示「试听」还是「停止」） */
+export function isPlaying(playId) {
+  return Boolean(playId) && playId === _playId && isSpeaking();
 }
 
 // 单例播放器：试听是「独占」的，同时只允许一个音色在响，避免叠音听不清
@@ -62,9 +85,10 @@ export function stopSpeak() {
 /**
  * 播放一段真实音频样本（抽卡音色 / 服务器 TTS 产物）。
  * @param {string} url  /assets/ 下的音频地址
+ * @param {string} [playId] 条目标识，随状态回调带回，供 UI 定位是哪一条在响
  * @returns {boolean} 是否成功发起播放
  */
-export function playAudio(url) {
+export function playAudio(url, playId = '') {
   const src = String(url || '').trim();
   if (!src) return false;
   const a = audioEl();
@@ -73,6 +97,8 @@ export function playAudio(url) {
   try {
     a.src = src;
     a.currentTime = 0;
+    // playId 必须在 stopSpeak() 之后登记：stopSpeak 会清空 _playId
+    _playId = String(playId || '');
     const p = a.play();
     // 自动播放被浏览器拦截时 play() 返回 rejected Promise：不抛出，交给 UI 判断
     if (p && typeof p.catch === 'function') p.catch(() => emitState(false));
@@ -110,16 +136,18 @@ export function pickBrowserVoice(lang = 'zh-CN', gender = '') {
 
 /**
  * 试听一段文本。
- * @param {object} opts { text, lang?, rate?, pitch?, gender?, voiceName?, audioUrl? }
+ * @param {object} opts { text, lang?, rate?, pitch?, gender?, voiceName?, audioUrl?, playId? }
  * @returns {boolean} 是否成功发起朗读（不支持时返回 false）
  */
 export function speakText(opts = {}) {
   // 有真实音频样本就优先播它：用户听到的必须是他将要绑定的那条音色
-  if (opts.audioUrl) return playAudio(opts.audioUrl);
+  if (opts.audioUrl) return playAudio(opts.audioUrl, opts.playId);
   if (!isSpeechSupported()) return false;
   const text = String(opts.text || '').trim();
   if (!text) return false;
   stopSpeak();
+  // playId 必须在 stopSpeak() 之后登记：stopSpeak 会清空 _playId
+  _playId = String(opts.playId || '');
   const synth = window.speechSynthesis;
   const u = new SpeechSynthesisUtterance(text);
   u.lang = String(opts.lang || 'zh-CN');

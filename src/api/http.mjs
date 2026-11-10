@@ -12,17 +12,28 @@ export function json(res, data, status = 200) {
   res.end(body);
 }
 
-export function readBody(req) {
+/** 小说上传类接口的请求体上限：10M 字中文 ≈ 30MB UTF-8，加 JSON 转义余量取 64MB */
+export const NOVEL_BODY_LIMIT = 64 * 1024 * 1024;
+
+export function readBody(req, limit = 8 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const parts = [];
     let size = 0;
+    let oversized = false;
     const withStatus = (err, statusCode) => Object.assign(err, { statusCode });   // 让 server.mjs 回 4xx 而非 500
     req.on('data', (c) => {
       size += c.length;
-      if (size > 8 * 1024 * 1024) { reject(withStatus(new Error('请求体过大'), 413)); req.destroy(); }
-      else parts.push(c);
+      if (!oversized && size > limit) {
+        oversized = true;
+        // 只 reject 不 destroy：destroy 会直接掐断 socket，413 响应送不到客户端，
+        // 浏览器只能看到 "Failed to fetch" 这类无意义的网络错误。
+        reject(withStatus(new Error(`请求体过大（上限 ${Math.round(limit / 1024 / 1024)} MB），请减少文件数量或分批上传`), 413));
+      }
+      if (oversized) return;   // 超限后丢弃数据但继续消费流，让请求正常 end、响应可达
+      parts.push(c);
     });
     req.on('end', () => {
+      if (oversized) return;
       const raw = Buffer.concat(parts).toString('utf8');
       if (!raw) return resolve({});
       try { resolve(JSON.parse(raw)); } catch { reject(withStatus(new Error('JSON 解析失败'), 400)); }
@@ -37,8 +48,7 @@ export function assetFile(name) {
   try { return file && fs.statSync(file).isFile() ? file : null; } catch { return null; }
 }
 
-/** 流式下发资产：成片/导演包可达数百 MB，整读内存会放大峰值且客户端断开后无法释放 */
-export function streamAsset(res, name, filename, type = 'application/octet-stream') {
+/** 流式下发资产：成片/导演包可达数百 MB，整读内存会放大峰值且客户端断开后无法释放 */export function streamAsset(res, name, filename, type = 'application/octet-stream') {
   const file = assetFile(name);
   if (!file) return json(res, { error: '文件不存在或已被清理' }, 404), true;
   const safe = String(filename).replace(/[^A-Za-z0-9_.-]/g, '_');
@@ -52,5 +62,19 @@ export function streamAsset(res, name, filename, type = 'application/octet-strea
   stream.on('error', () => res.destroy());
   res.on('close', () => stream.destroy());   // 客户端中途断开即释放文件句柄
   stream.pipe(res);
+  return true;
+}
+
+/** 文本下载（剧本 Markdown / 复刻记录等）：文件名强制 ASCII，避免中文文件名在各系统下乱码 */
+export function downloadText(res, text, filename = 'download.txt', type = 'text/markdown; charset=utf-8') {
+  const body = Buffer.from(String(text ?? ''), 'utf8');
+  const safe = String(filename).replace(/[^A-Za-z0-9_.-]/g, '_');
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': body.length,
+    'Content-Disposition': `attachment; filename="${safe}"`,
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
   return true;
 }

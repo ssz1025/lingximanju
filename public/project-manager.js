@@ -6,9 +6,19 @@
 import { openAssetLibrary } from './asset-manager.js';
 import { openAIChat } from './ai-chat.js';
 import { ensureModelPicker, withModelId } from './model-picker.js';
+import { ensureInterfacePicker, withInterfaceId } from './interface-picker.js';
 import { openPage } from './page.js';
 import { $, esc, cut } from './utils.js';
-import { speakText, stopSpeak, isSpeechSupported } from './voice-preview.js';
+import { GENRES, AUDIENCES, TONES, ART_STYLES, ENDINGS, EPISODE_COUNTS, selectOptions } from './project-options.js';
+import { speakText, stopSpeak, isSpeechSupported, onSpeakState } from './voice-preview.js';
+
+/** 出图请求：按板块并上「本次使用的接口档案」；未选择时由后端按板块绑定 / 默认解析 */
+const withCharImage = (body = {}) => withInterfaceId(
+  body?.view === 'sheet' ? 'character-sheet' : 'character-view',
+  withModelId('chars', body),
+);
+const withVoiceDraw = (body = {}) => withInterfaceId('voice', withModelId('chars', body));
+const withCoverImage = (body = {}) => withInterfaceId('cover', withModelId('cover', body));
 
 const fmtTime = (ts) => {
   if (!ts) return '—';
@@ -30,17 +40,22 @@ const VIDEO_CORE_VIEWS = ['front', 'closeup'];
 /** 多视图生成中的进度状态（跨 render 保持） */
 let viewGen = { charId: null, current: 0, total: 0 };
 
-/** 角色定妆完整度：与后端 characterViewStatus 同口径，供卡片徽标与批量提示使用 */
+/** 是否为真实出图：provider=mock 的自绘 SVG 是零 Key 占位，不算「已生成」 */
+const isRealShot = (img) => Boolean(img?.url) && String(img?.provider || '') !== 'mock';
+
+/** 角色定妆完整度：与后端 characterViewStatus 同口径，且只认真实出图（占位图单独计数） */
 function charViewStatus(c) {
-  const have = CHARACTER_VIEWS.filter((v) => c.views?.[v.key]?.url).map((v) => v.key);
+  const have = CHARACTER_VIEWS.filter((v) => isRealShot(c.views?.[v.key])).map((v) => v.key);
+  const placeholders = CHARACTER_VIEWS.filter((v) => c.views?.[v.key]?.url && !isRealShot(c.views[v.key])).map((v) => v.key);
   const missing = CHARACTER_VIEWS.filter((v) => !c.views?.[v.key]?.url).map((v) => v.key);
-  const coreHave = CHARACTER_VIEWS.filter((v) => v.core && c.views?.[v.key]?.url).length;
+  const coreHave = CHARACTER_VIEWS.filter((v) => v.core && isRealShot(c.views?.[v.key])).length;
   const coreTotal = CHARACTER_VIEWS.filter((v) => v.core).length;
-  const videoReady = VIDEO_CORE_VIEWS.every((k) => c.views?.[k]?.url);
+  const videoReady = VIDEO_CORE_VIEWS.every((k) => isRealShot(c.views?.[k]));
   return {
-    have, missing, coreHave, coreTotal,
+    have, missing, placeholders, coreHave, coreTotal,
     hasSheet: Boolean(c.sheet?.url),
-    allComplete: missing.length === 0,
+    hasRealSheet: isRealShot(c.sheet),
+    allComplete: missing.length === 0 && placeholders.length === 0,
     coreComplete: coreHave === coreTotal,
     videoReady,
     pct: Math.round((have.length / CHARACTER_VIEWS.length) * 100),
@@ -86,7 +101,7 @@ function readCover(p) {
 function coverThumbHTML(p, asButton = true) {
   const cover = readCover(p);
   const url = cover.url;
-  const badge = url ? `<span class="pm-thumb-badge">${cover.source === 'comfyui' ? '✦ AI' : '⇧ 上传'}</span>` : '';
+  const badge = url ? `<span class="pm-thumb-badge">${['comfyui', 'ai'].includes(cover.source) ? '✦ AI' : '⇧ 上传'}</span>` : '';
   const inner = url ? `<img src="${esc(url)}" alt="" loading="lazy">` : nameCoverHTML(p);
   if (!asButton) return `<div class="pm-thumb is-static ${url ? 'has-img' : 'is-name'}">${inner}${badge}</div>`;
   return `<button class="pm-thumb ${url ? 'has-img' : 'is-name'}" data-open="${esc(p.id)}" title="打开「${esc(p.name)}」" aria-label="打开项目">${inner}${badge}</button>`;
@@ -348,7 +363,7 @@ export function openCoverDialog(ctx = {}) {
   async function doGenerate(ui) {
     ui.setBusy(true, 'ComfyUI 正在生成封面（约 1–2 分钟）…');
     try {
-      const d = await api(`/api/projects/${p.id}/cover/generate`, withModelId('cover', {
+      const d = await api(`/api/projects/${p.id}/cover/generate`, withCoverImage({
         prompt: lastPrompt, negative: lastNegative, refs: refsPayload(),
       }));
       const secs = d.durationMs ? ` · ${(d.durationMs / 1000).toFixed(1)}s` : '';
@@ -441,6 +456,7 @@ export function openCoverDialog(ctx = {}) {
     subtitle: `${p.name} · 对话式封面创作`,
     placeholder: '描述你想要的封面（如「水墨风、留白多、带点孤寂感」）…',
     modelEntry: 'cover',
+    interfaceEntry: 'cover',   // 封面出图可临时换用其它 ComfyUI 接口档案
     welcome: {
       role: 'assistant',
       text: `我是封面创作助手，已了解《${p.name}》的资料${cover.url ? '，当前封面如下（点击可放大），可随时替换' : ''}。`
@@ -833,30 +849,45 @@ function bibleHintHTML(m) {
 function charCardHTML(c, gen = { charId: null }) {
   const generating = gen.charId === c.id;
   const st = charViewStatus(c);
-  // 视图徽标：视频可用 / 基础组齐全 / 缺几张
+  // 视图徽标：只认真实出图——占位图（mock 自绘）不算「已生成」，缺图要如实列出
+  const missingAll = [...st.missing, ...st.placeholders];
   const badge = st.videoReady
     ? (st.allComplete
       ? '<span class="pmm-badge ok">定妆齐全 · 可用于视频</span>'
-      : `<span class="pmm-badge ok">可用于视频 · 缺 ${st.missing.length} 张</span>`)
-    : `<span class="pmm-badge warn">不可进视频 · 缺 ${VIDEO_CORE_VIEWS.filter((k) => !c.views?.[k]?.url).map((k) => CHARACTER_VIEWS.find((v) => v.key === k)?.label).join('、')}</span>`;
+      : `<span class="pmm-badge ok">可用于视频 · 还差 ${missingAll.length} 张${st.placeholders.length ? '（含占位图）' : ''}</span>`)
+    : `<span class="pmm-badge warn">不可进视频 · 缺 ${VIDEO_CORE_VIEWS.filter((k) => !isRealShot(c.views?.[k])).map((k) => CHARACTER_VIEWS.find((v) => v.key === k)?.label).join('、')}</span>`;
 
   const views = CHARACTER_VIEWS.map((v) => {
     const img = c.views?.[v.key];
-    return img
-      ? `<div class="pmm-char-view" data-char-preview="${esc(c.id)}" data-view="${v.key}" title="点击查看大图与提示词">
+    if (!img?.url) {
+      return `<div class="pmm-char-view empty" data-char-view-one="${esc(c.id)}" data-view="${v.key}" title="点击单独生成 ${esc(v.label)}">
+          <i></i><span>${v.label}</span></div>`;
+    }
+    if (!isRealShot(img)) {
+      // Mock 自绘占位：灰显 + 占位徽标，点击直接重出这一张（不再让占位图冒充成品）
+      return `<div class="pmm-char-view is-mock" data-char-view-one="${esc(c.id)}" data-view="${v.key}" title="占位图（未真实出图）· 点击用 ComfyUI 重新生成">
+          <img src="${esc(img.url)}" alt="${esc(v.label)}" loading="lazy">
+          <span>${v.label}</span><em class="pmm-view-mock">占位</em>
+          <button class="pmm-view-regen" data-char-view-one="${esc(c.id)}" data-view="${v.key}" title="重新生成 ${esc(v.label)}（覆盖占位图）">↻</button>
+        </div>`;
+    }
+    return `<div class="pmm-char-view" data-char-preview="${esc(c.id)}" data-view="${v.key}" title="点击查看大图与提示词">
           <img src="${esc(img.url)}" alt="${esc(v.label)}" loading="lazy">
           <span>${v.label}</span>
           <em class="pmm-view-prov">${esc(img.provider || '')}</em>
-        </div>`
-      : `<div class="pmm-char-view empty" data-char-view-one="${esc(c.id)}" data-view="${v.key}" title="点击单独生成 ${esc(v.label)}">
-          <i></i><span>${v.label}</span></div>`;
+          <button class="pmm-view-regen" data-char-view-one="${esc(c.id)}" data-view="${v.key}" title="重新生成 ${esc(v.label)}（覆盖当前图）">↻</button>
+        </div>`;
   }).join('');
 
   // 定妆板：多视图并排在一张图里，视频模型最吃的「角色设定」输入
   const sheet = c.sheet?.url
-    ? `<div class="pmm-char-sheet" data-char-preview="${esc(c.id)}" data-view="sheet" title="点击查看定妆板大图">
+    ? (isRealShot(c.sheet)
+      ? `<div class="pmm-char-sheet" data-char-preview="${esc(c.id)}" data-view="sheet" title="点击查看定妆板大图">
         <img src="${esc(c.sheet.url)}" alt="定妆板" loading="lazy"><span>定妆板 · ${(c.sheet.views || []).length || 4} 视角</span>
       </div>`
+      : `<div class="pmm-char-sheet is-mock" data-char-view-one="${esc(c.id)}" data-view="sheet" title="占位定妆板（未真实出图）· 点击用 ComfyUI 重新生成">
+        <img src="${esc(c.sheet.url)}" alt="定妆板" loading="lazy"><span>定妆板 · 占位</span>
+      </div>`)
     : '<div class="pmm-char-sheet empty" title="尚无定妆板"><i></i><span>定妆板</span></div>';
 
   const srcLabel = { llm: 'LLM 提取', heuristic: '启发式', manual: '手动' }[c.source] || c.source || '手动';
@@ -865,12 +896,12 @@ function charCardHTML(c, gen = { charId: null }) {
       <div class="pmm-char-views">${views}</div>
       ${sheet}
     </div>
-    <div class="pmm-char-info">
+    <div class="pmm-char-info" data-char-detail="${esc(c.id)}" title="点击查看角色详情">
       <div class="pmm-char-title"><b>${esc(c.name)}</b>
         ${(c.aliases || []).map((a) => `<span class="pmm-chip">${esc(a)}</span>`).join('')}
         <span class="pmm-chip">${esc(srcLabel)}</span></div>
       <div class="pmm-char-badges">${badge}
-        <em class="pmm-char-progress">${st.have.length}/${CHARACTER_VIEWS.length} 视图</em></div>
+        <em class="pmm-char-progress">${st.have.length}/${CHARACTER_VIEWS.length} 视图${st.placeholders.length ? ` · ${st.placeholders.length} 占位` : ''}</em></div>
       ${c.role ? `<div class="pmm-char-role">${esc(c.role)}</div>` : ''}
       ${c.staticFeatures ? `<div class="pmm-char-desc">固定特征：${esc(cut(c.staticFeatures, 50))}</div>` : ''}
       ${c.style ? `<div class="pmm-char-desc">设定风格：${esc(cut(c.style, 60))}</div>` : ''}
@@ -881,8 +912,9 @@ function charCardHTML(c, gen = { charId: null }) {
     <div class="pmm-char-acts">
       ${generating
       ? `<span class="pmm-char-gen">正在生成 ${gen.label || CHARACTER_VIEWS.find((v) => v.key === gen.view)?.label || ''} ${gen.current}/${gen.total}…</span>`
-      : `<button class="btn sm" data-char-edit="${esc(c.id)}">✎ 编辑</button>
-      <button class="btn sm primary" data-char-views="${esc(c.id)}">${st.missing.length ? '✦ 补全定妆' : '✦ 全部重生成'}</button>
+      : `<button class="btn sm" data-char-detail="${esc(c.id)}">👁 详情</button>
+      <button class="btn sm" data-char-edit="${esc(c.id)}">✎ 编辑</button>
+      <button class="btn sm primary" data-char-views="${esc(c.id)}">${missingAll.length ? '✦ 补全定妆' : '✦ 全部重生成'}</button>
       <button class="btn sm" data-char-sheet="${esc(c.id)}">▦ 定妆板</button>
       <button class="btn sm" data-char-del="${esc(c.id)}">✕</button>`}
     </div>
@@ -890,11 +922,34 @@ function charCardHTML(c, gen = { charId: null }) {
 }
 
 /** 角色属性编辑页：新增/编辑角色（含别名、人物关系、配色、多视图提示词），保存走 char-upsert */
-export function openCharacterEditor(char = {}, onSave) {
+/**
+ * 角色编辑器：属性 + 人物关系 + 配色 + 音色绑定。
+ * @param {object} char 角色（可为空对象 = 新增）
+ * @param {Function} onSave 保存回调（入参为收集好的字段对象，含 voiceId/voiceName）
+ * @param {object} [opts] { voices: Array, usedBy: Map<voiceId, 角色名> }
+ *   由调用方（项目管理面板）传入当前音色库与本项目音色占用表，用于「音色不能重复」：
+ *   已被其它角色绑定的音色在编辑器里禁用并标注被谁使用。未传时异步拉取音色库兜底。
+ */
+export function openCharacterEditor(char = {}, onSave, opts = {}) {
   const page = openPage({ title: char.id ? '✎ 编辑角色' : '＋ 新增角色', sub: '角色属性驱动多视图生成与关键帧一致性' });
   const backdrop = page.content;
   const close = () => page.close();
   let relations = (char.relations || []).map((r) => ({ ...r }));
+  const voices = Array.isArray(opts.voices) ? opts.voices : [];
+  const usedBy = opts.usedBy instanceof Map ? opts.usedBy : new Map();
+
+  /** 音色下拉：占用禁用 + 被谁使用提示（与角色页音色行同一口径） */
+  const voiceSelectHTML = () => {
+    if (!voices.length) return '<option value="">— 音色库加载中 / 为空 —</option>';
+    const opts2 = ['<option value="">— 未指定 —</option>'];
+    for (const v of voices) {
+      const user = usedBy.get(v.id);
+      const dis = user ? ' disabled' : '';
+      const label = user ? `${v.name}（已被「${user}」使用）` : `${v.name}（${v.gender}·${v.ageGroup}）`;
+      opts2.push(`<option value="${esc(v.id)}"${v.id === char.voiceId ? ' selected' : ''}${dis}>${esc(label)}</option>`);
+    }
+    return opts2.join('');
+  };
 
   const renderBody = () => {
     backdrop.innerHTML = `<div class="pmm-body">
@@ -905,6 +960,8 @@ export function openCharacterEditor(char = {}, onSave) {
           <div class="field"><label>性别</label><input id="ce-gender" maxlength="8" value="${esc(char.gender || '')}"></div>
           <div class="field"><label>年龄</label><input id="ce-age" maxlength="24" value="${esc(char.age || '')}"></div>
         </div>
+        <div class="field"><label>音色（每个角色绑定一个，同一项目内不能重复）</label>
+          <select id="ce-voice">${voiceSelectHTML()}</select></div>
         <div class="modal-grid">
           <div class="field"><label>性格</label><textarea id="ce-personality" rows="2">${esc(char.personality || '')}</textarea></div>
           <div class="field"><label>外貌描述</label><textarea id="ce-appearance" rows="2">${esc(char.appearance || '')}</textarea></div>
@@ -955,6 +1012,8 @@ export function openCharacterEditor(char = {}, onSave) {
       const val = (sel) => String(backdrop.querySelector(sel)?.value || '').trim();
       const name = val('#ce-name');
       if (!name) { backdrop.querySelector('#ce-name')?.focus(); return; }
+      const voiceId = val('#ce-voice');
+      const voiceName = voices.find((v) => v.id === voiceId)?.name || '';
       onSave({
         ...(char.id ? { id: char.id } : {}),
         name,
@@ -967,11 +1026,356 @@ export function openCharacterEditor(char = {}, onSave) {
         relations: relations.filter((r) => r.target || r.label),
         palette: [...backdrop.querySelectorAll('[data-pal]')].map((el) => el.value),
         viewPrompt: val('#ce-view-prompt'),
+        // 音色绑定：char-upsert 服务端会校验唯一性（被其它角色占用时保存失败并提示）
+        voiceId, voiceName,
       });
       close();
     });
   };
   renderBody();
+  // 编辑器独立打开（未随 opts 传音色库）时拉一次音色库：只填充音色下拉，不整页重绘，
+  // 否则用户已填的姓名 / 外貌等输入会被重置。
+  if (!voices.length) {
+    api('/api/voices').then((d) => {
+      const list = d.voices || [];
+      const sel = backdrop.querySelector('#ce-voice');
+      if (!sel || !list.length || sel.options.length > 1) return;
+      voices.push(...list);
+      sel.innerHTML = voiceSelectHTML();
+      sel.value = char.voiceId || '';
+    }).catch(() => { /* 音色库读取失败：下拉保持「未指定」，不影响其它字段保存 */ });
+  }
+}
+
+/**
+ * 在原文中定位一条证据引用的位置，返回 { label, text, start, end } 或 null。
+ * 与后端 verifyEvidence 同口径，三级兜底：
+ *  1. 原文直接 includes（quote ≤120 字且空格被折叠过，直查通常能命中）
+ *  2. 双方去掉所有空白后再 includes，并把压缩偏移回映到原始文本的字符区间
+ *  3. 取引用前 10 个字（压缩后）作前缀直查
+ * 章节正文优先（能给出「第几章」出处），最后兜底到全文。
+ * @param {Array<{no?:number,title?:string,text?:string}>} chapters 惰性重建后的章节
+ * @param {string} fullText 原著全文
+ * @param {string} quote 证据引用
+ */
+export function locateQuoteContext(chapters, fullText, quote) {
+  const q = String(quote || '').trim();
+  if (!q) return null;
+  /** 压缩偏移 → 原始文本偏移：返回第 cIdx 个非空白字符在 raw 中的下标 */
+  const mapCompactOffset = (raw, cIdx) => {
+    let seen = 0;
+    for (let i = 0; i < raw.length; i += 1) {
+      if (/\s/.test(raw[i])) continue;
+      if (seen === cIdx) return i;
+      seen += 1;
+    }
+    return raw.length;
+  };
+  const compact = (s) => String(s).replace(/\s+/g, '');
+  const qc = compact(q);
+  const bases = [
+    ...Array.isArray(chapters) ? chapters.map((ch) => ({
+      label: ch?.title ? `第 ${ch.no || '?'} 章 · ${ch.title}` : (ch?.no ? `第 ${ch.no} 章` : ''),
+      text: String(ch?.text || ''),
+    })) : [],
+    { label: '', text: String(fullText || '') },
+  ];
+  for (const b of bases) {
+    if (!b.text) continue;
+    let start = b.text.indexOf(q);
+    let end = start >= 0 ? start + q.length : -1;
+    if (start < 0 && qc) {
+      const ci = compact(b.text).indexOf(qc);
+      if (ci >= 0) {
+        start = mapCompactOffset(b.text, ci);
+        end = mapCompactOffset(b.text, ci + qc.length);
+      }
+    }
+    if (start < 0 && qc.length >= 4) {
+      // 前缀由长到短逐级缩短（最短 4 字）：改写/截断的引用往往只有开头几个字能对上
+      for (let pl = Math.min(10, qc.length); pl >= 4 && start < 0; pl -= 1) {
+        start = b.text.indexOf(qc.slice(0, pl));
+        end = start >= 0 ? start + pl : -1;
+      }
+    }
+    if (start >= 0 && end > start) return { label: b.label, text: b.text, start, end };
+  }
+  return null;
+}
+
+/** 证据引用上下文窗口：初始前后各 400 字，每次「多看一段」扩展 400 字 */
+const EVD_WINDOW = 400;
+
+/**
+ * 「原文出处」阅读面板：定位引用在原著中的位置，高亮命中片段，
+ * 支持「往前 / 往后多看一段」继续加载更多原文（纯前端，不落盘）。
+ * @param {object} args { projectId, quote, charName, toast }
+ */
+async function openEvidenceReader({ projectId, quote, charName = '', toast = () => {} } = {}) {
+  // 拉取原著（章节带标题，全文兜底）；失败时仍展示引用本身，不白屏
+  let chapters = [];
+  let fullText = '';
+  try {
+    const d = await api(`/api/projects/${encodeURIComponent(projectId)}/source`);
+    chapters = Array.isArray(d?.chapters) ? d.chapters : [];
+    fullText = String(d?.text || '');
+  } catch { /* 无原文 / 接口不可用：走未定位分支 */ }
+
+  const hit = locateQuoteContext(chapters, fullText, quote);
+  const page = openPage({
+    title: `📖 原文出处${charName ? ` · ${charName}` : ''}`,
+    sub: hit ? (hit.label ? `定位自${hit.label} · 可继续往前 / 往后多看` : '定位自原著全文 · 可继续往前 / 往后多看') : '原文阅读',
+  });
+  const body = page.content;
+
+  if (!hit) {
+    body.innerHTML = `<div class="pmm-body evd-body">
+      <div class="cf-note">未能在原著全文中定位到这段引用（可能原文已重新上传或被编辑）。以下是提取时保留的证据原文：</div>
+      <blockquote class="pcd-quote">${esc(quote)}</blockquote>
+      <div class="pcd-acts"><button class="btn" data-evd-close>关闭</button></div>
+    </div>`;
+    body.querySelector('[data-evd-close]').addEventListener('click', () => page.close());
+    return;
+  }
+
+  // 窗口状态：向前 / 向后已扩展的字数
+  let padBefore = EVD_WINDOW;
+  let padAfter = EVD_WINDOW;
+  const renderWindow = () => {
+    const s = Math.max(0, hit.start - padBefore);
+    const e = Math.min(hit.text.length, hit.end + padAfter);
+    const before = hit.text.slice(s, hit.start);
+    const mid = hit.text.slice(hit.start, hit.end);
+    const after = hit.text.slice(hit.end, e);
+    const atHead = s === 0;
+    const atTail = e === hit.text.length;
+    body.innerHTML = `<div class="pmm-body evd-body">
+      <div class="evd-head">
+        <span class="evd-source">${hit.label ? `📍 ${esc(hit.label)}` : '📍 原著全文'} · 命中 ${hit.end - hit.start} 字 · 当前展示 ${e - s} 字</span>
+        <span class="pmm-chip">高亮为证据引用</span>
+      </div>
+      <div class="evd-text">${esc(before)}<mark class="evd-hl">${esc(mid)}</mark>${esc(after)}</div>
+      <div class="evd-acts">
+        <button class="btn sm" data-evd-prev ${atHead ? 'disabled' : ''}>← 往前多看一段</button>
+        <button class="btn sm" data-evd-next ${atTail ? 'disabled' : ''}>往后多看一段 →</button>
+        <em class="evd-bound">${atHead ? '已到开头' : ''}${atTail ? `${atHead ? ' · ' : ''}已到结尾` : ''}</em>
+        <span style="flex:1"></span>
+        <button class="btn" data-evd-close>关闭</button>
+      </div>
+    </div>`;
+    body.querySelector('[data-evd-close]').addEventListener('click', () => page.close());
+    body.querySelector('[data-evd-prev]')?.addEventListener('click', () => {
+      if (padBefore >= hit.start) return;
+      padBefore += EVD_WINDOW;
+      renderWindow();
+      body.querySelector('.evd-text')?.scrollTo?.(0, 0);
+    });
+    body.querySelector('[data-evd-next]')?.addEventListener('click', () => {
+      if (padAfter >= hit.text.length - hit.end) return;
+      padAfter += EVD_WINDOW;
+      renderWindow();
+    });
+  };
+  renderWindow();
+  toast(hit.label ? `已定位到${hit.label}，可继续查看更多原文` : '已在原著全文中定位，可继续查看更多原文', 'ok');
+}
+
+/**
+ * 角色详情页：完整属性 / 人物关系 / 原文证据 / 多视图定妆（真实出图口径）/ 定妆板 / 音色。
+ * 角色管理卡片与工作台第④步的角色条目共用这一个入口，保证「缩略信息 → 详情」口径一致。
+ * @param {object} c 角色对象
+ * @param {object} opts { projectId, toast, comfy, onChanged, onEdit }
+ */
+export function openCharacterDetail(character, opts = {}) {
+  const projectId = String(opts.projectId || '');
+  const toast = opts.toast || (() => {});
+  const comfyReady = Boolean(opts.comfy?.imageWorkflow) && !opts.apiStale;
+  let c = { ...character };
+  const page = openPage({ title: `👤 ${character.name || '角色'} · 详情`, sub: '属性 · 证据 · 多视图定妆（只认真实出图）· 音色' });
+  const backdrop = page.content;
+
+  const row = (label, value) => value
+    ? `<div class="pcd-row"><label>${label}</label><span>${esc(value)}</span></div>` : '';
+
+  function viewCellHTML(key) {
+    const def = CHARACTER_VIEWS.find((v) => v.key === key);
+    const label = key === 'sheet' ? '定妆板' : def?.label || key;
+    const shot = key === 'sheet' ? c.sheet : c.views?.[key];
+    if (!shot?.url) {
+      return `<div class="pcd-view empty" data-pcd-gen="${key}" title="点击单独生成 ${esc(label)}"><i></i><span>${esc(label)}</span><em>未生成</em>
+        <button class="pcd-regen" data-pcd-regen="${key}" title="生成这张" ${comfyReady ? '' : 'disabled'}>↻</button></div>`;
+    }
+    if (!isRealShot(shot)) {
+      return `<div class="pcd-view is-mock" data-pcd-gen="${key}" title="占位图（未真实出图）· 点击用 ComfyUI 重新生成">
+        <img src="${esc(shot.url)}" alt="${esc(label)}" loading="lazy"><span>${esc(label)}</span><em>占位图</em>
+        <button class="pcd-regen" data-pcd-regen="${key}" title="重新生成这张（覆盖占位图）" ${comfyReady ? '' : 'disabled'}>↻</button></div>`;
+    }
+    return `<div class="pcd-view" data-pcd-preview="${key}" title="点击查看大图与提示词">
+      <img src="${esc(shot.url)}" alt="${esc(label)}" loading="lazy"><span>${esc(label)}</span><em>${esc(shot.provider || '真实出图')}</em>
+      <button class="pcd-regen" data-pcd-regen="${key}" title="重新生成这张（覆盖当前图）" ${comfyReady ? '' : 'disabled'}>↻</button></div>`;
+  }
+
+  function render() {
+    const st = charViewStatus(c);
+    const videoBadge = st.videoReady
+      ? '<span class="pmm-badge ok">可用于视频生成</span>'
+      : `<span class="pmm-badge warn">不可进视频 · 缺 ${VIDEO_CORE_VIEWS.filter((k) => !isRealShot(c.views?.[k])).map((k) => CHARACTER_VIEWS.find((v) => v.key === k)?.label).join('、')}</span>`;
+    backdrop.innerHTML = `<div class="pmm-body pcd-body">
+      <div class="pcd-head">
+        <b class="pcd-name">${esc(c.name)}</b>
+        ${(c.aliases || []).map((a) => `<span class="pmm-chip">${esc(a)}</span>`).join('')}
+        <span class="pmm-chip">${esc({ llm: 'LLM 提取', heuristic: '启发式', manual: '手动' }[c.source] || c.source || '手动')}</span>
+        ${videoBadge}
+        ${st.placeholders.length ? `<span class="pmm-badge warn">${st.placeholders.length} 张占位图</span>` : ''}
+        <em class="cf-note">${c.updatedAt ? `更新于 ${fmtTime(c.updatedAt)}` : ''}</em>
+      </div>
+
+      <div class="cf-section"><h4>基础属性</h4>
+        <div class="pcd-grid">
+          ${row('身份 / 定位', c.role)}${row('性别', c.gender)}${row('年龄', c.age)}
+          ${row('性格', c.personality)}${row('外貌描述', c.appearance)}${row('发型', c.hair)}
+          ${row('服装 / 配饰', c.costume)}${row('随身物件', c.props)}
+          ${row('固定特征（跨镜头恒定）', c.staticFeatures)}${row('可变特征（随场景变化）', c.dynamicFeatures)}
+          ${row('设定风格', c.style)}${row('风格锁', c.styleLock)}${row('多视图提示词', c.viewPrompt)}
+          ${!c.role && !c.gender && !c.age && !c.personality && !c.appearance && !c.staticFeatures && !c.dynamicFeatures && !c.style && !c.styleLock ? '<div class="cf-note">暂无属性。可点「编辑角色」补充，或重新从原著提取。</div>' : ''}
+        </div>
+        ${(c.relations || []).length ? `<div class="pcd-rels"><label>人物关系</label>
+          ${(c.relations || []).map((r) => `<span class="pmm-chip">${esc(r.target)} · ${esc(r.label || '关系未注明')}</span>`).join('')}</div>` : ''}
+        ${(c.palette || []).length ? `<div class="pcd-pal"><label>配色</label>${c.palette.map((col) => `<i style="background:${esc(col)}" title="${esc(col)}"></i>`).join('')}</div>` : ''}
+      </div>
+
+      ${(c.evidence || []).length ? `<div class="cf-section"><h4>原文证据 <span class="cf-note">（提取时可回溯的原文依据 · 点击任意一条引用可查看上下文原文）</span></h4>
+        <div class="pcd-evidence">${(c.evidence || []).map((e, i) => `<blockquote class="pcd-quote pcd-quote-link" data-pcd-quote="${i}" title="点击查看这段引用在原著中的上下文（可继续往前 / 往后多看）"><span class="pmm-chip">${esc({ mention: '提及', dialogue: '对白', description: '描写' }[e.kind] || e.kind)}</span>${esc(e.quote)}<em class="pcd-quote-more">↗ 查看原文出处</em></blockquote>`).join('')}</div>
+      </div>` : ''}
+
+      <div class="cf-section"><h4>多视图定妆 <span class="cf-note">（${comfyReady ? '调用本地 ComfyUI 真实出图' : opts.apiStale ? '⚠ 服务端仍是旧版本，请重启后再生成' : '⚠ 未检测到 ComfyUI 出图工作流，生成会被拒绝或得到占位图'}）</span></h4>
+        ${opts.apiStale ? '<div class="cf-note" style="color:var(--amber);margin:0 0 8px">⚠ 服务端进程还在跑旧代码：请在终端 Ctrl+C 停掉后重新执行 <b>npm start</b>，刷新本页再生成；旧进程只会写出占位图。</div>' : ''}
+        <div class="pcd-views">${CHARACTER_VIEWS.map((v) => viewCellHTML(v.key)).join('')}${viewCellHTML('sheet')}</div>
+        ${(c.voiceId || c.voiceName) ? `<div class="pcd-voice"><label>音色</label><b>${esc(c.voiceName || c.voiceId)}</b>${c.voiceReason ? `<span class="cf-note">${esc(c.voiceReason)}</span>` : ''}</div>` : ''}
+        <div class="pcd-acts">
+          <button class="btn" data-pcd-act="edit">✎ 编辑角色</button>
+          <button class="btn primary" data-pcd-act="gen-all" ${comfyReady ? '' : 'disabled'} title="${comfyReady ? '5 视图 + 定妆板 · 占位图视为未生成' : '请先到「设置 → 本地 ComfyUI」导入出图工作流'}">✦ 补全定妆（真实出图）</button>
+          <button class="btn" data-pcd-act="sheet" ${comfyReady ? '' : 'disabled'}>▦ 生成定妆板</button>
+          <button class="btn" data-pcd-act="close">关闭</button>
+        </div>
+      </div>
+    </div>`;
+
+    backdrop.querySelector('[data-pcd-act="close"]').addEventListener('click', () => page.close());
+    backdrop.querySelector('[data-pcd-act="edit"]')?.addEventListener('click', () => opts.onEdit?.(c));
+    backdrop.querySelector('[data-pcd-act="gen-all"]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        const d = await api(`/api/projects/${projectId}/characters/views/all`, withCharImage({
+          scope: 'all', includeSheet: true, onlyMissing: true, requireReal: comfyReady, regenerateMock: true,
+          characterIds: [c.id],
+        }));
+        const updated = (d.characters || []).find((x) => x.id === c.id);
+        if (updated) c = { ...c, ...updated };
+        toast(d.message || '定妆已补全', d.failed?.length ? 'warn' : 'ok');
+        render();
+        await opts.onChanged?.();
+      } catch (err) { toast(err.message, 'err'); btn.disabled = false; btn.textContent = '✦ 补全定妆（真实出图）'; }
+    });
+    backdrop.querySelector('[data-pcd-act="sheet"]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = '生成中…';
+      try {
+        const d = await api(`/api/projects/${projectId}/characters/views`, withCharImage({
+          characterId: c.id, view: 'sheet', requireReal: comfyReady,
+        }));
+        const updated = (d.characters || []).find((x) => x.id === c.id);
+        if (updated) c = { ...c, ...updated };
+        toast('定妆板已生成', 'ok');
+        render();
+        await opts.onChanged?.();
+      } catch (err) { toast(err.message, 'err'); btn.disabled = false; btn.textContent = '▦ 生成定妆板'; }
+    });
+    // 原文证据引用：点击打开「原文出处」阅读面板，可继续往前 / 往后扩展上下文
+    backdrop.querySelectorAll('[data-pcd-quote]').forEach((el) => el.addEventListener('click', () => {
+      const ev = (c.evidence || [])[Number(el.dataset.pcdQuote)];
+      if (ev?.quote) openEvidenceReader({ projectId, quote: ev.quote, charName: c.name, toast });
+    }));
+    // 空格 / 占位格：点击补这一张；真实图：点击放大预览
+    backdrop.querySelectorAll('[data-pcd-gen]').forEach((el) => el.addEventListener('click', async () => {
+      const key = el.dataset.pcdGen;
+      const label = key === 'sheet' ? '定妆板' : CHARACTER_VIEWS.find((v) => v.key === key)?.label || key;
+      el.innerHTML = `<span class="pmm-char-gen">生成 ${esc(label)}…</span>`;
+      try {
+        const d = await api(`/api/projects/${projectId}/characters/views`, withCharImage({
+          characterId: c.id, view: key, requireReal: comfyReady,
+        }));
+        const updated = (d.characters || []).find((x) => x.id === c.id);
+        if (updated) c = { ...c, ...updated };
+        toast(`「${c.name}·${label}」已生成`, 'ok');
+        render();
+        await opts.onChanged?.();
+      } catch (err) { toast(err.message, 'err'); render(); }
+    }));
+    // 已生成视图右下角「↻」：直接覆盖重生成这一张，不打开预览
+    backdrop.querySelectorAll('[data-pcd-regen]').forEach((btn) => btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const key = btn.dataset.pcdRegen;
+      const label = key === 'sheet' ? '定妆板' : CHARACTER_VIEWS.find((v) => v.key === key)?.label || key;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        const d = await api(`/api/projects/${projectId}/characters/views`, withCharImage({
+          characterId: c.id, view: key, requireReal: comfyReady,
+        }));
+        const updated = (d.characters || []).find((x) => x.id === c.id);
+        if (updated) c = { ...c, ...updated };
+        toast(`「${c.name}·${label}」已重新生成（${d.provider || 'comfyui'}）`, 'ok');
+        render();
+        await opts.onChanged?.();
+      } catch (err) {
+        toast(`重新生成失败：${err.message}`, 'err');
+        render();
+      }
+    }));
+    backdrop.querySelectorAll('[data-pcd-preview]').forEach((el) => el.addEventListener('click', () => {
+      const key = el.dataset.pcdPreview;
+      const shot = key === 'sheet' ? c.sheet : c.views?.[key];
+      if (!shot?.url) return;
+      const label = key === 'sheet' ? '定妆板' : CHARACTER_VIEWS.find((v) => v.key === key)?.label || key;
+      const pv = openPage({ title: `▦ ${c.name} · ${label}`, sub: '定妆大图 · 提示词与参考图可回溯' });
+      pv.content.innerHTML = `<div class="pmm-preview">
+        <div class="pmm-preview-img"><img src="${esc(shot.url)}" alt="${esc(label)}"></div>
+        <div class="pmm-preview-meta">
+          <div class="pmm-preview-row"><label>角色</label><span>${esc(c.name)}${c.role ? ` · ${esc(c.role)}` : ''}</span></div>
+          <div class="pmm-preview-row"><label>出图</label><span>${esc(shot.provider || '未知')}</span></div>
+          ${shot.styleLock ? `<div class="pmm-preview-row"><label>风格锁</label><span>${esc(shot.styleLock)}</span></div>` : ''}
+          ${(shot.refs || []).length ? `<div class="pmm-preview-row"><label>参考图</label><span>${esc(shot.refs.length + ' 张')}</span>
+            <div class="pmm-preview-refs">${shot.refs.map((r) => `<img src="${esc(r)}" alt="参考图">`).join('')}</div></div>` : ''}
+          <div class="pmm-preview-row"><label>提示词</label><span class="pmm-preview-prompt">${esc(shot.prompt || '')}</span></div>
+          <div class="pmm-preview-acts"><button class="btn sm" id="pcd-pv-regen">↻ 重新生成这张</button>
+            <button class="btn sm" id="pcd-pv-close">关闭</button></div>
+        </div></div>`;
+      pv.content.querySelector('#pcd-pv-close').addEventListener('click', () => pv.close());
+      pv.content.querySelector('#pcd-pv-regen').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true; btn.textContent = '生成中…';
+        try {
+          const d = await api(`/api/projects/${projectId}/characters/views`, withCharImage({
+            characterId: c.id, view: key, requireReal: comfyReady,
+          }));
+          const updated = (d.characters || []).find((x) => x.id === c.id);
+          if (updated) c = { ...c, ...updated };
+          pv.close();
+          toast(`「${c.name}·${label}」已重新生成`, 'ok');
+          render();
+          await opts.onChanged?.();
+        } catch (err) { btn.disabled = false; btn.textContent = '↻ 重新生成这张'; toast(err.message, 'err'); }
+      });
+    }));
+  }
+  render();
+  return {
+    page,
+    /** 外部数据刷新后同步详情（如角色管理整页 refresh 完成后调用） */
+    update(next) { c = { ...c, ...next }; render(); },
+  };
 }
 
 export function openProjectManager(ctx = {}) {
@@ -988,10 +1392,18 @@ export function openProjectManager(ctx = {}) {
   let voiceDrawReady = false;   // 是否已配置音频工作流（未配置则抽卡按钮给配置指引）
   let voiceWorkflowName = '';   // 当前生效的抽卡工作流名
   let draftTtlHours = 24;       // 候选存活时长（服务端下发）
-  const voiceDrawCount = 4;     // 每次抽卡数量（服务端 1–8）
+  let voiceDrawCount = 4;       // 每次抽卡数量（服务端 1–8，界面可调）
+  let playingId = '';           // 正在试听的条目 playId（voice:<id> / draft:<id>），空串 = 没在响
+  const draftNames = new Map(); // 候选卡上用户填的保存名（key: 候选 id）；render 会重建输入框，必须存住
   const page = openPage({ title: '▦ 项目管理', sub: '' });
   const backdrop = page.content;
-  const close = () => { page.close(); ctx.onClose?.(); };
+  // 试听状态订阅：播放结束/停止要把按钮从「⏸ 停止」还原成「▶ 试听」。
+  // 订阅放在 render 外面——render 每次重绘都重建 DOM，重复订阅会越积越多。
+  const offSpeakState = onSpeakState(({ playId }) => {
+    playingId = playId || '';
+    syncPlayUI();
+  });
+  const close = () => { offSpeakState(); stopSpeak(); page.close(); ctx.onClose?.(); };
 
   async function refresh(keepTab = true) {
     try {
@@ -1057,7 +1469,7 @@ export function openProjectManager(ctx = {}) {
       btn.disabled = true; btn.textContent = '生成中…';
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
-          withModelId('chars', { characterId: character.id, view: isSheet ? 'sheet' : viewKey }));
+          withCharImage({ characterId: character.id, view: isSheet ? 'sheet' : viewKey, requireReal: Boolean(ctx.comfy?.imageWorkflow) }));
         applyCharacterUpdate(d);
         page.close();
         toast(`「${character.name}·${label}」已重新生成`, 'ok');
@@ -1071,7 +1483,7 @@ export function openProjectManager(ctx = {}) {
       btn.disabled = true; btn.textContent = '生成中…';
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
-          withModelId('chars', { characterId: character.id, view: 'sheet' }));
+          withCharImage({ characterId: character.id, view: 'sheet', requireReal: Boolean(ctx.comfy?.imageWorkflow) }));
         applyCharacterUpdate(d);
         page.close();
         toast(`「${character.name}」定妆板已生成`, 'ok');
@@ -1115,6 +1527,23 @@ export function openProjectManager(ctx = {}) {
   function renderCharacters(body, m) {
     const chars = Array.isArray(m.characters) ? m.characters : [];
     const hasNovel = !!m.source?.text;
+    // 本地 ComfyUI 出图工作流未配置 / 服务端旧进程：生成被禁用并给出可执行指引
+    const apiStale = !Array.isArray(ctx.api?.capabilities) || !ctx.api.capabilities.includes('char-portrait-jobs');
+    const comfyReady = Boolean(ctx.comfy?.imageWorkflow) && !apiStale;
+    const openDetail = (c) => openCharacterDetail(c, {
+      projectId: ctx.project.id, toast, comfy: ctx.comfy, apiStale,
+      onChanged: async () => { await refresh(); await ctx.onChanged?.(); },
+      onEdit: (ch) => openEditor(ch),
+    });
+    /** 打开角色编辑器：带上当前音色库与本项目音色占用表，
+     *  编辑器里的音色下拉据此禁用「已被其它角色使用」的音色并标注被谁占用。 */
+    const openEditor = (ch, onSave) => {
+      const usedBy = new Map();
+      for (const x of (ctx.project.management?.characters || [])) {
+        if (x.voiceId && x.id !== ch.id && x.voiceId !== ch.voiceId) usedBy.set(x.voiceId, x.name);
+      }
+      return openCharacterEditor(ch, onSave || ((obj) => manage('char-upsert', obj)), { voices: voiceLib, usedBy });
+    };
     body.innerHTML = `
       <div class="cf-section"><h4>角色库 · 从小说提取 · 多视图生成</h4>
         <div class="cf-row">
@@ -1124,15 +1553,17 @@ export function openProjectManager(ctx = {}) {
           <span class="cf-note" style="margin:0" id="pmm-char-status">${hasNovel ? '' : '请先上传小说后再提取角色'}</span>
         </div>
         <div class="cf-row pmm-char-batch">
-          <button class="btn primary" id="pmm-char-gen-all" ${chars.length ? '' : 'disabled'}>✦ 一键补全全部定妆</button>
+          <button class="btn primary" id="pmm-char-gen-all" ${chars.length && comfyReady ? '' : 'disabled'}
+            title="${comfyReady ? '调用本地 ComfyUI 补齐缺失 / 占位的角色图' : '请先到「设置 → 本地 ComfyUI」导入「导出(API)」图像工作流'}">✦ 补齐缺失角色图</button>
+          <button class="btn" id="pmm-char-regen-all" ${chars.length && comfyReady ? '' : 'disabled'}
+            title="${comfyReady ? '覆盖重生成全部角色的 5 视图 + 定妆板' : '未配置 ComfyUI 出图工作流'}">↻ 全部重新生成</button>
           <label class="cf-check"><input type="checkbox" id="pmm-char-include-sheet" checked> 同时生成定妆板</label>
-          <label class="cf-check"><input type="checkbox" id="pmm-char-only-missing" checked> 只补缺失的图</label>
+          <label class="cf-check"><input type="checkbox" id="pmm-char-only-missing" checked> 只补缺失与占位图</label>
           <span class="cf-note" style="margin:0">${chars.length
-          ? `共 ${chars.length} 位角色 · ${chars.filter((c) => charViewStatus(c).videoReady).length} 位已可用于视频 · 逐张落盘可中断`
-          : ''}</span>
+          ? `共 ${chars.length} 位角色 · ${chars.filter((c) => charViewStatus(c).videoReady).length} 位已可用于视频${comfyReady ? '' : apiStale ? ' · ⚠ 服务端旧版本，请重启' : ' · 未配置 ComfyUI 出图工作流'}` : ''}</span>
         </div>
         <div class="cf-note" id="pmm-char-batch-hint">${chars.length
-          ? `按全片风格锁生成 5 视图（正面 / 3-4 侧 / 侧面 / 背面 / 面部特写），逐张落盘；正面是所有其他视图的身份基准`
+          ? `调用本地 ComfyUI 按全片风格锁真实出图：5 视图（正面 / 3-4 侧 / 侧面 / 背面 / 面部特写）+ 定妆板，逐张落盘；占位图（Mock 自绘）视为未生成会重新出；正面是所有其他视图的身份基准`
           : '还没有角色。可从小说自动提取（LLM 优先、启发式兜底），或手动新增角色。'}</div>
         ${chars.length
         ? `<div class="pmm-chars">${chars.map((c) => charCardHTML(c, viewGen)).join('')}</div>`
@@ -1144,9 +1575,12 @@ export function openProjectManager(ctx = {}) {
         <div class="cf-row">
           <button class="btn primary" id="pmm-voice-assign" ${chars.length ? '' : 'disabled'}>✦ AI 分配音色</button>
           <button class="btn" id="pmm-voice-draw" ${chars.length ? '' : 'disabled'} title="用本地 ComfyUI 音色工作流抽卡，抽到的候选满意再保存">🎲 抽卡音色</button>
+          <label class="cf-check">每次 <select id="pmm-voice-draw-count" title="一次抽几条候选">${[2, 4, 6, 8].map((n) => `<option value="${n}" ${voiceDrawCount === n ? 'selected' : ''}>${n}</option>`).join('')}</select> 条</label>
           <label class="cf-check"><input type="checkbox" id="pmm-voice-keep" ${voiceDrawKeep ? 'checked' : ''}> 保留上次候选</label>
           ${speechOn ? '' : '<span class="cf-note">当前浏览器不支持语音合成，无音频样本的预设音色无法试听</span>'}
-          <span class="cf-note" style="margin:0" id="pmm-voice-status">${chars.length ? `共 ${chars.length} 位角色` : '请先添加角色'}</span>
+          <span class="cf-note" style="margin:0" id="pmm-voice-status">${chars.length
+            ? `共 ${chars.length} 位角色 · ${chars.filter((c) => !c.voiceId).length} 位未绑定音色${chars.some((c) => !c.voiceId) ? '（每个角色都需要绑定一个不重复的音色）' : ' · 音色互不重复 ✓'}`
+            : '请先添加角色'}</span>
         </div>
         <div class="cf-note" id="pmm-voice-draw-hint">${voiceDrawReady
           ? `抽卡将调用「${esc(voiceWorkflowName)}」跑 ${voiceDrawCount} 次；候选进临时池，${draftTtlHours} 小时内不保存会自动清理。绑定角色的音色一定是已保存的正式音色。`
@@ -1165,9 +1599,12 @@ export function openProjectManager(ctx = {}) {
 
     // 模型选择器：提取与多视图生成都用它选中的模型（库为空时不出现）
     ensureModelPicker('chars', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
-    body.querySelector('#pmm-char-add').addEventListener('click', () => {
-      openCharacterEditor({}, (obj) => manage('char-upsert', obj));
-    });
+    // 本次使用的 ComfyUI 接口：多视图 / 定妆板 / 音色抽卡分别按板块记忆（只有 1 份档案时不出现）
+    ensureInterfacePicker('character-view', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
+    ensureInterfacePicker('character-sheet', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
+    const voiceDrawBtn = body.querySelector('#pmm-voice-draw');
+    if (voiceDrawBtn) ensureInterfacePicker('voice', voiceDrawBtn.parentElement, voiceDrawBtn);
+    body.querySelector('#pmm-char-add').addEventListener('click', () => openEditor({}));
     const extract = async (mode) => {
       const status = $('pmm-char-status');
       const btns = [body.querySelector('#pmm-char-extract'), body.querySelector('#pmm-char-heur')].filter(Boolean);
@@ -1176,7 +1613,9 @@ export function openProjectManager(ctx = {}) {
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/extract`, withModelId('chars', { mode }));
         const st = d.stats ? ` · 候选 ${d.stats.candidates} / 片段 ${d.stats.fragments} / 证据 ${d.stats.verified}✓ ${d.stats.dropped}✗` : '';
-        toast(`${d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`}${st}`, d.fellBack ? 'err' : 'ok');
+        // 提取即配声：服务端已为新角色自动分配互不重复的音色，把结果一并播报
+        const vMsg = d.voice?.applied ? ` · 自动绑定音色 ${d.voice.applied} 位${d.voice.skipped ? `（${d.voice.skipped} 位音色不足未分配）` : ''}` : '';
+        toast(`${d.message || `新增 ${d.added || 0} · 合并 ${d.merged || 0}`}${vMsg}${d.removed?.length ? ` · 清理 ${d.removed.length} 个误提取` : ''}${st}`, d.fellBack ? 'err' : 'ok');
         await refresh();
         await ctx.onChanged?.();
       } catch (e) {
@@ -1189,22 +1628,56 @@ export function openProjectManager(ctx = {}) {
       body.querySelector('#pmm-char-extract').addEventListener('click', () => extract('llm'));
       body.querySelector('#pmm-char-heur').addEventListener('click', () => extract('heuristic'));
     }
-    /** 一键补全全部定妆：一次请求批量出图（5 视图 + 可选定妆板），SSE 进度写回状态栏 */
-    body.querySelector('#pmm-char-gen-all')?.addEventListener('click', async (e) => {
-      const btn = e.currentTarget;
+    /** 批量出图：本地 ComfyUI 真实出图（5 视图 + 可选定妆板），后台任务 + 轮询进度。
+     *  force=true（全部重新生成）时忽略「只补缺失」，已生成的真实图也覆盖重出。 */
+    const runBatch = async (btn, force) => {
       const status = $('pmm-char-status');
+      if (!comfyReady) {
+        toast(apiStale
+          ? '服务端仍在运行旧版本：请重启服务（终端 Ctrl+C 后重新 npm start）再生成，否则只会得到占位图'
+          : '还没有 ComfyUI 出图工作流：请到「设置 → 本地 ComfyUI」导入一份「导出(API)」格式的图像工作流', 'err');
+        return;
+      }
+      const sheetOn = body.querySelector('#pmm-char-include-sheet')?.checked !== false;
+      if (force) {
+        const n = chars.length * (5 + (sheetOn ? 1 : 0));
+        if (!window.confirm(`覆盖重生成 ${chars.length} 位角色的 ${n} 张图？\n会覆盖现有真实定妆图，单张约 30 秒，可随时暂停。`)) return;
+      }
+      const origin = btn.textContent;
       btn.disabled = true;
-      btn.textContent = '✦ 批量生成中…';
-      if (status) status.textContent = '正在准备批量生成…';
+      btn.textContent = '✦ 启动中…';
+      if (status) status.textContent = '正在启动后台任务（本地 ComfyUI 真实出图）…';
       try {
-        const d = await api(`/api/projects/${ctx.project.id}/characters/views/all`, withModelId('chars', {
+        const d = await api(`/api/projects/${ctx.project.id}/characters/views/all`, withCharImage({
           scope: 'all',
-          includeSheet: body.querySelector('#pmm-char-include-sheet')?.checked !== false,
-          onlyMissing: body.querySelector('#pmm-char-only-missing')?.checked !== false,
+          includeSheet: sheetOn,
+          onlyMissing: force ? false : (body.querySelector('#pmm-char-only-missing')?.checked !== false),
+          regenerateMock: true,
+          requireReal: true,
+          concurrency: 2,
         }));
-        const ready = d.videoReady?.label || '';
-        toast([d.message || '批量生成完成', ready].filter(Boolean).join(' · '), d.failed?.length ? 'warn' : 'ok');
-        if (status) status.textContent = [d.message || '', ready].filter(Boolean).join(' · ');
+        if (!d.jobId) throw new Error(d.message || '服务端未返回任务号，可能仍在运行旧版本，请重启服务后重试');
+        toast(d.message || '已开始生成角色图', 'ok');
+        const job = await new Promise((resolve) => {
+          const timer = setInterval(async () => {
+            try {
+              const r = await api(`/api/projects/${ctx.project.id}/characters/jobs/${d.jobId}`);
+              const jb = r.job;
+              if (!jb) return;
+              if (status) {
+                status.textContent = jb.status === 'running'
+                  ? `本地 ComfyUI 生成中 ${jb.done}/${jb.total}${jb.current ? ` · ${jb.current.name || ''} ${jb.current.label || ''}` : ''}`
+                  : (jb.message || '');
+              }
+              btn.textContent = jb.status === 'running' ? `✦ 生成中 ${jb.done}/${jb.total}` : origin;
+              if (jb.status !== 'running') { clearInterval(timer); resolve(jb); }
+            } catch { /* 网络抖动：下一轮继续 */ }
+          }, 2500);
+        });
+        const ready = job.videoReady?.label || '';
+        toast([job.message || '批量生成完成', ready].filter(Boolean).join(' · '), job.status === 'done' ? 'ok' : 'warn');
+        if (job.failedCount) toast(`失败 ${job.failedCount} 张：${(job.failed || []).slice(0, 2).join('；')}`, 'err');
+        if (status) status.textContent = [job.message || '', ready].filter(Boolean).join(' · ');
         await refresh();
         await ctx.onChanged?.();
       } catch (err) {
@@ -1212,12 +1685,21 @@ export function openProjectManager(ctx = {}) {
         if (status) status.textContent = err.message;
       } finally {
         btn.disabled = false;
-        btn.textContent = '✦ 一键补全全部定妆';
+        btn.textContent = origin;
       }
-    });
+    };
+    body.querySelector('#pmm-char-gen-all')?.addEventListener('click', (e) => runBatch(e.currentTarget, false));
+    body.querySelector('#pmm-char-regen-all')?.addEventListener('click', (e) => runBatch(e.currentTarget, true));
+    // 角色详情：卡片信息区或「👁 详情」按钮 → 完整属性页（与工作台第④步同入口）
+    body.querySelectorAll('[data-char-detail]').forEach((el) => el.addEventListener('click', (e) => {
+      // 避免与卡片内部按钮冲突：只有 info 区 / 详情按钮本身触发
+      if (e.target.closest('button') && !e.target.closest('[data-char-detail]')) return;
+      const c = chars.find((x) => x.id === (el.dataset.charDetail || el.closest('[data-char-id]')?.dataset.charId));
+      if (c) openDetail(c);
+    }));
     body.querySelectorAll('[data-char-edit]').forEach((b) => b.addEventListener('click', () => {
       const c = chars.find((x) => x.id === b.dataset.charEdit);
-      if (c) openCharacterEditor(c, (obj) => manage('char-upsert', obj));
+      if (c) openEditor(c);
     }));
     body.querySelectorAll('[data-char-del]').forEach((b) => b.addEventListener('click', () => manage('char-del', b.dataset.charDel)));
     body.querySelectorAll('[data-char-views]').forEach((b) => b.addEventListener('click', () => {
@@ -1232,7 +1714,7 @@ export function openProjectManager(ctx = {}) {
       btn.disabled = true; btn.textContent = '生成中…';
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
-          withModelId('chars', { characterId: c.id, view: 'sheet' }));
+          withCharImage({ characterId: c.id, view: 'sheet', requireReal: comfyReady }));
         applyCharacterUpdate(d);
         toast(`「${c.name}」定妆板已生成`, 'ok');
       } catch (err) {
@@ -1245,8 +1727,9 @@ export function openProjectManager(ctx = {}) {
       const c = chars.find((x) => x.id === el.dataset.charPreview);
       if (c) openPortraitPreview(c, el.dataset.view);
     }));
-    // 点击空视图格 → 单独生成这一张
-    body.querySelectorAll('[data-char-view-one]').forEach((el) => el.addEventListener('click', async () => {
+    // 点击空视图格 / 占位图格 → 单独真实生成这一张
+    body.querySelectorAll('[data-char-view-one]').forEach((el) => el.addEventListener('click', async (e) => {
+      e.stopPropagation();
       const c = chars.find((x) => x.id === el.dataset.charViewOne);
       if (!c) return;
       const viewKey = el.dataset.view;
@@ -1254,7 +1737,7 @@ export function openProjectManager(ctx = {}) {
       el.innerHTML = `<span class="pmm-char-gen">生成 ${esc(label)}…</span>`;
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
-          withModelId('chars', { characterId: c.id, view: viewKey }));
+          withCharImage({ characterId: c.id, view: viewKey, requireReal: comfyReady }));
         applyCharacterUpdate(d);
         toast(`「${c.name}·${label}」已生成`, 'ok');
       } catch (err) {
@@ -1286,6 +1769,8 @@ export function openProjectManager(ctx = {}) {
       const row = sel.closest('.pmm-voice-row');
       const reasonEl = row?.querySelector('.pmm-voice-reason');
       const prevBtn = row?.querySelector('[data-voice-preview]');
+      // 换音色时先停掉正在响的旧音色，否则按钮已指向新音色、耳朵里还是旧的
+      stopSpeak();
       try {
         const d = await api(`/api/projects/${ctx.project.id}/voices/set`, { characterId, voiceId });
         const c = (ctx.project.management?.characters || []).find((x) => x.id === characterId);
@@ -1294,21 +1779,36 @@ export function openProjectManager(ctx = {}) {
           c.voiceName = d.character.voiceName || '';
           c.voiceReason = d.character.voiceReason || '';
         }
+        const hasAudio = Boolean(d.voice?.audio);
         if (reasonEl) reasonEl.innerHTML = d.character.voiceId
-          ? esc(`已指定：${d.character.voiceName || '音色'}`)
+          ? esc(`已指定：${d.character.voiceName || '音色'}`) + (hasAudio ? ' · 真实音频' : '')
           : '<i class="muted">未分配音色</i>';
         if (prevBtn) {
+          const idle = hasAudio ? '▶ 原声' : '🔊 试听';
           prevBtn.dataset.voicePreview = d.character.voiceId || '';
           prevBtn.dataset.voiceText = '';
-          prevBtn.disabled = !d.character.voiceId || !speechOn;
+          prevBtn.dataset.playId = `voice:${d.character.voiceId || ''}`;
+          prevBtn.dataset.idleLabel = idle;
+          prevBtn.textContent = idle;
+          // 有真实音频就能播，不需要浏览器语音合成
+          prevBtn.disabled = !d.character.voiceId || !(speechOn || hasAudio);
         }
         if (d.character.voiceId) toast(`已指定音色：${d.character.voiceName}`, 'ok');
-      } catch (err) { toast(`指定失败：${err.message}`, 'err'); }
+      } catch (err) {
+        toast(`指定失败：${err.message}`, 'err');
+        // 复位到原来的绑定：失败（音色已被占用）后下拉不能停在非法选项上
+        const prev = chars.find((x) => x.id === characterId);
+        sel.value = prev?.voiceId || '';
+      }
     }));
 
     // ---------------- 音色抽卡：按角色条件抽 → 候选试听 → 保存 / 直接绑定 ----------------
     body.querySelector('#pmm-voice-keep')?.addEventListener('change', (e) => {
       voiceDrawKeep = e.currentTarget.checked;
+      render();
+    });
+    body.querySelector('#pmm-voice-draw-count')?.addEventListener('change', (e) => {
+      voiceDrawCount = Math.max(1, Math.min(8, Number(e.currentTarget.value) || 4));
       render();
     });
     body.querySelector('#pmm-voice-draw')?.addEventListener('click', async (e) => {
@@ -1327,7 +1827,7 @@ export function openProjectManager(ctx = {}) {
       }, 500);
       voiceDrawBusy = target?.id || '';
       try {
-        const d = await api(`/api/projects/${ctx.project.id}/voices/draw`, withModelId('chars', {
+        const d = await api(`/api/projects/${ctx.project.id}/voices/draw`, withVoiceDraw({
           characterId: target?.id || '', count: voiceDrawCount,
         }));
         voiceCandidates = voiceDrawKeep ? [...(d.drafts || []), ...voiceCandidates] : (d.drafts || []);
@@ -1343,18 +1843,37 @@ export function openProjectManager(ctx = {}) {
         await refresh();
       }
     });
-    // 候选卡：试听 / 保存入库 / 直接绑定到角色 / 丢弃
+    // 候选卡：试听（再点一次即停止）/ 保存入库 / 直接绑定到角色 / 丢弃
     body.querySelectorAll('[data-draft-preview]').forEach((b) => b.addEventListener('click', () => {
+      const playId = b.dataset.playId;
+      if (playId && playId === playingId) { stopSpeak(); return; }
       const d = voiceCandidates.find((x) => x.id === b.dataset.draftPreview);
-      if (d?.audio?.url) speakText({ audioUrl: d.audio.url, text: d.sampleText });
+      if (d?.audio?.url) speakText({ audioUrl: d.audio.url, text: d.sampleText, playId });
+    }));
+    // 候选保存名：render 会重建输入框，边输入边存进闭包 Map，重绘后不丢
+    body.querySelectorAll('[data-draft-name]').forEach((inp) => inp.addEventListener('input', () => {
+      draftNames.set(inp.dataset.draftName, inp.value.trim());
+    }));
+    // 绑定目标选择器：只在「这条不是为某个角色抽的」时候出现，选中前「保存并绑定」保持禁用
+    body.querySelectorAll('[data-draft-bind-target]').forEach((sel) => sel.addEventListener('change', () => {
+      const btn = sel.closest('.pmm-draft')?.querySelector('[data-draft-bind]');
+      if (!btn) return;
+      const name = sel.selectedOptions[0]?.textContent || '';
+      btn.dataset.charId = sel.value || '';
+      btn.disabled = !sel.value;
+      btn.textContent = sel.value ? `保存并绑定「${name}」` : '保存并绑定';
     }));
     body.querySelectorAll('[data-draft-save]').forEach((b) => b.addEventListener('click', async () => {
       const id = b.dataset.draftSave;
+      const name = b.closest('.pmm-draft')?.querySelector('[data-draft-name]')?.value?.trim() || '';
       b.disabled = true;
       try {
-        const d = await api(`/api/voices/drafts/${id}/save`, {});
+        const d = await api(`/api/voices/drafts/${id}/save`, name ? { name } : {});
         toast(d.message || '已保存为音色', 'ok');
         voiceCandidates = voiceCandidates.filter((x) => x.id !== id);
+        draftNames.delete(id);
+        // 自动展开音色库：库默认折叠，不展开的话候选保存完就「凭空消失」，用户找不到刚存的东西
+        voiceLibOpen = true;
         await refresh();
       } catch (err) { toast(`保存失败：${err.message}`, 'err'); b.disabled = false; }
     }));
@@ -1362,21 +1881,29 @@ export function openProjectManager(ctx = {}) {
       const draft = voiceCandidates.find((x) => x.id === b.dataset.draftBind);
       const characterId = b.dataset.charId;
       if (!draft || !characterId) return;
+      const name = b.closest('.pmm-draft')?.querySelector('[data-draft-name]')?.value?.trim() || '';
       b.disabled = true;
       try {
         // 绑定候选 = 保存 + 绑定一次完成：角色只能引用已保存的音色
-        const d = await api(`/api/projects/${ctx.project.id}/voices/set`, { characterId, voiceId: draft.id });
+        const d = await api(`/api/projects/${ctx.project.id}/voices/set`, { characterId, voiceId: draft.id, ...(name ? { name } : {}) });
         toast(d.message || '已保存并绑定', 'ok');
         voiceCandidates = voiceCandidates.filter((x) => x.id !== draft.id);
+        draftNames.delete(draft.id);
+        voiceLibOpen = true;
         await refresh();
         await ctx.onChanged?.();
       } catch (err) { toast(`绑定失败：${err.message}`, 'err'); b.disabled = false; }
     }));
     body.querySelectorAll('[data-draft-del]').forEach((b) => b.addEventListener('click', async () => {
       const id = b.dataset.draftDel;
+      const label = b.closest('.pmm-draft')?.querySelector('[data-draft-name]')?.value?.trim()
+        || voiceCandidates.find((x) => x.id === id)?.nameHint || '该候选';
+      // 丢弃不可撤销（音频文件一并回收），必须先确认
+      if (!window.confirm(`确定丢弃候选「${label}」？丢弃后无法恢复。`)) return;
       try {
         await api(`/api/voices/drafts/${id}`, undefined, 'DELETE');
         voiceCandidates = voiceCandidates.filter((x) => x.id !== id);
+        draftNames.delete(id);
         render();
       } catch (err) { toast(`丢弃失败：${err.message}`, 'err'); }
     }));
@@ -1398,7 +1925,7 @@ export function openProjectManager(ctx = {}) {
         if (el) el.textContent = `「${character.name}」抽卡中 ${Math.round((Date.now() - started) / 1000)}s…`;
       }, 500);
       try {
-        const d = await api(`/api/projects/${ctx.project.id}/voices/draw`, withModelId('chars', {
+        const d = await api(`/api/projects/${ctx.project.id}/voices/draw`, withVoiceDraw({
           characterId, count: voiceDrawCount,
         }));
         voiceCandidates = voiceDrawKeep ? [...(d.drafts || []), ...voiceCandidates] : (d.drafts || []);
@@ -1447,24 +1974,57 @@ export function openProjectManager(ctx = {}) {
       try { await api(`/api/voices/${b.dataset.voiceDel}`, undefined, 'DELETE'); await refresh(); toast('已删除', 'ok'); }
       catch (err) { toast(`删除失败：${err.message}`, 'err'); }
     }));
-    // 试听（委托）：角色行与音色库共用同一回调；有真实音频样本就播样本，否则浏览器合成
+    // 试听（委托）：角色行与音色库共用同一回调；有真实音频样本就播样本，否则浏览器合成。
+    // 同一个音色在两处共用 playId（voice:<id>），播放时两处按钮一起进「停止」态。
     body.querySelectorAll('[data-voice-preview]').forEach((btn) => btn.addEventListener('click', () => {
+      const playId = btn.dataset.playId;
+      if (playId && playId === playingId) { stopSpeak(); return; }
       const id = btn.dataset.voicePreview;
       const v = (voiceLib || []).find((x) => x.id === id);
       const text = btn.dataset.voiceText || v?.sampleText || '';
       if (!v || !text) return;
-      speakText({ text, lang: v.language, rate: v.rate, pitch: v.pitch, gender: v.gender, audioUrl: v.audio?.url });
+      speakText({ text, lang: v.language, rate: v.rate, pitch: v.pitch, gender: v.gender, audioUrl: v.audio?.url, playId });
     }));
   }
 
   // ---------------- 角色音色分配相关纯渲染 helpers（在 openProjectManager 闭包内，可访问 voiceLib 等） ----------------
   const speechOn = isSpeechSupported();
 
-  function voiceOptionsHTML(selectedId) {
+  /**
+   * 把所有试听按钮同步到当前播放状态：正在响的那条变「⏸ 停止」并高亮，其余还原成各自的闲置文案。
+   * 只改 class 和文案、不重绘，保住用户的滚动位置与正在填写的候选命名。
+   * 一个音色可能同时出现在角色行和音色库（同一个 playId），两处按钮一起切换，符合「全局只响一个」的模型。
+   */
+  function syncPlayUI() {
+    backdrop.querySelectorAll('[data-play-id]').forEach((btn) => {
+      const on = Boolean(playingId) && btn.dataset.playId === playingId;
+      btn.classList.toggle('playing', on);
+      btn.textContent = on ? '⏸ 停止' : (btn.dataset.idleLabel || btn.textContent);
+    });
+  }
+
+  /**
+   * 音色下拉选项：本项目里已被其它角色绑定的音色禁用并标注「已被『某角色』使用」，
+   * 同一角色的音色不能重复 —— 当前角色自己的音色保持可选（可以不动）。
+   * @param {object} c 当前角色（含 id / voiceId）
+   * @param {Array} [voices] 音色库（默认用全局 voiceLib）
+   */
+  function voiceOptionsHTML(c, voices = voiceLib) {
+    const chars = (ctx.project.management?.characters || []);
+    // 占用表：其它角色绑定的音色 → 角色名（同一项目内音色互斥）
+    const usedBy = new Map();
+    for (const x of chars) {
+      if (x.voiceId && x.id !== c.id && x.voiceId !== c.voiceId) usedBy.set(x.voiceId, x.name);
+    }
     const opts = ['<option value="">— 未指定 —</option>'];
-    for (const v of (voiceLib || [])) {
-      const sel = v.id === selectedId ? ' selected' : '';
-      opts.push(`<option value="${esc(v.id)}"${sel}>${esc(v.name)}（${esc(v.gender)}·${esc(v.ageGroup)}）</option>`);
+    for (const v of (voices || [])) {
+      const sel = v.id === c.voiceId ? ' selected' : '';
+      const user = usedBy.get(v.id);
+      const disabled = user ? ' disabled' : '';
+      const label = user
+        ? `${v.name}（已被「${user}」使用）`
+        : `${v.name}（${v.gender}·${v.ageGroup}）`;
+      opts.push(`<option value="${esc(v.id)}"${sel}${disabled} ${user ? `title="已被角色「${esc(user)}」绑定，不能重复选择"` : ''}>${esc(label)}</option>`);
     }
     return opts.join('');
   }
@@ -1479,7 +2039,7 @@ export function openProjectManager(ctx = {}) {
           ${(v.tags || []).map((t) => `<span class="pmm-chip">${esc(t)}</span>`).join('')}</div>
         <div class="pmm-voice-item-sub">${esc(cut(v.sampleText, 64))}${v.audio ? ` · ${Math.round((v.audio.bytes || 0) / 1024)} KB` : ''}</div>
         <div class="pmm-voice-item-acts">
-          <button class="btn sm" data-voice-preview="${esc(v.id)}" data-voice-text="${esc(v.sampleText)}" ${v.audio || speechOn ? '' : 'disabled'}>${v.audio ? '▶ 原声' : '🔊 试听'}</button>
+          <button class="btn sm" data-voice-preview="${esc(v.id)}" data-voice-text="${esc(v.sampleText)}" data-play-id="voice:${esc(v.id)}" data-idle-label="${v.audio ? '▶ 原声' : '🔊 试听'}" ${v.audio || speechOn ? '' : 'disabled'}>${v.audio ? '▶ 原声' : '🔊 试听'}</button>
           <button class="btn sm" data-voice-edit="${esc(v.id)}">✎ 编辑</button>
           <button class="btn sm" data-voice-del="${esc(v.id)}">✕</button>
         </div>
@@ -1498,7 +2058,7 @@ export function openProjectManager(ctx = {}) {
         <div class="field"><label>性别</label><select id="ve-gender">${['男', '女', '中性'].map((g) => `<option value="${g}" ${e && e.gender === g ? 'selected' : ''}>${g}</option>`).join('')}</select></div>
         <div class="field"><label>年龄层</label><select id="ve-age">${['儿童', '青年', '中年', '老年'].map((a) => `<option value="${a}" ${e && e.ageGroup === a ? 'selected' : ''}>${a}</option>`).join('')}</select></div>
       </div>
-      <div class="field"><label>性格标签（逗号分隔）</label><input id="ve-tags" value="${esc((e && e.tags) || []).join('，')}"></div>
+      <div class="field"><label>性格标签（逗号分隔）</label><input id="ve-tags" value="${esc(((e && e.tags) || []).join('，'))}"></div>
       <div class="field"><label>试听样例文案</label><textarea id="ve-sample" rows="2" maxlength="200">${val('sampleText')}</textarea></div>
       <div class="modal-grid">
         <div class="field"><label>语速 rate (0.5–2)</label><input id="ve-rate" type="number" step="0.05" min="0.5" max="2" value="${e ? e.rate : 1}"></div>
@@ -1516,10 +2076,11 @@ export function openProjectManager(ctx = {}) {
   function voiceRowHTML(c) {
     const v = c.voiceId ? (voiceLib || []).find((x) => x.id === c.voiceId) : null;
     const busy = voiceDrawBusy === c.id;
-    return `<div class="pmm-voice-row" data-char="${esc(c.id)}">
+    const idleLabel = v?.audio ? '▶ 原声' : '🔊 试听';
+    return `<div class="pmm-voice-row${v ? '' : ' voice-missing'}" data-char="${esc(c.id)}" ${v ? '' : 'title="每个角色都需要绑定一个音色"'}>
       <span class="pmm-voice-char">${esc(c.name)}</span>
-      <select class="pmm-voice-select" data-voice-select="${esc(c.id)}">${voiceOptionsHTML(c.voiceId)}</select>
-      <button class="btn sm" data-voice-preview="${esc(c.voiceId || '')}" data-voice-text="${esc(v ? v.sampleText : '')}" ${v && (speechOn || v.audio) ? '' : 'disabled'}>${v?.audio ? '▶ 原声' : '🔊 试听'}</button>
+      <select class="pmm-voice-select" data-voice-select="${esc(c.id)}">${voiceOptionsHTML(c)}</select>
+      <button class="btn sm" data-voice-preview="${esc(c.voiceId || '')}" data-voice-text="${esc(v ? v.sampleText : '')}" data-play-id="voice:${esc(c.voiceId || '')}" data-idle-label="${idleLabel}" ${v && (speechOn || v.audio) ? '' : 'disabled'}>${idleLabel}</button>
       <button class="btn sm" data-voice-draw-for="${esc(c.id)}" ${busy || !voiceDrawReady ? 'disabled' : ''}>${busy ? '🎲 抽卡中…' : '🎲 抽卡'}</button>
       <span class="pmm-voice-reason">${v
         ? esc(c.voiceReason || `已指定：${v.name}`) + (v.audio ? ' · 真实音频' : '')
@@ -1530,12 +2091,14 @@ export function openProjectManager(ctx = {}) {
   /** 候选池：抽卡结果。未保存的候选不能绑定角色，只能「保存」「保存并绑定」或丢弃 */
   function voiceCandidatesHTML() {
     const list = voiceCandidates.map((d) => {
-      const target = (ctx.project.management?.characters || [])
-        .find((c) => c.id === d.characterId);
       const chars = (ctx.project.management?.characters || []);
-      const bindTo = d.characterId && target ? target.id : (chars[0]?.id || '');
-      const bindName = chars.find((c) => c.id === bindTo)?.name || '';
+      // 只有「当初就是为这个角色抽的」才预填绑定目标。抽卡没带角色、或原角色已被删除时，
+      // 绝不静默回退到第一个角色 —— 那会把音色绑到一个毫不相干的人身上，且用户看不出来。
+      const target = chars.find((c) => c.id === d.characterId);
+      const bindTo = target ? target.id : '';
+      const bindName = target?.name || '';
       const created = new Date(d.createdAt || Date.now());
+      const nameVal = draftNames.get(d.id) ?? (d.nameHint || '');
       return `<div class="pmm-draft" data-draft="${esc(d.id)}">
         <div class="pmm-draft-main">
           <b>${esc(d.nameHint || '候选音色')}</b>
@@ -1545,10 +2108,23 @@ export function openProjectManager(ctx = {}) {
           <span class="cf-note" style="margin:0">${esc(created.toLocaleTimeString('zh-CN', { hour12: false }))}${d.audio?.bytes ? ` · ${Math.round(d.audio.bytes / 1024)} KB` : ''}</span>
         </div>
         <div class="pmm-draft-sub">${esc(cut(d.sampleText, 80))}</div>
+        <div class="pmm-draft-name">
+          <label>保存为</label>
+          <input data-draft-name="${esc(d.id)}" maxlength="40" placeholder="音色名称" value="${esc(nameVal)}">
+          ${bindTo ? '' : '<span class="cf-note" style="margin:0">这条不是为某个角色抽的，绑定前请先选角色</span>'}
+        </div>
         <div class="pmm-draft-acts">
-          <button class="btn sm" data-draft-preview="${esc(d.id)}">▶ 试听原声</button>
+          <button class="btn sm" data-draft-preview="${esc(d.id)}" data-play-id="draft:${esc(d.id)}" data-idle-label="▶ 试听原声">▶ 试听原声</button>
           <button class="btn sm" data-draft-save="${esc(d.id)}">✓ 保存为音色</button>
-          ${bindTo ? `<button class="btn sm primary" data-draft-bind="${esc(d.id)}" data-char-id="${esc(bindTo)}">保存并绑定「${esc(bindName)}」</button>` : ''}
+          ${bindTo
+            ? `<button class="btn sm primary" data-draft-bind="${esc(d.id)}" data-char-id="${esc(bindTo)}">保存并绑定「${esc(bindName)}」</button>`
+            : chars.length
+              ? `<select class="pmm-draft-bind-target" data-draft-bind-target="${esc(d.id)}" title="选一个角色来绑定这条候选">
+                   <option value="">绑定到角色…</option>
+                   ${chars.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
+                 </select>
+                 <button class="btn sm primary" data-draft-bind="${esc(d.id)}" data-char-id="" disabled>保存并绑定</button>`
+              : ''}
           <button class="btn sm" data-draft-del="${esc(d.id)}">✕ 丢弃</button>
         </div>
       </div>`;
@@ -1566,12 +2142,13 @@ export function openProjectManager(ctx = {}) {
    * 「正在生成哪一张」，用户随时可以中断。已存在的视图默认跳过（可点「全部重生成」覆盖）。
    */
   async function generateViews(c) {
+    const comfyReady = Boolean(ctx.comfy?.imageWorkflow);
     const st = charViewStatus(c);
-    // 缺图才补；全齐时视为「全部重生成」
-    const targets = st.missing.length
-      ? CHARACTER_VIEWS.filter((v) => st.missing.includes(v.key))
+    // 缺图 + 占位图（mock 自绘不算已生成）才补；全齐且全真实时视为「全部重生成」
+    const targets = st.missing.length || st.placeholders.length
+      ? CHARACTER_VIEWS.filter((v) => st.missing.includes(v.key) || st.placeholders.includes(v.key))
       : CHARACTER_VIEWS;
-    const all = !st.missing.length;
+    const all = !st.missing.length && !st.placeholders.length;
     viewGen = { charId: c.id, current: 0, total: targets.length, view: targets[0]?.key, label: targets[0]?.label };
     render();
     let okCount = 0;
@@ -1582,14 +2159,14 @@ export function openProjectManager(ctx = {}) {
       render();
       try {
         const d = await api(`/api/projects/${ctx.project.id}/characters/views`,
-          withModelId('chars', { characterId: c.id, view: v.key }));
+          withCharImage({ characterId: c.id, view: v.key, requireReal: comfyReady }));
         if (Array.isArray(d?.characters)) Object.assign(c, d.characters.find((x) => x.id === c.id) || {});
         okCount += 1;
       } catch (e) { fails.push(`${v.label}：${e.message}`); }
     }
     viewGen = { charId: null, current: 0, total: 0 };
     const nowReady = charViewStatus(c).videoReady;
-    const tail = nowReady ? ' · 已可用于视频生成' : ' · 仍缺正面/面部参考，暂不可进视频';
+    const tail = nowReady ? ' · 已可用于视频生成' : ' · 仍缺正面/面部真实出图，暂不可进视频';
     if (fails.length) toast(`「${c.name}」${all ? '重生成' : '补全'}完成 ${okCount}/${targets.length}，失败 ${fails.join('；')}`, 'err');
     else toast(`「${c.name}」${all ? '已重生成' : '已补全'} ${okCount} 张定妆${tail}`, 'ok');
     await refresh();
@@ -1599,6 +2176,7 @@ export function openProjectManager(ctx = {}) {
   function renderOverview(body, m, s, prog) {
     const cover = readCover(ctx.project);
     const coverLabel = cover.source === 'comfyui' ? '✦ ComfyUI 生成封面'
+      : cover.source === 'ai' ? '✦ AI 生成封面'
       : cover.source === 'upload' ? '⇧ 本地上传封面' : '项目名称封面（默认）';
     body.innerHTML = `
       <div class="pmm-grid">
@@ -1613,8 +2191,9 @@ export function openProjectManager(ctx = {}) {
         <div class="cover-mgr">
           ${coverThumbHTML(ctx.project, false)}
           <div class="cover-mgr-info">
-            <div class="cf-note" style="margin:0 0 8px">当前：<b>${esc(coverLabel)}</b><br>未设置封面时，项目卡片会自动使用项目名称封面；可用 ComfyUI 生成或上传本地图片。</div>
-            <button class="btn primary" data-act="set-cover">🖼 设置项目封面</button>
+            <div class="cf-note" style="margin:0 0 8px">当前：<b>${esc(coverLabel)}</b><br>未设置封面时，项目卡片会自动使用项目名称封面；可用 AI 一键生成、ComfyUI 生成或上传本地图片。</div>
+            <div class="cf-row"><button class="btn primary" data-act="set-cover">🖼 设置项目封面</button>
+              <button class="btn" data-act="ai-cover">✦ AI 一键生成封面</button></div>
           </div>
         </div>
       </div>
@@ -1633,7 +2212,7 @@ export function openProjectManager(ctx = {}) {
         <div class="modal-grid">
           <div class="field"><label>策略</label><select id="pmm-strategy">${[['chapter', '按章节'], ['fixed', '按字数'], ['scene', '按场景段落']].map(([v, l]) => `<option value="${v}" ${m.split?.strategy === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
           <div class="field"><label>每集目标字数</label><input id="pmm-target" type="number" min="300" max="8000" value="${m.split?.targetChars || 1200}"></div>
-          <div class="field"><label>最多集数</label><input id="pmm-max" type="number" min="1" max="12" value="${m.split?.maxEpisodes || 4}"></div>
+          <div class="field"><label>最多集数</label><input id="pmm-max" type="number" min="1" max="600" value="${m.split?.maxEpisodes || 4}"></div>
           <div class="field"><label>原著</label><input value="${esc(m.source?.filename || '粘贴文本')} · ${m.source?.totalChars || 0} 字 · ${m.source?.chapterCount || 0} 章" readonly></div>
         </div>
         <div class="cf-row"><button class="btn" data-act="save-split">保存参数</button><button class="btn primary" data-act="resplit">↻ 按新参数重新分集（第 ② 步）</button></div>
@@ -1648,6 +2227,16 @@ export function openProjectManager(ctx = {}) {
     });
     body.querySelector('[data-act="set-cover"]').addEventListener('click', () => {
       openCoverDialog({ project: ctx.project, toast, comfy: ctx.comfy, onChanged: ctx.onChanged });
+    });
+    body.querySelector('[data-act="ai-cover"]').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = '✦ 生成中…';
+      try {
+        const d = await api(`/api/projects/${ctx.project.id}/cover/ai`, withCoverImage({}));
+        toast(d.message || '封面已生成', 'ok');
+        await ctx.onChanged?.();
+        await refresh();
+      } catch (err) { toast(err.message, 'err'); btn.disabled = false; btn.textContent = '✦ AI 一键生成封面'; }
     });
     body.querySelector('[data-act="favorite"]').addEventListener('click', () => manage('favorite'));
     body.querySelector('[data-act="archive"]').addEventListener('click', () => manage('archive'));
@@ -1677,12 +2266,12 @@ export function openProjectManager(ctx = {}) {
       <div class="cf-section"><h4>基础标识</h4>
         <div class="modal-grid">
           <div class="field"><label>剧名</label><input id="pb-title" value="${esc(b.title || '')}" placeholder="《xxxx》"></div>
-          <div class="field"><label>题材</label><input id="pb-genre" value="${esc(b.genre || '')}" placeholder="科幻悬疑"></div>
-          <div class="field"><label>目标受众</label><input id="pb-audience" value="${esc(b.audience || '')}" placeholder="青年观众"></div>
-          <div class="field"><label>总集数</label><input id="pb-total" type="number" min="0" max="64" value="${esc(b.totalEpisodes || '')}" placeholder="8（0 = 未设定）"></div>
-          <div class="field"><label>结局类型</label><input id="pb-ending" value="${esc(b.ending || '')}" placeholder="开放结局（OE）"></div>
-          <div class="field"><label>美术风格</label><input id="pb-art" value="${esc(b.artStyle || '')}" placeholder="写实电影画风"></div>
-          <div class="field"><label>整体调性</label><input id="pb-tone" value="${esc(b.tone || '')}" placeholder="暗黑"></div>
+          <div class="field"><label>题材</label><select id="pb-genre">${selectOptions(b.genre, GENRES)}</select></div>
+          <div class="field"><label>目标受众</label><select id="pb-audience">${selectOptions(b.audience, AUDIENCES)}</select></div>
+          <div class="field"><label>总集数</label><select id="pb-total">${selectOptions(b.totalEpisodes || '', EPISODE_COUNTS, '未设定')}</select></div>
+          <div class="field"><label>结局类型</label><select id="pb-ending">${selectOptions(b.ending, ENDINGS)}</select></div>
+          <div class="field"><label>美术风格</label><select id="pb-art">${selectOptions(b.artStyle, ART_STYLES)}</select></div>
+          <div class="field"><label>整体调性</label><select id="pb-tone">${selectOptions(b.tone, TONES)}</select></div>
         </div></div>
       <div class="cf-section"><h4>首集锚定主题</h4>
         <textarea id="pb-theme" rows="2" placeholder="如：日常秩序里的一道裂缝——所见非真。首集结尾用一次微小异象推翻官方定论…">${esc(b.firstEpisodeTheme || '')}</textarea></div>

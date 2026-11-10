@@ -219,7 +219,9 @@ test('节奏标签：把数字档案说成人话，固定长镜占比够高才�
 
 test('技能卡投影：色块 / 节奏 / 媒介齐全，不含长文本与函数', () => {
   const card = styleCard('zhangyimou');
-  assert.deepEqual(Object.keys(card).sort(), ['defaultPalette', 'director', 'icon', 'id', 'label', 'medium', 'paceLabel', 'palettes', 'tagline', 'workTitle'].sort());
+  // custom 是自定义风格的布尔标记（内置风格恒为 false），体积可忽略，保留在投影里供前端区分来源
+  assert.deepEqual(Object.keys(card).sort(), ['custom', 'defaultPalette', 'director', 'icon', 'id', 'label', 'medium', 'paceLabel', 'palettes', 'tagline', 'workTitle'].sort());
+  assert.equal(card.custom, false, '内置风格不是自定义');
   assert.equal(card.palettes.length, 4);
   assert.deepEqual(card.medium.length, 2, '卡片只带两个媒介，太长会挤爆网格');
   assert.ok(card.paceLabel.includes('单镜'));

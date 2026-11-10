@@ -566,3 +566,96 @@ test('从风格锁到导演包：一条命令保证每位角色都带多视图�
   assert.notEqual(p1.compare(placeholderFrame({ width: 864, height: 480 })), 0,
     '角色槽位不能是风景占位图');
 });
+
+/* ---------------------------------------------------------- 真实出图口径（占位图不算已生成） */
+
+const {
+  ensureCharacterPortraits,
+} = await import('../src/core/character-portrait.mjs');
+
+test('真实出图口径：characterViewStatus / projectPortraitStatus 不把 mock 占位图当已生成', () => {
+  const mockChar = {
+    id: 'c1', name: '林晚',
+    views: Object.fromEntries(ALL_VIEW_KEYS.map((k, i) => [
+      k, { url: `/a-${k}.svg`, provider: i < 3 ? 'mock' : 'comfyui' },
+    ])),
+    sheet: { url: '/sheet.svg', provider: 'mock' },
+  };
+  const s = characterViewStatus(mockChar, { scope: 'all' });
+  assert.deepEqual(s.placeholders, ['front', 'threeQuarter', 'side'], 'mock 自绘占位图单独计数');
+  assert.deepEqual(s.realHave, ['back', 'closeup']);
+  assert.equal(s.realComplete, false, '有占位图就不能算定妆齐全');
+  assert.equal(s.hasSheet, true);
+  assert.equal(s.hasRealSheet, false, '占位定妆板不算真实定妆板');
+
+  const st = projectPortraitStatus([mockChar], { scope: 'all' });
+  assert.equal(st.doneViews, 5);
+  assert.equal(st.realDoneViews, 2);
+  assert.equal(st.placeholderViews, 3);
+  assert.equal(st.realMissingViews, 3);
+
+  // 无 provider 的历史数据视为真实（只显式标 mock 的算占位）
+  const legacy = characterViewStatus({ views: { front: { url: '/f.png' } } }, { scope: 'core' });
+  assert.deepEqual(legacy.placeholders, []);
+  assert.deepEqual(legacy.realHave, ['front']);
+});
+
+test('真实出图口径：characterReadyForVideo 把占位图按缺失提示', () => {
+  const mockChar = {
+    id: 'c1', name: '林晚',
+    views: Object.fromEntries(ALL_VIEW_KEYS.map((k) => [k, { url: `/a-${k}.svg`, provider: 'mock' }])),
+  };
+  const ready = characterReadyForVideo(mockChar);
+  assert.equal(ready.ok, false, '正面全是占位图 → 不可进视频');
+  assert.equal(ready.hasPlaceholders, true);
+  assert.ok(ready.label.includes('不可用'));
+
+  // 正面真实 + 其余占位：可用，但如实提示占位
+  const mixed = characterReadyForVideo({
+    views: { front: { url: '/f.png', provider: 'comfyui' }, threeQuarter: { url: '/t.svg', provider: 'mock' } },
+  });
+  assert.equal(mixed.ok, true);
+  assert.ok(mixed.label.includes('占位图'), '有占位视图时 label 必须如实提示');
+});
+
+test('ensureCharacterPortraits：requireReal 无 ComfyUI 时如实失败，绝不回退占位图', async () => {
+  const m = { characters: [{ id: 'c1', name: '林晚', views: {}, palette: [] }], bible: {} };
+  const project = { id: 'p-reqreal', name: 'P', management: m, settings: {} };
+  const out = await ensureCharacterPortraits({
+    project, m, scope: 'core', onlyMissing: true, requireReal: true,
+  });
+  assert.equal(out.ok, false);
+  assert.ok(out.failed.length >= 1);
+  assert.ok(out.failed[0].includes('未配置 ComfyUI'), '失败原因必须指向配置指引');
+  assert.equal(m.characters[0].views?.front?.url || null, null, '不能悄悄写入占位图');
+});
+
+test('ensureCharacterPortraits：regenerateMock 把占位图视为未生成并重出', async () => {
+  const mockViews = Object.fromEntries(CORE_VIEW_KEYS.map((k) => [k, { url: `/x-${k}.svg`, provider: 'mock' }]));
+  const m = { characters: [{ id: 'c2', name: '阿宝', views: mockViews, palette: [] }], bible: {} };
+  const project = { id: 'p-regenmock', name: 'P', management: m, settings: {} };
+  // regenerateMock=false + onlyMissing → 占位图与真实图一样跳过
+  const skip = await ensureCharacterPortraits({ project, m, scope: 'core', onlyMissing: true, regenerateMock: false });
+  assert.equal(skip.skipped, CORE_VIEW_KEYS.length);
+  assert.equal(skip.generated, 0);
+  // regenerateMock=true → 占位图全部重出
+  const regen = await ensureCharacterPortraits({ project, m, scope: 'core', onlyMissing: true, regenerateMock: true });
+  assert.equal(regen.skipped, 0);
+  assert.equal(regen.generated, CORE_VIEW_KEYS.length);
+  assert.equal(m.characters[0].views.front.provider, 'mock', '无 ComfyUI 环境重出结果如实标注 mock');
+});
+
+test('onlyMissing=false：已真实出图的视图也会被覆盖重生成（全部重新生成）', async () => {
+  const real = Object.fromEntries(CORE_VIEW_KEYS.map((k) => [k, { url: `/real-${k}.png`, provider: 'comfyui' }]));
+  const m = { characters: [{ id: 'c_force', name: '沈父', views: real, palette: [] }], bible: {} };
+  const project = { id: 'p-force', name: 'P', management: m, settings: {} };
+  const out = await ensureCharacterPortraits({
+    project, m, scope: 'core', onlyMissing: false, regenerateMock: true,
+  });
+  assert.equal(out.skipped, 0, '强制重生成不允许跳过任何一张');
+  assert.equal(out.generated, CORE_VIEW_KEYS.length);
+  assert.equal(out.failed.length, 0);
+  // 没有 ComfyUI 的测试环境：结果如实标 mock，但确实替换了原真实图
+  assert.equal(m.characters[0].views.front.provider, 'mock');
+  assert.notEqual(m.characters[0].views.front.url, '/real-front.png');
+});

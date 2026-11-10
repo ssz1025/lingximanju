@@ -28,23 +28,37 @@ export function llmReadyLabel(settings) {
   return { name: `${llm.provider} · ${llm.model || '默认模型'}`, maskedKey: llm.maskedKey || '' };
 }
 
-/** 是否需要提示：文本模型未配置 或 本地 ComfyUI 工作流未导入 */
+/**
+ * 某个类别是否已有可用的接口档案。
+ * 板块绑定可以让「当前生效的镜像字段」为空，但仍能真实生成；因此优先看接口库，
+ * 只在后端未下发 interfaces（旧版本 / 不可达）时才回退到镜像字段。
+ */
+export function comfyKindReady(comfy, kind) {
+  const list = Array.isArray(comfy?.interfaces) ? comfy.interfaces : [];
+  if (list.some((e) => e && e.kind === kind)) return true;
+  return kind === 'image' ? Boolean(comfy?.imageWorkflow) : Boolean(comfy?.videoWorkflow);
+}
+
+/** 是否需要提示：文本模型未配置 或 本地 ComfyUI 没有任何可用接口 */
 export function configNeedsAttention(settings, comfy) {
   const llmOk = llmReady(settings);
-  const comfyOk = Boolean(comfy?.imageWorkflow || comfy?.videoWorkflow);
+  const comfyOk = comfyKindReady(comfy, 'image') || comfyKindReady(comfy, 'video');
   return !llmOk || !comfyOk;
 }
 
 export function configDetail(settings, comfy) {
   const llmOk = llmReady(settings);
   const ready = llmOk ? llmReadyLabel(settings) : null;
+  const comfyImageOk = comfyKindReady(comfy, 'image');
+  const comfyVideoOk = comfyKindReady(comfy, 'video');
+  const count = Array.isArray(comfy?.interfaces) ? comfy.interfaces.length : 0;
   return {
     llmOk,
     llmText: llmOk ? `${esc(ready.name)} · ${esc(ready.maskedKey)}` : '未配置 · 当前使用内置 Mock 模板',
-    comfyImageOk: Boolean(comfy?.imageWorkflow),
-    comfyVideoOk: Boolean(comfy?.videoWorkflow),
-    comfyText: comfy?.baseUrl ? `本地服务 ${esc(comfy.baseUrl)}` : '默认 http://127.0.0.1:8188',
-    comfyReady: Boolean(comfy?.imageWorkflow && comfy?.videoWorkflow),
+    comfyImageOk,
+    comfyVideoOk,
+    comfyText: `${comfy?.baseUrl ? `本地服务 ${esc(comfy.baseUrl)}` : '默认 http://127.0.0.1:8188'}${count ? ` · ${count} 份接口档案` : ''}`,
+    comfyReady: comfyImageOk && comfyVideoOk,
   };
 }
 

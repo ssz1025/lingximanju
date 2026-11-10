@@ -5,15 +5,24 @@
 import { uid, writeAsset, readAsset } from './store.mjs';
 import { hash, storyboardSVG, characterSVG, characterViewSVG, characterSheetSVG, transitionSVG, posterSVG } from './artwork.mjs';
 import { parseWorkflow, runWorkflow } from './comfyui.mjs';
+import { resolveInterface } from './comfy-config.mjs';
 import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './knowledge.mjs';
 import { matchAll as matchVoicesForCharacters } from './voices.mjs';
 import { normalizeFilmPolicy } from './film-policy.mjs';
 import { skillAesthetic, getDirectorSkill } from './director-skills.mjs';
 import { aestheticPrompt } from './director-styles.mjs';
+import {
+  SCREENPLAY_SCHEMA, SCREENPLAY_GUIDE, SCREENPLAY_PROJECT_GUIDE, SCREENPLAY_FORMAT_GUIDE,
+  screenplayGuide, isEpisodeScreenplay, enrichScreenplay, guessInterior, parseScriptLine,
+} from './screenplay.mjs';
+
+// 剧本写作准则的单一来源在 core/screenplay.mjs；这里继续导出，
+// 保持 `import { SCREENPLAY_GUIDE } from providers` 的既有调用方与测试不变。
+export { SCREENPLAY_GUIDE, SCREENPLAY_PROJECT_GUIDE, SCREENPLAY_FORMAT_GUIDE, SCREENPLAY_SCHEMA };
 
 const SCHEMAS = {
-  screenplay: '剧本：{title, genre, logline, style, characters:[{name,role,appearance}], scenes:[{id,location,time,summary,script:[字符串]}]}',
+  screenplay: SCREENPLAY_SCHEMA,
   events: '事件图谱：{events:[{title,summary,processChain:[字符串],scenes:[{title,location,time,summary}]}]}',
   shots: '分镜表：{shots:[{shotNo,size,angle,movement,ffDesc,motionDesc,audioDesc,duration,characters:[名称]}]}',
   characters: '角色设定：{characters:[{name,role,appearance,palette:[颜色],traits:[字符串]}]}',
@@ -24,8 +33,12 @@ const SCHEMAS = {
   charExtract: '角色抽取：{characters:[{name,aliases:[string](原文中出现过的别称/昵称/职务，同一实体的多种称呼都要列出),role,gender,age,personality,appearance,hair,costume,props,staticFeatures:string(固定特征：脸型五官、发型发色、体型、肤色等不随场景变化的外貌特征，40~80 字，须具体可视化，不要写「气质出众」这类抽象词),dynamicFeatures:string(可变特征：服装、配饰、随身道具等会随场景变化的造型元素，30~60 字，须具体到颜色与款式),style:string(基本设定风格：综合该角色的提取信息输出一句话造型风格总结，须同时覆盖 ①题材/画风气质（如古风玄幻、赛博朋克、校园清新）②造型方向（发型、服装、轮廓等关键特征）③主配色倾向与整体氛围；30~40 字，风格统一便于跨镜头定妆，例：「古风玄幻 · 清冷剑修，白衣墨发佩长剑，水墨淡彩冷色调」),relations:[{target,label}],palette:[颜色](该角色的主色，用于定妆配色，须与其他角色明显不同),viewPrompt:string(定妆画面提示词：一句话概括该角色的标志性外观，20~40 字，供生成三视图参考),evidence:[{quote:string(该角色在输入原著片段中逐字出现的一句完整原文，不得超过 60 字),kind:string(mention|dialogue|description)}](证据引用：每个角色 1~3 条，全部来自下方「原著片段」，用于回溯校验与幻觉过滤)]}',
   // 角色抽取的推理准则：对应 ViMax character_extractor.py 的 Guidelines 段
   charExtractGuide: [
+    '按出场权重排序输出：先主角（推动主线、全文出场最多的人），再核心配角，最后次要角色。主角绝不能因为「片段里没有直接对白」或「只以身份指代出现」而被漏掉。',
     '只依据输入的原著片段抽取角色，不得引入片段之外的设定；片段未写明但必需的外观特征可以依据题材与上下文合理补全，但不得与原文矛盾。',
-    '同一实体在原文中出现的所有称呼（姓名、昵称、职务、称谓）都要归并到同一个角色，其余写法列入 aliases。',
+    'name 必须是原文中真实出现过的「人物称呼」：姓名、绰号、职务+姓（如「老周」「沈父」「魏掌柜」），或以稳定身份指代的角色（如「穿灰风衣的刑警队长」）。',
+    '严禁把下列内容当作角色：动作或动词短语（如「回头」「开口」「冲他」「朝林外」）、身体部位（手/眼/脸/嘴角）、物件（刀光/剑光/匾额）、方位与时间（身后/片刻）、天气与环境（雨水/风声）、泛称与代词（众人/对方/他/她/他们）。这些词即使紧挨着「说/看/站」等动词，也不是角色。',
+    '名字必须是一个完整的人的称呼：不得把人名和紧随其后的字粘在一起。例如原文「沈青崖不动声色」的角色是「沈青崖」，不是「沈青崖不」；「魏残始终站在原地」的角色是「魏残」，不是「魏残始终」。',
+    '同一实体在原文中出现的所有称呼（姓名、昵称、职务、称谓）都要归并到同一个角色，其余写法列入 aliases；不要为同一人物输出多条。',
     '原文未点名、以身份或外貌指代的关键角色，也要提取并用「身份+外貌特征」命名（如「穿灰风衣的刑警队长」）。',
     '与主线无关的背景群众不单独建角色。',
     'staticFeatures 只写跨场景恒定的外貌体型，dynamicFeatures 只写会变的服饰配饰；两者都不要写性格、身份定位或人物关系。',
@@ -50,10 +63,17 @@ const SCHEMAS = {
   voiceAssign: '音色分配：{assignments:[{characterName:string(角色名，须与原输入一致), voiceId:string(音色库中的音色 id), voiceName:string(音色名), reason:string(一句话匹配理由，说明性别/年龄/性格/定位如何契合)}]}（为每个输入角色匹配恰好一个音色，voiceId 必须来自提供的音色库；无合适音色时可省略该角色）',
   // 导演阐述：导演 Agent 在跑六步之前给出的全片视听纲领，会作为一致性约束喂给分镜与打包
   directorTreatment: '导演阐述：{title:string(本片导演方案标题), logline:string(一句话故事核心), tone:string(情绪基调), visualStyle:string(画面风格与色彩策略), pacing:string(叙事节奏与每集时长分配), shotStrategy:string(景别/运镜/轴线策略), audioStrategy:string(对白、环境声与音色策略), continuityRules:[string,3~5条跨镜头一致性硬约束], risks:[string,2~3条制作风险与规避办法]}（全部使用简体中文，须依据输入的项目设定与原著梗概，不要编造未提供的角色名）',
+  // 导演风格设计师对话：多轮引导用户收集信息，逐步补全风格草稿，ready 后可直接保存为自定义导演风格
+  styleForge: '导演风格设计师对话：{reply:string(对用户的自然回复：先用一句话确认已收集到的要点，再只追问 1~2 个最关键的缺口，语气专业友好), draft:object(风格草稿——把用户本轮提到的信息合并进上一轮草稿后输出**完整草稿**，未提及的字段保持原值，不要删除已有字段。可用字段：label(风格名), director(参考导演/流派), icon(一个 emoji), tagline(一句话卖点), summary(风格概述), tone(情绪基调), palettes:[{key,name,hex,mood}](1~4 组主色调，hex 为 #RRGGBB), defaultPalette, colorRule(主色占比规则), light(光线方案), composition(构图方案), camera(运镜方案), texture(质感关键词), taboos:[string](画面禁忌), medium:[string](自然媒介：风雨雪雾等), pace:{minShotSec,maxShotSec,fixedShotRatio,mode}(节奏：mode 取 slow/fragment/kinetic/ritual/breath/contrast/silence-burst/mixed), stylePrompt(正向风格提示词,拼接进每张图), negativePrompt(负向提示词), highlights:[string](4 个高亮标签), continuityRules:[string](3~4 条连戏规则), risks:[string](2~3 条风险), audioStrategy(声音策略), visualStyle(视觉风格总结), shotStrategy(景别策略), pacing(节奏描述)}, ready:boolean(草稿是否已足够完整可直接保存——至少要有 label、palettes、stylePrompt、light、composition、camera、tone), suggestions:[string,2~3条用户可直接点击的下一步建议]}（输出该 JSON 对象本身，不要加外层键名包裹）',
 };
 
-const THEMES = [
-  {
+/**
+ * 单集剧本的写作准则已迁到 `core/screenplay.mjs`（与整剧准则放在一起维护）。
+ * 这里保留注释作为导航：旧实现是「一集一段自由文本」，缺人物动机 / 场景目标 /
+ * 情绪节拍，导致模型只写 3 场概述就收工；新准则要求逐场写满戏剧结构。
+ */
+
+const THEMES = [  {
     key: 'noir', test: /侦探|悬疑|案|凶|警|雨夜|推理|谜|罪/,
     genre: '悬疑 / 黑色电影', styleHint: 'noir',
     chars: [
@@ -123,52 +143,497 @@ function shortTitle(idea = '') {
   return clean.length > 14 ? `${clean.slice(0, 13)}…` : (clean || '未命名故事');
 }
 
+/** 风格对话零 Key 兜底用：中文颜色词 → 色号（与 director-style-store 的校验兜底同源语义） */
+const COLOR_TABLE = {
+  '红': '#C81D25', '赤': '#B83227', '橙': '#E2571F', '金': '#C89A4B', '黄': '#D9A441',
+  '绿': '#2F4F3A', '青': '#5E8A8C', '蓝': '#1F3B5C', '紫': '#6B3E86', '粉': '#D98BA3',
+  '黑': '#12100F', '白': '#DCE0E2', '灰': '#5A6068', '褐': '#8B6B4A', '棕': '#6B5842',
+  '银': '#A8B0B8', '墨': '#1C1C1C', '米': '#E8DCC0', '霓虹': '#D99A3C', '青灰': '#8A9A9E',
+};
+
+/* ------------------------------------------------------------------ 零 Key 剧本
+ * 旧兜底把「分集梗概」原样塞进 script，产出「3 场概述 + 一段原文」：
+ * 没有场次头、没有对白、没有目标 / 冲突 / 转折，用户看到的就是「不够详细」。
+ * 新兜底把原文**转写**成统一格式（v2）：分场 → 场次头 → 动作 / 画面 / 旁白 / 对白行，
+ * 再从原文句子推导 objective / conflict / turn / beat / keyProp / transition。
+ * 只做转写与结构推导，不虚构剧情——零 Key 时「详尽但不编」。
+ */
+const clip = (v, n) => { const t = String(v ?? '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+
+/** 地点词表：原文里出现过的具体场所优先当作 location，比「段落 1」可用得多 */
+const PLACE_WORDS = ['办公室', '办公区', '会议室', '教室', '走廊', '楼道', '仓库', '酒楼', '客栈', '厨房', '卧室',
+  '书房', '医院', '警局', '派出所', '档案室', '公司', '学校', '操场', '天台', '码头', '车站', '机场', '地铁',
+  '酒吧', '咖啡馆', '茶馆', '客厅', '宿舍', '网吧', '车库', '后院', '柴房', '屋内', '店内', '街', '巷', '路口',
+  '桥', '河边', '山坡', '广场', '院子', '门口', '城门', '山道',
+  // 古装 / 年代戏常见场所：小说改编最容易缺的就是这类词，缺了就只能退回「段落 1」
+  '破庙', '庙', '寺', '道观', '祠堂', '衙门', '牢房', '驿馆', '酒肆', '茶楼', '书院', '绣楼', '闺房',
+  '堂屋', '厢房', '庭院', '廊下', '渡口', '长街', '城墙', '军营', '帐篷', '船舱', '画舫', '当铺', '药铺',
+  '钱庄', '赌坊', '米铺', '井台', '灶房', '树林', '竹林', '溪边', '粮仓', '地窖', '密道', '山洞'];
+/** 关键道具词表：命中即写入 keyProp，供分镜 / 出图时当视觉母题 */
+const PROP_WORDS = ['信', '照片', '相机', '枪', '刀', '钥匙', '手机', '怀表', '卷宗', '账本', '酒', '烟', '伞',
+  '车', '电脑', '灯', '镜子', '戒指', '玉佩', '剑', '药', '钱袋', '信封', '名片', '皮箱', '箱子', '背包', '文件',
+  // 古装 / 年代戏道具：铜钱、银两、令牌这类小物件往往就是全片的视觉母题
+  '铜钱', '银两', '银子', '玉', '镯', '簪', '书信', '密信', '令牌', '契约', '婚书', '灯笼', '火折', '蜡烛',
+  '手帕', '绢', '面具', '琴', '笛', '酒壶', '茶盏', '药包', '血书', '纸钱', '印章', '图纸', '地图', '绳', '锁'];
+/** 冲突兜底句：按场次轮换，避免整部剧每场都写「谁都不肯先开口」 */
+const CONFLICT_FALLBACK = [
+  '对方不肯配合，话到一半就停住',
+  '局面僵住，谁都不肯先开口',
+  '时间在催，可关键的人还没到',
+  '越接近答案，阻力越具体',
+];
+/** 转折兜底句：同样轮换，避免每场都写「以悬念收束」 */
+const TURN_FALLBACK = ['本场以悬念收束', '真相被推近一步', '主动权换了人', '一句话把退路堵死'];
+/** 转折句 / 冲突句的线索词：用来从原文里挑真正承担戏剧功能的句子 */
+const TURN_HINT = /但|却|然而|突然|忽然|没想到|原来|竟|才发现|不料|谁知|结果|只见/;
+const CONFLICT_HINT = /不|没|别|拒绝|拦|挡|僵|沉默|冷笑|吼|质问|争|吵|推开|挣脱|威胁|瞪|咬牙|否则/;
+const TIME_HINTS = [
+  ['清晨', /清晨|早晨|黎明|破晓|天刚亮/],
+  ['午后', /午后|正午|中午|下午/],
+  ['黄昏', /黄昏|傍晚|夕阳|落日|天色暗/],
+  ['深夜', /深夜|凌晨|半夜/],
+  ['夜', /夜/],
+];
+const MOOD_BY_THEME = { noir: '冷、压抑、悬着', scifi: '疏离、警觉', youth: '明亮、微涩', general: '克制、暗流' };
+
+/** 中文断句：引号内的标点不断句（`「这封信是谁送来的？」他低声问。` 必须是一句）；保留原句末标点 */
+function splitSentences(text = '') {
+  const src = String(text || '').replace(/\r\n?/g, '\n');
+  const out = [];
+  let buf = '';
+  let depth = 0;
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    // 引号内的换行不断句：一段台词被硬回车断开时不能拆成两段
+    if (ch === '\n') { if (!depth) { out.push(buf); buf = ''; } continue; }
+    if ('「“‘'.includes(ch)) depth += 1;
+    buf += ch;
+    if ('」”'.includes(ch)) depth = Math.max(0, depth - 1);
+    if (!depth && '。！？!?；;'.includes(ch)) { out.push(buf); buf = ''; continue; }
+    // 小说常写「…没还。」刘左皱眉：「…」」：引导台词结束却没有句号。
+    // 引号后紧跟着**下一句台词**时按两句处理，否则整段会被当成一句、台词归属也会串。
+    if (!depth && '」”'.includes(ch)) {
+      const ahead = src.slice(i + 1, i + 14);
+      if (!/[。！？!?；;]/.test(ahead) && /[「“"]/.test(ahead)) { out.push(buf); buf = ''; }
+    }
+  }
+  if (buf) out.push(buf);
+  return out.map((s) => s.replace(/\s+/g, ' ').trim()).filter((s) => s.length >= 2);
+}
+
+/** 「第一章 雨夜」「段落 12」这类拆分标签不是地点：去掉前缀后再当兜底场景名 */
+function cleanSourceLabel(v = '') {
+  return String(v || '')
+    .replace(/^第\s*[0-9一二三四五六七八九十百千]+\s*[章回节集卷篇话]\s*[·.、:：\-—]?\s*/, '')
+    .replace(/^段落\s*\d+\s*[·.、:：\-—]?\s*/, '')
+    .trim();
+}
+
+/** 拼接断句单元：前一段没有句末标点时补一个「。」，避免出现「…(1)刘左就是…」这种粘连 */
+function joinUnits(units = []) {
+  return units.reduce((acc, s) => {
+    if (!acc) return s;
+    return /[。！？!?；;，,、…」”]$/.test(acc) ? `${acc}${s}` : `${acc}。${s.replace(/^[\s，,、]+/, '')}`;
+  }, '');
+}
+
+/** 把一段原文按句分组，均分成 want 段；短句不够时按逗号再切（并保留逗号，拼接后仍是通顺原文） */
+function splitIntoParts(text = '', want = 2) {
+  let units = splitSentences(text);
+  const n = Math.max(1, Math.min(want, units.length || 1));
+  // 原文只有一两句时按逗号细化，否则「每集至少 2 场」在短集上永远做不到
+  if (units.length < want) {
+    const fragments = String(text || '').split(/[，,、]/).map((s) => s.replace(/\s+/g, ' ').trim())
+      .filter((s) => s.length >= 2);
+    const finer = fragments.map((s, i) => (i < fragments.length - 1 ? `${s}，` : s));
+    if (finer.length > units.length) units = finer;
+  }
+  if (!units.length) return [''];
+  const per = Math.ceil(units.length / n);
+  const parts = [];
+  for (let i = 0; i < units.length; i += per) parts.push(joinUnits(units.slice(i, i + per)).trim());
+  while (parts.length > n) {
+    const tail = parts.pop();
+    parts[parts.length - 1] = joinUnits([parts[parts.length - 1], tail]);
+  }
+  return parts;
+}
+
+/**
+ * 引号里的内容不一定是对白：中文小说常用引号标绰号、术语、口号（「危险的屁」）。
+ * 只保留像"说出口的话"的引号内容，宁可少一句假台词，也不要让角色念名词。
+ */
+function isSpeech(text = '') {
+  const t = String(text).trim();
+  if (t.length < 4) return false;
+  if (/[？?！!]/.test(t)) return true;
+  if (/[我你您他她它咱]/.test(t)) return true;
+  if (/[吗呢吧啊呀嘛哦哎嗯]/.test(t)) return true;
+  if (/[，。…—]/.test(t) && t.length >= 8) return true;
+  return t.length >= 12;
+}
+
+/** 取出原文里像对白的引号内容 */
+function pickQuotes(text = '') {
+  return [...String(text).matchAll(/[「“"]([^」”"]{2,60})[」”"]/g)]
+    .map((m) => m[1].trim()).filter(Boolean).filter(isSpeech);
+}
+
+function detectTime(text = '', index = 0) {
+  for (const [label, re] of TIME_HINTS) if (re.test(text)) return label;
+  return ['夜', '清晨', '午后', '黄昏', '深夜'][index % 5];
+}
+
+/** 只认真实时间线索，没有就返回空串（用来判断「本场自己写了时间」还是「只能沿用本集」） */
+function timeHint(text = '') {
+  for (const [label, re] of TIME_HINTS) if (re.test(text)) return label;
+  return '';
+}
+
+/** 去掉引号与首尾标点，让「目标 / 冲突 / 转折」读起来像一句话而不是原文碎片 */
+function plain(t = '') {
+  return String(t || '').replace(/[「」“”"]/g, '')
+    .replace(/^[\s，。、；：！？]+|[\s，。、；：！？]+$/g, '').trim();
+}
+
+function detectPlace(text = '', fallback = '') {
+  // 取**最早出现**的地点词：词表顺序只用于同位置并列时去重，不代表优先级
+  let best = '';
+  let pos = Infinity;
+  for (const w of PLACE_WORDS) {
+    const p = String(text).indexOf(w);
+    if (p >= 0 && p < pos) { pos = p; best = w; }
+  }
+  return best || fallback || '';
+}
+
+/**
+ * 引号对白归属：在这句台词**之前**的原文里找最后被提到的角色，
+ * 而不是「本段出现过谁」——否则 `「这封信是谁送来的？」他低声问。`
+ * 会被错判成后一句才出场的人说的。
+ */
+function speakerBefore(fullText = '', quote = '', cast = []) {
+  const at = String(fullText).indexOf(String(quote));
+  if (at <= 0) return '';
+  const head = String(fullText).slice(0, at);
+  let best = '';
+  let pos = -1;
+  for (const c of cast) {
+    if (!c.name) continue;
+    const p = head.lastIndexOf(c.name);
+    if (p > pos) { pos = p; best = c.name; }
+  }
+  return best;
+}
+
+/** 补句末标点：断句时为了拼摘要去掉了尾部标点，写回正文行时要补上 */
+function endSentence(t = '') {
+  const s = String(t).trim();
+  return /[。！？…」”!?]$/.test(s) ? s : `${s}。`;
+}
+
+/**
+ * 零 Key 的单场生成：把 partText 转写成场次对象。
+ * 行序遵循「场次头 → 动作 / 旁白 / 画面 → 对白」，原文引号内的句子直接当对白。
+ */
+function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fallbackLocation = '', theme }) {
+  const sentences = splitSentences(partText);
+  const source = partText || String(ep.summary || '');
+  const episodeText = String(ep.excerpt || ep.text || '') || source;
+  // 地点只从本场原文里找；本场没有地名词时退回本集统一地点（同一集前后场应在同一个空间）。
+  // 「庙」与「破庙」这类互为子串的算同一处，取更具体的那个，否则同一集会在两个名字间跳。
+  const detected = (() => {
+    const local = detectPlace(source);
+    const epPlace = String(ep.place || '');
+    if (!local) return epPlace;
+    if (!epPlace) return local;
+    if (epPlace.includes(local) || local.includes(epPlace)) return epPlace.length >= local.length ? epPlace : local;
+    return local;
+  })();
+  const location = detected || clip(cleanSourceLabel(fallbackLocation || ep.title), 24) || '未指定场景';
+  // 时间：本场原文自己写了「夜里 / 午后」就以它为准（同一集本来就可以跨时间），
+  // 没写才沿用本集统一结论，再没有才按集号轮换。
+  const time = timeHint(source) || String(ep.timeLabel || '')
+    || detectTime(`${episodeText}。${ep.title || ''}。${ep.summary || ''}`, (Number(ep.no) || 1) - 1);
+  // 只有真的识别出地点才敢判内外景；退回集名时不猜（写成「内外景」）
+  const interior = detected ? guessInterior(detected, source) : '内外景';
+  // 人物：本场原文里出现过的角色优先；都没出现时按场次轮换，保证镜头里有具体的人
+  const present = cast.filter((c) => c.name && source.includes(c.name)).slice(0, 3);
+  const speakers = (present.length ? present : [cast[index % Math.max(1, cast.length)]].filter(Boolean)).slice(0, 3);
+  const lead = speakers[0]?.name || '旁白';
+
+  const lines = [`【${time} · ${location}】`];
+  let dialogue = 0;
+  sentences.slice(0, 10).forEach((s, si) => {
+    // 引号里就是台词时用 pickQuotes；「说完就停住」这种句子（「埋了才好记。」）缺少问号 /
+    // 人称，会被 isSpeech 判成非台词，这里再用「说 / 道 / 问 / 答 + 冒号 + 引号」补一次识别
+    const quotes = pickQuotes(s).length
+      ? pickQuotes(s)
+      : (/[^。！？\n]{0,12}[：:]\s*[「“"]/.test(s)
+        ? [...s.matchAll(/[「“"]([^」”"]{2,60})[」”"]/g)].map((m) => m[1].trim()).filter((t) => t.length >= 2)
+        : []);
+    if (quotes.length) {
+      // 归属顺序：本句台词之前最近被提到的角色 → 本场原文 → 整集原文。
+      // 先看「本句里出现过谁」是错的：同一句既写「沈砚翻出铜钱」又写「刘左皱眉」时会把台词判给沈砚。
+      const who = speakerBefore(s, quotes[0], cast)
+        || speakerBefore(source, quotes[0], cast)
+        || speakerBefore(episodeText, quotes[0], cast)
+        || speakers.find((c) => s.includes(c.name))?.name || lead;
+      for (const q of quotes.slice(0, 2)) { lines.push(`${who}：「${clip(q, 60)}」`); dialogue += 1; }
+      // 去掉引号后剩下的动作描写：顺手清掉「低声说：」「刘左皱眉：」这类引导语残片
+      const rest = s.replace(/[「“"][^」”"]*[」”"]/g, '')
+        .replace(/[^，。；！？：]{0,10}[：:]/g, '')
+        .replace(/[，、；：]{2,}/g, '，')
+        .replace(/[，、；：]+(?=。)/g, '')
+        .replace(/^[\s，。、；：!？—-]+|[\s，。、；：!？—-]+$/g, '')
+        .trim();
+      if (rest.length >= 6) lines.push(`动作：${endSentence(clip(rest, 56))}`);
+      return;
+    }
+    if (si % 3 === 2) lines.push(`画面：${endSentence(clip(s, 56))}`);
+    else if (si % 3 === 1) lines.push(`旁白：${endSentence(clip(s, 56))}`);
+    else lines.push(`动作：${endSentence(clip(s, 56))}`);
+  });
+  // 场次收尾：本集最后一场落到 hook（有引号就写成台词，没有就当画面悬念）
+  const isLastOfEpisode = index === total - 1;
+  const norm = (t) => String(t || '').replace(/[^\u4e00-\u9fa5]/g, '');
+  // 已经写进正文的句子：hook / 摘要常常就是其中最后一句，重复写一遍会让剧本末尾出现同句两次
+  const spoken = lines.map(norm).filter((x) => x.length >= 4);
+  const dup = (t) => {
+    const k = norm(t);
+    return k.length >= 4 && spoken.some((x) => x.includes(k) || k.includes(x));
+  };
+  if (isLastOfEpisode && ep.hook) {
+    const hq = pickQuotes(ep.hook);
+    if (hq.length && !dup(hq[0])) {
+      const who = speakerBefore(String(ep.hook), hq[0], cast) || lead;
+      lines.push(`${who}：「${clip(hq[0], 60)}」`); dialogue += 1;
+    }
+    else if (!hq.length) {
+      // hook 可能被上游按字数硬截断，留下「」沈砚把……「那你告诉」这种断引号：
+      // 画面行不能带引号残片，否则读起来像排版错误
+      const h = String(ep.hook).replace(/[「」“”"]/g, '')
+        .replace(/[^，。；！？：]{0,10}[：:]/g, '')
+        .replace(/^[\s，。、；：!？—-]+/, '').trim();
+      if (h && !dup(h)) lines.push(`画面：${endSentence(clip(h, 56))}`);
+    }
+  }
+  // 行数太少且没有画面行时补一条，保证「每场都能被拍出来」；已有画面就不重复堆。
+  // 首场可以用本集摘要起一个概述性画面；后面几场改用空镜，避免每场都写同一句摘要。
+  if (lines.length < 4 && !lines.some((l) => /^画面[:：]/.test(l))) {
+    const pic = index === 0 ? clip(ep.summary || source || '环境保持连续', 56) : '';
+    if (pic && !dup(pic)) lines.push(`画面：${endSentence(pic)}`);
+    else lines.push(`画面：${location}空镜 · ${time}，声音先入。`);
+  }
+
+  const turnLine = sentences.find((s) => TURN_HINT.test(s));
+  const conflictLine = sentences.find((s) => CONFLICT_HINT.test(s));
+  // 冲突句与转折句撞在一起时换一句当转折；也尽量别用首句（首句已经是本场目标 / 摘要）
+  const turnPick = turnLine && turnLine !== conflictLine
+    ? turnLine
+    : (sentences.find((s) => s !== conflictLine && s !== sentences[0] && s.length >= 6)
+      || sentences.find((s) => s !== conflictLine && s.length >= 6));
+  // 道具按「在原文里出现的先后」取，而不是词表顺序：先出现的东西才是这一场的视觉母题；
+  // 同时剔除互为子串的词（「信」与「书信」），否则 keyProp 会写成「信、书信」
+  const props = (() => {
+    const hits = PROP_WORDS
+      .map((w) => ({ w, at: source.indexOf(w) }))
+      .filter((x) => x.at >= 0)
+      .sort((a, b) => a.at - b.at || b.w.length - a.w.length);
+    const picked = [];
+    for (const { w } of hits) {
+      if (picked.some((p) => p.includes(w) || w.includes(p))) continue;
+      picked.push(w);
+      if (picked.length >= 2) break;
+    }
+    return picked;
+  })();
+  // 目标锚点：本集最后一场用 hook（这一场要把钩子抛出来），但正文素材够多时优先用本场首句，
+  // 只有「一场戏就把整集演完」时才拿 hook 当目标，否则目标会写成旁白复述
+  const anchorSource = isLastOfEpisode && ep.hook && sentences.length >= 3
+    ? ep.hook
+    : (sentences[0] || ep.hook || ep.summary || '当下的处境');
+  // 只取第一个「实词分句」当锚点：「清晨，沈砚在破庙里翻出…」→「沈砚在破庙里翻出…」，
+  // 否则目标会写成「弄清『清晨，…低声说：刘…』的原委」这种读不通的句子
+  const clauseOf = (t = '') => {
+    const parts = plain(t).split(/[，,、：:；;。]/).map((x) => x.trim()).filter((x) => x.length >= 4);
+    return parts[0] || plain(t);
+  };
+  const anchor = clip(clauseOf(anchorSource), 20);
+  // 冲突 / 转折要写成「一句话」，不是把整句原文（含「低声说：」）搬过来：
+  // 先取承担该功能的分句，再清掉引导语残片
+  const stripCue = (t = '') => plain(t).replace(/[^，。；！？：]{0,10}[：:]/g, '')
+    .replace(/^[\s，。、；：]+|[\s，。、；：]+$/g, '').trim();
+  const clauseWith = (t = '', re = null) => {
+    const parts = plain(t).split(/[，,、；;。]/).map((x) => x.trim()).filter((x) => x.length >= 3);
+    return (re ? parts.find((p) => re.test(p)) : '') || parts[0] || '';
+  };
+  const conflictPhrase = conflictLine ? (clauseWith(conflictLine, CONFLICT_HINT) || clauseOf(conflictLine)) : '';
+  const beat = total === 1
+    ? '建置 → 施压 → 抛出钩子'
+    : index === 0 ? '建置 → 扰动'
+      : isLastOfEpisode ? '逼到墙角 → 抛出钩子'
+        : '试探 → 施压 → 揭示';
+  return {
+    id: `SC${String(index + 1).padStart(2, '0')}`,
+    episodeNo: Number(ep.no) || 1,
+    no: index + 1,
+    location, time, interior,
+    durationSec: Math.max(12, Math.min(90, lines.length * 5)),
+    characters: speakers.map((c) => c.name).filter(Boolean),
+    summary: clip(joinUnits(sentences.slice(0, 2)) || ep.summary || '承接上文，推进冲突', 90),
+    objective: index === 0
+      ? clip(`弄清「${anchor}」的原委`, 80)
+      : clip(`把「${clip(clauseOf(sentences[0]) || anchor, 18)}」推到不可回头`, 80),
+    conflict: clip(stripCue(conflictPhrase) || CONFLICT_FALLBACK[index % CONFLICT_FALLBACK.length], 60),
+    turn: clip(stripCue(turnPick ? clauseWith(turnPick) : '') || TURN_FALLBACK[index % TURN_FALLBACK.length], 60),
+    beat,
+    mood: MOOD_BY_THEME[theme?.key] || MOOD_BY_THEME.general,
+    keyProp: props.join('、'),
+    props,
+    transition: ['切至', '叠影', '黑场', '声音先入', '动作接动作'][index % 5],
+    script: lines,
+    dialogueCount: dialogue,
+  };
+}
+
+/** 角色表：沿用项目角色，缺字段时给可写作的最小集合 */
+function mockCast(vars = {}, theme) {
+  const src = Array.isArray(vars.characters) && vars.characters.length ? vars.characters : theme.chars;
+  return src.slice(0, 6).map((c, i) => ({
+    name: c.name,
+    role: c.role || (i === 0 ? '主角' : '配角'),
+    age: c.age || '', gender: c.gender || '',
+    personality: c.personality || '',
+    appearance: c.appearance || `${c.name}的造型待定`,
+  })).filter((c) => c.name);
+}
+
+/** 整剧兜底：逐集展开成 2~3 场，覆盖全部分集（最多 12 集，与写作准则一致） */
+function mockProjectScreenplay(vars = {}, theme) {
+  const eps = (Array.isArray(vars.episodes) ? vars.episodes : []).filter((e) => e && (e.no || e.title));
+  const cast = mockCast(vars, theme);
+  const MAX_EPISODES = 12;
+  const covered = eps.slice(0, MAX_EPISODES);
+  const scenes = [];
+  // 分集没带原文（历史项目只存了集名 + 梗概）时，把整段小说按集数均分回填：
+  // 顺序基本对齐，内容比一句梗概厚得多，兜底剧本才不会整集只有三行
+  const shared = String(vars.novelExcerpt || vars.sourceText || '').trim();
+  const sharedParts = shared && covered.length > 1 ? splitIntoParts(shared, covered.length) : [];
+  covered.forEach((ep, ei) => {
+    const text = String(ep.excerpt || ep.text || '').trim() || sharedParts[ei] || String(ep.summary || '');
+    // 本集统一地点与时间：某一场没写地点/时间线索时沿用本集结论，避免同集内乱跳
+    const place = detectPlace(text) || detectPlace(String(ep.title || '')) || '';
+    const timeLabel = detectTime(`${text}。${ep.title || ''}。${ep.summary || ''}`, (Number(ep.no) || 1) - 1);
+    const brief = { ...ep, place, timeLabel };
+    // 按「每场约 5 句」切场：切太碎会退化成 3 行一场的假详细，切太粗又回到一集一场
+    const sentences = splitSentences(text).length;
+    const want = Math.max(2, Math.min(4, Math.ceil(sentences / 5)));
+    const parts = splitIntoParts(text, want);
+    parts.forEach((part, si) => {
+      scenes.push(mockScene({
+        partText: part, ep: brief, index: si, total: parts.length, cast,
+        fallbackLocation: clip(ep.sourceTitles?.[0] || ep.title, 24), theme,
+      }));
+    });
+  });
+  // 没有任何分集（历史项目）：用一句话构想 / 梗概起三场，保证剧本不是空数组
+  if (!scenes.length) {
+    const seedText = String(vars.novelExcerpt || vars.idea || '').trim();
+    const parts = splitIntoParts(seedText || theme.scenes.map((s) => s.summary).join('。'), 3);
+    parts.forEach((part, i) => {
+      const s = theme.scenes[i % theme.scenes.length];
+      scenes.push(mockScene({
+        partText: part || s.summary, ep: { no: 1, title: s.location, summary: s.summary, hook: '' },
+        index: i, total: parts.length, cast, fallbackLocation: s.location, theme,
+      }));
+    });
+  }
+  scenes.forEach((s, i) => { s.id = `SC${String(i + 1).padStart(2, '0')}`; s.no = i + 1; });
+  const episodeList = covered.map((e, i) => ({
+    no: Number(e.no) || i + 1,
+    title: clip(e.title, 80),
+    logline: clip(e.summary, 200),
+    hook: clip(e.hook, 200),
+  }));
+  return {
+    title: vars.title || shortTitle(vars.idea || '') || '未命名小说',
+    genre: `小说改编 / ${theme.genre}`,
+    logline: clip(eps[0]?.summary || vars.idea || '', 160),
+    tone: MOOD_BY_THEME[theme.key] || MOOD_BY_THEME.general,
+    // 主题优先用分集标题（「第 1 集 · 破庙铜钱」）而不是一句话构想：构想常是半句原文，
+    // 直接当主题会显示成一长串叙事，读起来不像主题
+    theme: clip(String(vars.theme || '').trim() || eps[0]?.title || vars.idea || '', 40),
+    style: vars.style || theme.styleHint,
+    characters: cast,
+    acts: [],
+    episodes: episodeList,
+    scenes,
+    durationSec: scenes.reduce((n, s) => n + (Number(s.durationSec) || 0), 0),
+    coverage: {
+      totalEpisodes: eps.length,
+      coveredEpisodes: [...new Set(scenes.map((s) => s.episodeNo))],
+      note: eps.length > MAX_EPISODES ? `仅转写前 ${MAX_EPISODES} 集，其余集见分集剧本` : '',
+    },
+    __mock: true,
+  };
+}
+
+/** 单集兜底：按本集原文分场，用本集真实角色写可读剧本（不引入主题模板角色） */
+function mockEpisodeScreenplay(vars = {}, theme) {
+  const cast = mockCast(vars, theme);
+  const target = Math.max(3, Math.min(10, Number(vars.targetScenes) || 3));
+  const text = String(vars.originalText || vars.logline || '');
+  const parts = splitIntoParts(text, target);
+  while (parts.length < target) parts.push('');
+  const chapters = Array.isArray(vars.chapters) ? vars.chapters.filter(Boolean) : [];
+  const ep = {
+    no: Number(vars.episodeNo) || 1, title: vars.episodeTitle || vars.title || '',
+    summary: vars.logline || '', hook: vars.hook || '',
+    // 本集原文既是分场素材，也是「台词归属」的检索上下文（谁在这句台词之前出场）
+    text,
+  };
+  const scenes = parts.slice(0, target).map((part, i) => mockScene({
+    partText: part, ep, index: i, total: target, cast,
+    fallbackLocation: clip(chapters[i] || ep.title || vars.logline, 24), theme,
+  }));
+  // 首场承接上集结尾：把 prevRecap 写成一句旁白，避免每集都像第一集
+  if (vars.prevRecap && scenes[0]) scenes[0].script.splice(1, 0, `旁白：承接上集——${clip(vars.prevRecap, 50)}`);
+  return {
+    title: clip(ep.title || `第 ${ep.no} 集`, 80),
+    genre: clip(vars.project?.genre || theme.genre, 40),
+    logline: clip(vars.logline || scenes[0]?.summary || '', 160),
+    tone: MOOD_BY_THEME[theme.key] || MOOD_BY_THEME.general,
+    style: clip(vars.project?.artStyle || theme.styleHint || 'cinematic', 30),
+    characters: cast,
+    scenes,
+    durationSec: scenes.reduce((n, s) => n + (Number(s.durationSec) || 0), 0),
+    __mock: true,
+  };
+}
+
 function mockGenerate(intent, vars = {}) {
   const idea = String(vars.idea || vars.text || '');
   const theme = detectTheme(idea || vars.title || '');
   const seed = hash(idea + intent);
   switch (intent) {
     case 'screenplay': {
-      // 创作项目（上传小说）：把分集梗概与结尾钩子归一为统一格式剧本（ViMax 式 1）
-      if (Array.isArray(vars.episodes) && vars.episodes.length) {
-        const clip = (v, n) => { const t = String(v ?? '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
-        const chars = (Array.isArray(vars.characters) && vars.characters.length ? vars.characters : theme.chars)
-          .slice(0, 4).map((c, i) => ({ name: c.name, role: c.role || (i === 0 ? '主角' : '配角'), appearance: c.appearance || '造型待定' }));
-        return {
-          title: vars.title || shortTitle(idea) || '未命名小说',
-          genre: `小说改编 / ${theme.genre}`,
-          logline: clip(vars.episodes[0]?.summary || idea, 60),
-          style: vars.style || theme.styleHint,
-          characters: chars,
-          episodeCount: vars.episodes.length,
-          scenes: vars.episodes.slice(0, 3).map((e, i) => ({
-            id: `sc_ep${e.no || i + 1}`,
-            location: clip(e.sourceTitles?.[0] || e.title || `第 ${i + 1} 集`, 24),
-            time: i === 0 ? '开篇' : '接续',
-            summary: clip(e.summary, 50),
-            script: [
-              `【第 ${e.no || i + 1} 集 · ${clip(e.sourceTitles?.[0] || e.title, 20)}】`,
-              clip(i === 0 ? (vars.novelExcerpt || e.summary) : e.summary, 90),
-              `结尾钩子：${clip(e.hook, 42)}`,
-            ],
-          })),
-        };
-      }
+      // 单集剧本（episode-service 调用）：没有 episodes 数组，但会带本集原文 / 集号。
+      // 旧实现落到下面的「主题模板」，会突然出现沈砚、顾言这类与用户小说无关的角色。
+      if (isEpisodeScreenplay(vars)) return mockEpisodeScreenplay(vars, theme);
+      // 创作项目（上传小说）：逐集展开为统一格式剧本（ViMax 式 1）
+      if (Array.isArray(vars.episodes) && vars.episodes.length) return mockProjectScreenplay(vars, theme);
       const title = vars.title || (theme.key === 'noir' ? '雨夜来信' : theme.key === 'scifi' ? '坐标之外' : theme.key === 'youth' ? '夏末纸条' : shortTitle(idea) || '无名短片');
       return {
         title,
         genre: theme.genre,
         logline: `${shortTitle(idea) || '一个念头'}，被拆成三个场景、若干镜头，最终成为一段可以观看的故事。`,
+        tone: MOOD_BY_THEME[theme.key] || MOOD_BY_THEME.general,
         style: vars.style || theme.styleHint,
         characters: theme.chars.map((c) => ({ ...c })),
-        scenes: theme.scenes.map((s, i) => ({
-          id: `sc_${i + 1}`, location: s.location, time: s.time, summary: s.summary,
-          script: [
-            `【${s.time} · ${s.location}】`,
-            `${s.summary}。`,
-            `${theme.chars[0].name}：「${i === 0 ? '这件事，不像看上去那么简单。' : i === 1 ? '再给我一点时间，线索能连上。' : '现在，我们终于可以把它讲完了。'}」`,
-            `${theme.chars[1 % theme.chars.length].name} 没有回答，只是看向画面外的某个方向。`,
-          ],
+        scenes: theme.scenes.map((s, i) => mockScene({
+          partText: s.summary, ep: { no: 1, title: s.location, summary: s.summary, hook: '' },
+          index: i, total: theme.scenes.length, cast: theme.chars, fallbackLocation: s.location, theme,
         })),
       };
     }
@@ -234,6 +699,13 @@ function mockGenerate(intent, vars = {}) {
       const audioBank = a
         ? [...uniqueNatural.map((m) => `${m}声`), '环境声压低人声', '转场保留连续底噪']
         : ['雨声与远处警笛', '低频环境音', '脚步与衣料摩擦', '短暂的静默'];
+      // 出场人物优先用场景 / 剧本自带的角色，不要落回主题模板的玩具角色
+      //（否则用户小说里的沈砚会变成模板里的「顾言」，分镜提示词与定妆资产对不上）。
+      const castNames = [
+        ...(Array.isArray(scene.characters) ? scene.characters : []),
+        ...(Array.isArray(vars.characters) ? vars.characters.map((c) => (typeof c === 'string' ? c : c?.name)).filter(Boolean) : []),
+      ].filter(Boolean);
+      const castBank = [...new Set(castNames)].length ? [...new Set(castNames)] : theme.chars.map((c) => c.name);
       return {
         shots: Array.from({ length: count }, (_, i) => ({
           shotNo: i + 1,
@@ -243,7 +715,7 @@ function mockGenerate(intent, vars = {}) {
           ffDesc: [
             location,
             pick(SIZES, i + (seed % 3)),
-            `${theme.chars[i % theme.chars.length].name}位于画面${['左三分之一', '中央', '右三分之一'][i % 3]}`,
+            `${castBank[i % castBank.length]}位于画面${['左三分之一', '中央', '右三分之一'][i % 3]}`,
             a ? `${a.paletteName} 主色调` : '',
             light || ['冷调侧光', '逆光轮廓', '柔和顶光'][i % 3],
             media[i % media.length],
@@ -252,7 +724,7 @@ function mockGenerate(intent, vars = {}) {
           motionDesc: `${pick(moveBank, i)}，${motionBank[i % 4]}`,
           audioDesc: `${audioBank[i % audioBank.length]}`,
           duration: clipSeconds,
-          characters: [theme.chars[i % theme.chars.length].name],
+          characters: [castBank[i % castBank.length]],
         })),
       };
     }
@@ -405,6 +877,84 @@ function mockGenerate(intent, vars = {}) {
         prompt: base.prompt,
         negative: base.negative,
         suggestions: ['再大气一点', '换一种画面风格', '直接生成封面'],
+      };
+    }
+    case 'styleForge': {
+      // 导演风格设计师对话（零 Key 确定性兜底）：从全部用户发言里抠出可用线索，
+      // 合并进上一轮草稿；核心字段齐了就 ready，缺什么就在 reply 里追问什么。
+      const prev = vars.draft && typeof vars.draft === 'object' ? { ...vars.draft } : {};
+      const said = (Array.isArray(vars.history) ? vars.history : [])
+        .filter((x) => x?.role === 'user').map((x) => String(x.content || '')).join('；');
+      const draft = { ...prev };
+      const named = said.match(/[《「“]([^》」”]{2,16})[》」”]/);
+      const nameGuess = named?.[1]?.trim()
+        || said.match(/(?:风格名|命名|叫|风格叫)\s*[：:]?\s*([^\s，,。；;]{2,16})/)?.[1]?.trim() || '';
+      if (nameGuess && !draft.label) draft.label = nameGuess;
+      const dirGuess = said.match(/(?:致敬|参考|仿|像)\s*([^\s，,。；;]{2,10})(?:的|风格|导演)?/)?.[1]?.trim() || '';
+      if (dirGuess && !draft.director) draft.director = dirGuess;
+      if (said.includes('慢') && !draft.pace?.mode) draft.pace = { minShotSec: 6, maxShotSec: 12, fixedShotRatio: 0.7, mode: 'slow' };
+      if (said.includes('快') && !draft.pace?.mode) draft.pace = { minShotSec: 2, maxShotSec: 6, fixedShotRatio: 0.3, mode: 'kinetic' };
+      // 颜色词 → 主色调（最多 4 组，颜色去重）
+      const colorHit = [];
+      for (const [word, hex] of Object.entries(COLOR_TABLE)) {
+        if (said.includes(word) && !colorHit.some((p) => p.hex === hex)) {
+          colorHit.push({ key: `pal-${colorHit.length + 1}`, name: `${word}调`, hex, mood: '' });
+          if (colorHit.length >= 4) break;
+        }
+      }
+      if (colorHit.length && !(Array.isArray(draft.palettes) && draft.palettes.length)) draft.palettes = colorHit;
+      if (said && !draft.tone) draft.tone = `${detectTheme(said).genre.split(' / ')[0]}基调`;
+      if (!draft.icon) draft.icon = '◇';
+
+      const have = (v) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length);
+      // 用户必须亲自给的只有三样：名称 / 主色调 / 基调；其余美学字段零 Key 用模板确定性补齐
+      const missing = [];
+      if (!have(draft.label)) missing.push('风格名称');
+      if (!have(draft.palettes)) missing.push('主色调（1~4 组颜色，如「暗红与墨黑」）');
+      if (!have(draft.tone)) missing.push('情绪基调');
+      // 零 Key 时核心美学字段用题材模板确定性补齐：能给出可用草稿，但如实标注来源
+      if (!have(draft.light)) draft.light = `${theme.key === 'noir' ? '单一实用光源与大面暗部' : '自然光为主，方向明确'}；情绪高点用逆光`;
+      if (!have(draft.composition)) draft.composition = '大景别交代环境，中景给人物关系，特写只给关键道具与手部';
+      if (!have(draft.camera)) draft.camera = draft.pace?.mode === 'kinetic' ? '手持跟拍与横移为主，升格只给关键动作' : '固定长镜为主，极缓横移，不用变焦';
+      if (!have(draft.texture)) draft.texture = '胶片颗粒、真实织物与皮肤纹理';
+      if (!have(draft.medium)) draft.medium = ['微风', '尘埃', '光影'];
+      if (!have(draft.taboos)) draft.taboos = ['塑料美颜', '杂色堆砌', '无来源光晕'];
+      if (!have(draft.stylePrompt)) {
+        draft.stylePrompt = `${draft.label || '自定义'}电影感，${(draft.palettes?.[0]?.name) || '单一主色'}统治画面，${draft.light}，${draft.composition}，胶片颗粒质感`;
+      }
+      if (!have(draft.negativePrompt)) {
+        draft.negativePrompt = 'washed-out colors, flat lighting, beauty filter, plastic skin, oversaturated rainbow palette, text watermark';
+      }
+      if (!have(draft.highlights)) {
+        draft.highlights = [
+          (draft.palettes?.[0]?.name ? `${draft.palettes[0].name}主色` : '单一主色'),
+          draft.pace?.mode === 'kinetic' ? '高动能运镜' : '固定长镜',
+          '胶片颗粒质感',
+          '有来源光线',
+        ];
+      }
+      if (!have(draft.summary)) draft.summary = `${draft.label || '自定义'}风格：以${(draft.palettes?.[0]?.name) || '主色'}与${draft.pace?.mode === 'kinetic' ? '快节奏运镜' : '静观长镜'}构建${draft.tone || '统一'}的画面基调。`;
+      if (!have(draft.tagline)) draft.tagline = `${draft.pace?.mode === 'kinetic' ? '高动能' : '静观'} · ${(draft.palettes?.[0]?.name) || '主色'}统治`;
+      if (!have(draft.colorRule)) draft.colorRule = '主色调占画面 60% 以上，辅色降饱和';
+      if (!have(draft.pacing)) draft.pacing = `单镜 ${draft.pace?.minShotSec ?? 3}–${draft.pace?.maxShotSec ?? 8} 秒`;
+      if (!have(draft.visualStyle)) draft.visualStyle = draft.stylePrompt;
+      if (!have(draft.shotStrategy)) draft.shotStrategy = '先以全景交代空间，再以中景给人物关系，特写只给关键动作与道具';
+      if (!have(draft.audioStrategy)) draft.audioStrategy = '环境声放大自然媒介，BGM 权重低、情绪克制';
+      if (!have(draft.continuityRules)) {
+        draft.continuityRules = ['主色调跨镜头保持同一色号', '光源方向在同一场戏内固定', '角色服装配色以身份板为唯一基准'];
+      }
+      if (!have(draft.risks)) draft.risks = ['主色被模型稀释：提示词前置色号并加大权重', '节奏被平均化：显式指定铺垫与爆发的时长'];
+      const ready = !missing.length;
+      const confirmed = [draft.label, draft.palettes?.[0]?.name, draft.tone].filter(Boolean).slice(0, 3).join(' · ');
+      return {
+        reply: `${confirmed ? `已记下：${confirmed}。` : ''}${ready
+          ? '关键信息已齐，可以直接保存为导演风格了；想继续调整就直接说改哪里。'
+          : `还缺：${missing.slice(0, 2).join('、')}。`}`,
+        draft,
+        ready,
+        suggestions: ready
+          ? ['保存为导演风格', '主色再暗一点', '节奏再快一些']
+          : [`我想要${missing[0] || '主色'}：…`, '参考王家卫的都市暧昧感', '先看看已收集的内容'],
       };
     }
     case 'storyIdea': {
@@ -595,7 +1145,18 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
       catch (err) { log('warn', `ComfyUI ${kind} 工作流无效：${err.message}`); }
     }
   }
-  const comfyActive = Boolean(comfyWorkflows.image || comfyWorkflows.video);
+  const comfyActive = Boolean(comfyWorkflows.image || comfyWorkflows.video
+    || (Array.isArray(comfy?.imageWorkflowLib) && comfy.imageWorkflowLib.length)
+    || (Array.isArray(comfy?.videoWorkflowLib) && comfy.videoWorkflowLib.length));
+  // 板块级接口档案：库里有可选档案时也算「已配置」，由各入口在提交前按板块解析。
+  // 旧配置的镜像字段仍在，解析不到任何档案时会原样回退它，行为与升级前一致。
+  const IMAGE_SCOPE_BY_KIND = {
+    cover: 'cover', poster: 'poster', grid: 'grid', storyboard: 'storyboard',
+    character: 'character', 'character-view': 'character-view', 'character-sheet': 'character-sheet',
+    transition: 'transition', keyframe: 'keyframe',
+  };
+  const hasInterface = (kind) => Boolean(comfyWorkflows[kind]
+    || (Array.isArray(comfy?.[`${kind}WorkflowLib`]) && comfy[`${kind}WorkflowLib`].length));
   // 导演风格（美学档案）：由编排器 / 导演智能体通过 settings.aesthetic 下发。
   // 只认已解析好的纯数据对象，不在这里再读项目，避免 provider 与业务层耦合。
   const aesthetic = settings.aesthetic && settings.aesthetic.id ? settings.aesthetic : null;
@@ -614,11 +1175,38 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     if (signal) signal.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('已取消', 'AbortError')); }, { once: true });
   });
 
-  /** 执行一份用户粘贴的 API 格式工作流 */
-  function runComfy(kind, vars, signal) {
-    return runWorkflow(comfy, comfyWorkflows[kind], { ...vars, cfg: comfy }, {
-      signal, log, bindings: comfy?.bindings?.[kind] || [],
+  /**
+   * 按「板块 + 本次指定接口」解析一份 ComfyUI 接口档案后执行。
+   * 优先级：请求 interfaceId > 板块绑定 > 类别 activeId > 旧镜像字段。
+   * 档案自带的请求参数 / 节点覆盖 / 显式绑定全部随 cfg 进入注入器。
+   */
+  async function runComfy(kind, vars, signal, hooks = {}, scopeOpts = {}) {
+    const scope = scopeOpts.scope || (kind === 'video' ? 'video' : 'keyframe');
+    // 单次调用没显式指定时，回落到路由层挂在 cfg 上的「本次接口」（body.interfaceId）。
+    // 这样所有生成入口只需把请求级选择放进 config，不必逐层改业务函数签名。
+    const interfaceId = scopeOpts.interfaceId || comfy?.requestInterfaceId || '';
+    const resolved = resolveInterface(comfy || {}, { kind, scope, interfaceId });
+    if (!resolved.workflow) throw new Error(`板块 ${scope} 没有可用的 ComfyUI 接口文件`);
+    let workflow;
+    try { workflow = parseWorkflow(resolved.workflow, `${kind} 工作流`); }
+    catch (err) { throw new Error(`接口档案「${resolved.interfaceName || resolved.interfaceId}」无效：${err.message}`); }
+    const cfg = {
+      ...resolved.config,
+      resolvedInterface: {
+        id: resolved.interfaceId, name: resolved.interfaceName, kind: resolved.kind,
+        scope: resolved.scope, via: resolved.via, warnings: resolved.warnings,
+      },
+    };
+    const r = await runWorkflow(cfg, workflow, { ...vars, cfg }, {
+      signal, log, bindings: resolved.bindings,
+      // 提交即把 prompt_id 交给上层落盘：服务重启后能凭它把已完成的结果认回来
+      onSubmitted: hooks.onPromptId,
     });
+    return {
+      ...r, config: cfg,
+      interfaceId: resolved.interfaceId, interfaceName: resolved.interfaceName,
+      via: resolved.via, warnings: resolved.warnings,
+    };
   }
 
   /**
@@ -758,6 +1346,7 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
         const images = userVars.__images;
         delete userVars.__images;
         const system = `你是影视制作智能体。只输出严格 JSON，不要解释、不要 Markdown 代码块。输出结构：${SCHEMAS[intent] || '{text:string}'}。内容使用简体中文，符合用户提供的故事设定。` +
+          (intent === 'screenplay' ? `\n${screenplayGuide(vars)}` : '') +
           (intent === 'charExtract'
             ? '输入的「原著片段」是全书检索召回的原文证据（FRAGMENT 标签）。只能依据这些片段抽取角色，不得引入片段之外的设定；片段未写明但必需的外观特征可以依据题材与上下文合理补全，但不得与原文矛盾。'
             : (vars.fragments ? '输入中的 fragments 是原著检索片段（FRAGMENT 标签），镜头/场景描述必须与其人物、道具、环境、光线保持一致，不要引入矛盾设定。' : '')) +
@@ -795,7 +1384,10 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
           if (!Array.isArray(out.characters) || !out.characters.length) throw new Error('模型未返回有效角色');
           return out;
         }
-        return mergeDefaults(intent, out, vars);
+        const merged = mergeDefaults(intent, out, vars);
+        // 剧本补结构不补内容：场号 / 内外景 / 时长 / 说话人 / 分集覆盖由代码推导，
+        // 人物动机、场景目标这些创作字段没写就是没写（留给质量告警提示重跑）。
+        return intent === 'screenplay' ? enrichScreenplay(merged, vars) : merged;
       } catch (err) {
         // 失败回退 Mock 也计入调用次数（tokens 为 0），保证「调用了真实端点」这件事可审计
         reportUsage({ intent, model: settings.model || 'gpt-4o-mini', ts: Date.now(),
@@ -806,12 +1398,15 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     }
     await delay(140 + (hash(intent + JSON.stringify(vars)) % 260), signal);
     const mock = mockGenerate(intent, vars);
+    // 零 Key / 回退的剧本同样补齐结构：前端与下游拿到的是同一份 v2 契约，
+    // 不会出现「有模型时是十几场、没模型时是 3 段概述」的两套剧本。
+    const shaped = intent === 'screenplay' ? enrichScreenplay(mock, vars) : mock;
     // 零 Key 的角色抽取只是「按原文片段生成的启发式占位」，不是 LLM 成果：
     // 显式打标让路由把 source 定为 heuristic，前端也能如实提示「配置模型后可重提」，
     // 避免把模板角色冒充 AI 提取结果写进项目（同时保证后续真实 LLM 可以覆盖占位值）。
-    if (mode === 'mock' && intent === 'charExtract') return { ...mock, __mock: true };
+    if (mode === 'mock' && intent === 'charExtract') return { ...shaped, __mock: true };
     // 回退显式化：真实模型失败才打 __fallback（Mock 模式本身不算「失败回退」）
-    return fellBack ? { ...mock, __fallback: true } : mock;
+    return fellBack ? { ...shaped, __fallback: true } : shaped;
   }
 
   async function image(opts = {}, signal) {
@@ -837,11 +1432,15 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
       palette: opts.palette, label: label || opts.name, kind,
     });
 
+    // requireReal=true：只认本地 ComfyUI 真实出图。工作流未配置直接报错、
+    // ComfyUI 调用失败也不再静默回退自绘 SVG——「没有生成」绝不能拿占位图冒充。
+    const requireReal = opts.requireReal === true;
+
     // 主路径：本地 ComfyUI「导出(API)」工作流
-    if (comfyWorkflows.image) {
+    if (hasInterface('image')) {
       try {
-        // 角色多视图提示词已含视图角度与风格锁，不再叠加景别/机位默认值
-        const fullPrompt = kind === 'character-view' || kind === 'character-sheet'
+        // 角色多视图提示词已含视图角度与风格锁，不再叠加景别/机位默认值；海报（封面）同理
+        const fullPrompt = ['character-view', 'character-sheet', 'poster'].includes(kind)
           ? `${finalPrompt}｜${styleName}`
           : `${finalPrompt}｜${size}｜${angle}｜${movement}｜${styleName}`;
         const result = await runComfy('image', {
@@ -850,19 +1449,29 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
           filenamePrefix: `lingximanju_${kind}_${shotNo}`,
           imageRefs: refBuffers,
           imageBuffer: refBuffers[0]?.buffer, imageName: refBuffers[0]?.name,
-        }, signal);
+        }, signal, { onPromptId: opts.onPromptId }, {
+          scope: IMAGE_SCOPE_BY_KIND[kind] || 'keyframe',
+          interfaceId: opts.interfaceId,
+        });
         return {
-          url: result.primary.url, width: comfy.width, height: comfy.height,
+          url: result.primary.url,
+          width: result.config.width, height: result.config.height,
           provider: 'comfyui', promptId: result.promptId,
           source: 'comfyui', isRealImage: true,
-          workflow: String(comfy.imageWorkflowName || 'image'),
+          workflow: String(result.interfaceName || comfy.imageWorkflowName || 'image'),
+          interfaceId: result.interfaceId, scope: IMAGE_SCOPE_BY_KIND[kind] || 'keyframe',
           applied: result.applied.length, assets: result.assets,
           refsUsed: refBuffers.length, refsRequested: refUrls.length,
         };
       } catch (err) {
-        if (comfy.strict) throw err;
+        if (comfy.strict || requireReal) throw err;
         log('warn', `ComfyUI 出图失败，已回退本地生成：${err.message}`);
       }
+    }
+    if (requireReal) {
+      throw new Error(hasInterface('image')
+        ? `ComfyUI 真实出图失败：已按要求中止，不回退占位图`
+        : '未配置 ComfyUI 出图工作流：请到「设置 → 本地 ComfyUI」导入一份「导出(API)」格式的图像工作流后再生成');
     }
 
     if (settings.imageEndpoint) {
@@ -910,19 +1519,23 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
 
     // 主路径：本地 ComfyUI 图生视频 / 首尾帧工作流
     // 只导出导演包时跳过本地视频渲染（成片交给导演工作台生成），避免浪费 GPU
-    if (comfyWorkflows.video && comfy.outputMode !== 'director-pack') {
+    if (hasInterface('video') && comfy.outputMode !== 'director-pack') {
       try {
         const first = frames.find(Boolean);
         const ref = referenceBuffer(first, { seed: opts.prompt, shotNo: opts.shotNo || 1, style: styleArg(opts.style) });
+        // 帧率可能由该板块绑定的接口档案覆盖，先解析一次再算帧数
+        const clipCfg = resolveInterface(comfy || {}, { kind: 'video', scope: 'video', interfaceId: opts.interfaceId }).config;
         const result = await runComfy('video', {
           prompt: videoPrompt, negative: videoNegative,
           motion: videoPrompt,
           seed: `clip-${first}-${opts.shotNo || 1}`,
-          frames: Math.round(duration * (comfy.fps || 24)), duration,
+          frames: Math.round(duration * (Number(clipCfg.fps) || 24)), duration,
           shotNo: opts.shotNo || 1, style: videoStyleName,
           filenamePrefix: `lingximanju_clip_${opts.shotNo || 1}`,
           imageBuffer: ref?.buffer, imageName: ref?.name,
-        }, signal);
+        }, signal, { onPromptId: opts.onPromptId }, {
+          scope: 'video', interfaceId: opts.interfaceId,
+        });
         const videoAsset = result.assets.find((a) => a.kind === 'video');
         // 工作流只出图时绝不能把图片当视频片段：真实模式必须拿到视频文件
         if (!videoAsset) {
@@ -935,15 +1548,16 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
           frames, duration, promptId: result.promptId,
           provider: 'comfyui', synthetic: false,
           source: 'comfyui', isRealVideo: true,
-          workflow: String(comfy.videoWorkflowName || 'video'),
+          workflow: String(result.interfaceName || comfy.videoWorkflowName || 'video'),
+          interfaceId: result.interfaceId, scope: 'video',
           filmPolicy,
-          note: `由 ComfyUI「${comfy.videoWorkflowName || '视频工作流'}」真实生成（prompt_id ${result.promptId}）。`,
+          note: `由 ComfyUI「${result.interfaceName || comfy.videoWorkflowName || '视频工作流'}」真实生成（prompt_id ${result.promptId}）。`,
         };
       } catch (err) {
         // 用户确实接了视频工作流时，real 策略不允许把失败静默伪装成片段：
         // 抛错让节点标红，直接看到是哪一段的 ComfyUI 出问题。
         // 完全没有配置工作流时仍走 mock，但验收会明确判「真实片段 0/N」并给出配置指引。
-        if (comfy.strict || (filmPolicy === 'real' && comfyWorkflows.video)) throw err;
+        if (comfy.strict || (filmPolicy === 'real' && hasInterface('video'))) throw err;
         log('warn', `ComfyUI 视频生成失败，已回退帧序列预览：${err.message}`);
       }
     }

@@ -19,7 +19,7 @@ import {
 import {
   loadDrafts, addDrafts, getDraft, removeDraft, draftToVoice, draftStats, isDraftId, DRAFT_TTL_MS,
 } from '../../core/voice-drafts.mjs';
-import { loadComfyConfig } from '../../core/comfy-config.mjs';
+import { loadComfyConfig, resolveInterface } from '../../core/comfy-config.mjs';
 import { drawVoiceCandidates } from '../../core/comfyui.mjs';
 import { assignVoices } from '../../agents/voice-agent.mjs';
 
@@ -58,16 +58,20 @@ const ASSET_AUDIO_RE = /\.(mp3|wav|ogg|m4a|flac|aac|opus)$/i;
  */
 async function drawFor({ res, body, project = null, character = null, log = () => {} }) {
   const cfg = loadComfyConfig();
-  // 指定 workflowId 时用库里那一份，否则用当前生效的音频工作流
-  let workflow = cfg.audioWorkflow;
-  let workflowName = cfg.audioWorkflowName || '音频工作流';
-  const workflowId = String(body.workflowId || '');
-  if (workflowId) {
-    const entry = (cfg.audioWorkflowLib || []).find((e) => e.id === workflowId);
-    if (!entry) return { error: '指定的音频工作流不存在', status: 404 };
-    workflow = entry.workflow;
-    workflowName = entry.name;
-  }
+  // 音色板块统一走接口解析：本次指定 > 板块绑定 > 类别默认。
+  // 档案自带的请求参数 / 节点覆盖 / 显式绑定随 config 一起进入工作流。
+  const workflowId = String(body.workflowId || body.interfaceId || '');
+  const resolved = resolveInterface(cfg, { kind: 'audio', scope: 'voice', interfaceId: workflowId });
+  if (workflowId && !resolved.interfaceId) return { error: '指定的音频工作流不存在', status: 404 };
+  const workflow = resolved.workflow;
+  const workflowName = resolved.interfaceName || cfg.audioWorkflowName || '音频工作流';
+  const config = {
+    ...resolved.config,
+    resolvedInterface: {
+      id: resolved.interfaceId, name: workflowName, kind: 'audio', scope: 'voice',
+      via: resolved.via, warnings: resolved.warnings,
+    },
+  };
   if (!workflow) {
     return {
       error: '还没有可用的音色抽卡工作流。请在「设置 → 本地 ComfyUI」导入一份 TTS 工作流（导出(API) 格式），或改用音色库里的预设音色。',
@@ -93,9 +97,9 @@ async function drawFor({ res, body, project = null, character = null, log = () =
   let clientGone = false;
   res.on('close', () => { if (!res.writableEnded) { clientGone = true; ac.abort(); } });
 
-  const result = await drawVoiceCandidates(cfg, workflow, {
+  const result = await drawVoiceCandidates(config, workflow, {
     count, text, voiceValues, language, workflowName,
-    bindings: cfg.bindings?.audio || [],
+    bindings: resolved.bindings,
     signal: ac.signal,
     filenamePrefix: 'lingximanju_voice',
     log: (lvl, msg) => { log(lvl, msg); emit('log', { source: 'voice-draw', level: lvl, message: msg }); },
@@ -379,7 +383,11 @@ export async function handleVoices(req, res, url) {
     const body = await readBody(req);
     try {
       const result = await assignVoices({
-        project, m, modelId: body.modelId || '', log: (lvl, msg) => emit('log', { projectId: id, level: lvl, message: `音色分配 · ${msg}` }),
+        project, m,
+        modelId: body.modelId || '',
+        // onlyMissing=true：只给还没音色的角色分配，手动指定的绑定不动（提取后自动补配用这个模式）
+        onlyMissing: Boolean(body.onlyMissing),
+        log: (lvl, msg) => emit('log', { projectId: id, level: lvl, message: `音色分配 · ${msg}` }),
       });
       saveProject(project);
       broadcastMeta(project);
@@ -461,6 +469,15 @@ export async function handleVoices(req, res, url) {
         v = out.voice; promoted = true;
       }
       if (!v) return json(res, { error: '音色不存在' }, 404), true;
+      // 唯一性硬约束：一个音色在本项目里只能绑定一个角色。
+      // 已被其它角色占用的音色不能选，明确告知被谁占用，前端下拉也会提前禁用。
+      const occupied = (m.characters || []).find((c) => c.id !== char.id && c.voiceId === v.id);
+      if (occupied) {
+        return json(res, {
+          error: `音色「${v.name}」已被角色「${occupied.name}」使用，不能重复绑定`,
+          usedBy: { characterId: occupied.id, characterName: occupied.name },
+        }, 409), true;
+      }
       char.voiceId = v.id; char.voiceName = v.name;
       char.voiceReason = body.reason ? String(body.reason).slice(0, 200)
         : (promoted ? `抽卡音色已保存并绑定：${v.name}` : `手动指定：${v.name}`);

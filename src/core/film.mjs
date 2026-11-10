@@ -24,14 +24,34 @@ export function hasFfprobe() {
 
 /** 实测一个本地视频文件的秒数；不可用 / 探测失败时返回 null，绝不编造 */
 export function probeDuration(localFile) {
-  if (!localFile || !hasFfprobe() || !fs.existsSync(localFile)) return null;
+  return probeVideoInfo(localFile).duration;
+}
+
+/**
+ * 实测一个本地视频文件的时长与宽高（成片分辨率验收用）；
+ * 不可用 / 探测失败时各项返回 null，绝不编造。
+ */
+export function probeVideoInfo(localFile) {
+  if (!localFile || !hasFfprobe() || !fs.existsSync(localFile)) {
+    return { duration: null, width: null, height: null };
+  }
   const r = spawnSync('ffprobe', [
-    '-v', 'error', '-show_entries', 'format=duration',
-    '-of', 'default=nw=1:nk=1', localFile,
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-show_entries', 'stream=width,height',
+    '-select_streams', 'v:0',
+    '-of', 'json', localFile,
   ], { encoding: 'utf8', timeout: 30000 });
-  if (r.status !== 0) return null;
-  const n = Number(String(r.stdout || '').trim());
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  if (r.status !== 0) return { duration: null, width: null, height: null };
+  let parsed = null;
+  try { parsed = JSON.parse(String(r.stdout || '{}')); } catch { parsed = null; }
+  const n = Number(String(parsed?.format?.duration ?? '').trim());
+  const stream = Array.isArray(parsed?.streams) ? parsed.streams.find((s) => Number(s?.width) > 0) : null;
+  return {
+    duration: Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null,
+    width: Number(stream?.width) > 0 ? Math.round(Number(stream.width)) : null,
+    height: Number(stream?.height) > 0 ? Math.round(Number(stream.height)) : null,
+  };
 }
 
 /**
@@ -75,11 +95,12 @@ export function stitchClips(clips = [], opts = {}) {
   const real = { source: 'comfyui', isRealVideo: true };
 
   if (files.length === 1) {
-    const measured = probeDuration(files[0].local);
+    const info = probeVideoInfo(files[0].local);
     return {
       url: `/assets/${files[0].file}`, file: files[0].file, method: 'single', clips: 1,
-      duration: measured ?? declaredDuration, declaredDuration,
-      measured: measured !== null,
+      duration: info.duration ?? declaredDuration, declaredDuration,
+      measured: info.duration !== null,
+      width: info.width, height: info.height,
       bytes: fs.statSync(files[0].local).size,
       ...real,
     };
@@ -94,21 +115,36 @@ export function stitchClips(clips = [], opts = {}) {
     fs.writeFileSync(list, norm.paths.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n') + '\n', 'utf8');
     const out = path.join(tmp, 'final.mp4');
     let method = norm.method;
-    let r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', out], { encoding: 'utf8' });
+    // -t 只封顶不延长：单段容差（±0.25s）内免重编码的片段会累计超时
+    // （如 40 段 × 3.0417s ≈ 121.7s / 目标 120s），最终成片一律按
+    // 「片段数 × 规格时长」封顶，保证 ffprobe 实测落在验收容差内。
+    const cap = ['-t', String(declaredDuration)];
+    let r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', ...cap, out], { encoding: 'utf8' });
+    if (r.status === 0 && fs.existsSync(out)) {
+      // 流复制封顶只能在包边界截断，可能仍超出标称时长（帧粒度累计）；
+      // 超出 0.05s 以上时重编码精确截断，保证 ffprobe 实测落在验收容差内。
+      const d = probeDuration(out);
+      if (d !== null && d - declaredDuration > 0.05) {
+        method = `${norm.method}-reencode`;
+        r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list,
+          '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '24', ...cap, out], { encoding: 'utf8', timeout: 300000 });
+      }
+    }
     if (r.status !== 0 || !fs.existsSync(out)) {
       method = `${norm.method}-reencode`;
       r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list,
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '24', out], { encoding: 'utf8', timeout: 300000 });
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '24', ...cap, out], { encoding: 'utf8', timeout: 300000 });
     }
     if (r.status !== 0 || !fs.existsSync(out)) return null;
-    const measured = probeDuration(out);
+    const info = probeVideoInfo(out);
     const buf = fs.readFileSync(out);
     const name = `${uid('film')}.mp4`;
     const url = writeAssetBinary(name, buf);
     return {
       url, file: name, method, clips: files.length,
-      duration: measured ?? declaredDuration, declaredDuration,
-      measured: measured !== null,
+      duration: info.duration ?? declaredDuration, declaredDuration,
+      measured: info.duration !== null,
+      width: info.width, height: info.height,
       bytes: buf.length,
       ...real,
     };

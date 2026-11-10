@@ -13,7 +13,7 @@ import path from 'node:path';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'lxmj-voice-'));
 process.env.LINGXIMANJU_DATA_DIR = TMP;
 
-const { normalizeVoice, seedVoices, loadVoices, saveVoices, getVoice, scoreVoiceForCharacter, matchVoice, matchAll, DEFAULT_VOICES }
+const { normalizeVoice, seedVoices, loadVoices, saveVoices, getVoice, scoreVoiceForCharacter, matchVoice, matchAll, matchAllUnique, DEFAULT_VOICES }
   = await import('../src/core/voices.mjs');
 const { normalizeCharacter } = await import('../src/core/characters.mjs');
 const { assignVoices } = await import('../src/agents/voice-agent.mjs');
@@ -116,4 +116,75 @@ test('normalizeCharacter：携带 voice 字段且不丢值', () => {
   // 非法 id 被清空
   const c2 = normalizeCharacter({ name: '角色Y', voiceId: '!!bad' });
   assert.equal(c2.voiceId, '');
+});
+
+test('matchAllUnique：同一批角色拿到的音色互不重复', () => {
+  const lib = [
+    { id: 'v1', name: '少男A', gender: '男', ageGroup: '青年', tags: ['活泼', '少年'] },
+    { id: 'v2', name: '少男B', gender: '男', ageGroup: '青年', tags: ['热血'] },
+    { id: 'v3', name: '少男C', gender: '男', ageGroup: '青年', tags: ['冷静'] },
+  ];
+  // 三个性别年龄性格几乎一样的角色：matchAll 会全部撞到 v1，matchAllUnique 必须各拿一个
+  const chars = [
+    { id: 'c1', name: '甲', gender: '男', age: '18岁', personality: '活泼少年' },
+    { id: 'c2', name: '乙', gender: '男', age: '18岁', personality: '活泼少年' },
+    { id: 'c3', name: '丙', gender: '男', age: '18岁', personality: '活泼少年' },
+  ];
+  const dup = matchAll(chars, lib).map((a) => a.voiceId);
+  assert.equal(new Set(dup).size, 1, 'matchAll 允许重复（保持旧行为）');
+
+  const uniq = matchAllUnique(chars, lib);
+  const ids = uniq.map((a) => a.voiceId);
+  assert.equal(new Set(ids).size, 3, `唯一匹配应互不重复，实际 ${ids.join(',')}`);
+  assert.ok(ids.every(Boolean), '库够大时每个角色都应有音色');
+
+  // 音色不够分：第 4 个角色拿不到（voiceId=null），不能把别人的抢过来
+  const over = matchAllUnique([...chars, { id: 'c4', name: '丁', gender: '男', age: '18岁', personality: '活泼少年' }], lib);
+  assert.equal(over[3].voiceId, null);
+  assert.ok(over[3].reason.includes('用完') || over[3].reason.includes('不重复'), '应提示音色不足');
+});
+
+test('matchAllUnique：taken 预占用的音色不参与分配', () => {
+  const lib = [
+    { id: 'v1', name: '少男', gender: '男', ageGroup: '青年', tags: ['活泼'] },
+    { id: 'v2', name: '大叔', gender: '男', ageGroup: '中年', tags: ['沉稳'] },
+  ];
+  const out = matchAllUnique([{ id: 'c1', name: '甲', gender: '男', age: '18岁', personality: '活泼少年' }], lib, { taken: new Set(['v1']) });
+  assert.equal(out[0].voiceId, 'v2', 'v1 已被占用，只能分 v2');
+});
+
+test('assignVoices：全量重排时角色间音色不重复', async () => {
+  const voices = saveVoices(DEFAULT_VOICES);
+  const project = { id: 'prj_test', settings: {} };
+  // 四个同性别同年齡角色：库里有 5 个男声（默认库 男6 个），足够一人一个
+  const m = {
+    characters: [
+      { id: 'c1', name: '热血少年', gender: '男', age: '17岁', personality: '活泼阳光热血少年', role: '男主' },
+      { id: 'c2', name: '沉稳队长', gender: '男', age: '28岁', personality: '沉稳威严', role: '队长' },
+      { id: 'c3', name: '儒雅军师', gender: '男', age: '26岁', personality: '儒雅温和冷静', role: '军师' },
+      { id: 'c4', name: '苍老宗主', gender: '男', age: '65岁', personality: '智慧长者', role: '宗主' },
+    ],
+  };
+  const result = await assignVoices({ project, m, library: voices });
+  assert.equal(result.applied, 4);
+  const ids = m.characters.map((c) => c.voiceId);
+  assert.equal(new Set(ids).size, 4, `角色间音色必须互不重复，实际 ${ids.join(',')}`);
+  assert.ok(ids.every((id) => voices.some((v) => v.id === id)), '所有 voiceId 必须存在于库里');
+});
+
+test('assignVoices：onlyMissing 只补空缺，不动已绑定的角色', async () => {
+  const voices = saveVoices(DEFAULT_VOICES);
+  const project = { id: 'prj_test', settings: {} };
+  const bound = voices.find((v) => v.gender === '男');
+  const m = {
+    characters: [
+      { id: 'c1', name: '已绑定', gender: '男', age: '20岁', personality: '活泼', role: '男主', voiceId: bound.id, voiceName: bound.name, voiceReason: '手动指定' },
+      { id: 'c2', name: '没绑定', gender: '男', age: '20岁', personality: '活泼少年', role: '男二' },
+    ],
+  };
+  const result = await assignVoices({ project, m, library: voices, onlyMissing: true });
+  assert.equal(result.applied, 1, '只有没绑定的角色被分配');
+  assert.equal(m.characters[0].voiceId, bound.id, '已绑定的音色不被覆盖');
+  assert.notEqual(m.characters[1].voiceId, bound.id, '新分配不能与已绑定的重复');
+  assert.ok(m.characters[1].voiceId, '没绑定的角色应拿到音色');
 });

@@ -407,3 +407,17 @@ test('POST /cover/generate 失败也留调用记录：ok=false + 错误与已产
   assert.ok(rec.error, '记录失败原因');
   assert.equal(rec.prompt, '霓虹雨夜', '记录所用提示词');
 });
+
+test('AI 一键生成封面：未配置出图工作流时用内置海报兜底并直接落定封面', async () => {
+  saveComfyConfig({ enabled: false, imageWorkflow: null, videoWorkflow: null, apiKey: '' });
+  saveProject({ id: 'prj_cai', name: '未命名项目', mode: 'idea2video', nodes: [], edges: [],
+    createdAt: Date.now(), updatedAt: Date.now() });
+  const r = await api('POST', '/api/projects/prj_cai/cover/ai', {});
+  assert.equal(r.status, 200);
+  assert.equal(r.data.ok, true);
+  assert.equal(r.data.provider, 'mock', '零配置时明示内置绘制');
+  const m = loadProject('prj_cai').management;
+  assert.equal(m.cover.source, 'ai');
+  assert.match(m.cover.url, /^\/assets\/.+\.svg$/, '生成结果落定到封面');
+  assert.ok(m.cover.prompt.length > 10, '保存实际使用的提示词');
+});

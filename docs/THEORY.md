@@ -23,7 +23,7 @@
 
 | 编号 | 论文含义（§2） | 本仓库落点 | 实现要点 |
 |---|---|---|---|
-| (1) | `𝒮 = ScreenWriting(ℐ; P_C(ℐ))` 输入 → 统一格式剧本 | `src/agents/narrative.mjs` · `screenwriter`；`src/core/providers.mjs` · `generate('screenplay')` | 创作项目下发 `novelTitle / novelEpisodes / characters / novelExcerpt`，Mock 分支据此生成「第 N 集」场景表与结尾钩子，而不是固定模板剧情 |
+| (1) | `𝒮 = ScreenWriting(ℐ; P_C(ℐ))` 输入 → 统一格式剧本 | `src/agents/narrative.mjs` · `screenwriter`；`src/core/providers.mjs` · `generate('screenplay')`；契约定义在 `src/core/screenplay.mjs` | 契约 v2：角色表（动机 / 秘密 / 弧光）、幕结构、分集映射、场次表（内外景 · 地点 · 时间 · 时长 · 人物 · 目标 · 冲突 · 转折 · 节拍 · 关键道具 · 转场 · 正文行）。整剧走 `SCREENPLAY_PROJECT_GUIDE`（逐集展开、每集 ≥2 场、`episodeNo` 标注），单集走 `SCREENPLAY_GUIDE`；写作准则按输入形态路由，零 Key 兜底把每集原文**转写**成同构剧本（不再只给 3 段分集概述） |
 | (2) | `S₁…Sₙ = ShotPlanning(𝒮)` 剧本 → 镜头规格序列 | `src/agents/narrative.mjs` · `storyboard`；`providers.generate('shots')` | 每镜头含景别、机位、运镜、首帧描述、时长、运动/音频描述 |
 | (3) | `ImageGen → VideoGen` 关键帧与片段 | `src/agents/visual.mjs` · `keyframe` / `video`；`src/core/comfyui.mjs` | Mock 自绘 SVG 帧序列；接入 ComfyUI 后产出真实片段，再由 `src/core/film.mjs` 拼接 MP4 |
 | (4) | `C* = argmax VLM-Judge(Cⱼ, Sᵢ)` best-of-k 择优 | `src/agents/visual.mjs` · `review`；`providers.judge()` | 默认 `k=2`；落选候选保留在 `candidates` / `rejected` 供检查器对比 |
@@ -42,10 +42,10 @@
 |---|---|---|---|---|
 | ① | 上传小说与交付设置 | 式(1) 前置 · **扩展层** | 创建时完成 | `src/core/novel.mjs · parseNovel()` → `management.source.text`（原著全文）、`idea` 节点 |
 | ② | 分集拆解 | 式(5) 前置 · **扩展层** | 创建时完成 | `splitEpisodes()` → `episode` 画布节点 + `ref` 边把每集梗概传给 `script` |
-| ③ | 剧本生成与格式统一 | **式(1)** | `['script']` | `screenwriter` → 统一格式剧本 `S`（片名 / 类型 / 梗概 / 角色 / 场景表） |
+| ③ | 剧本生成与格式统一 | **式(1)** | `['script']` | `screenwriter` → 统一格式剧本 `S`（片名 / 类型 / 梗概 / 角色表 / 幕 / 分集映射 / 场次表 + 可拍摄正文）；输入为每集 ≤750 字原文、≤12 集，逐集展开成 2~3 场 |
 | ④ | RAG · 角色 · 层次分解 | **式(5)(6)** | `['rag','character','plan','event','scene','shot']` | `rag`（原著索引）→ `character`（定妆资产）→ `decomposer`（事件→场景→镜头）→ `storyboard`（镜头链） |
-| ⑤ | 分镜 · 机位图 · 择优 · 片段 | **式(2)(3)(4)(7)(8)** | `['keyframe','review','video','transition','camera']` | `keyframe`(k=2) → `review` → `video` / `transition` → `camera-graph` 汇总 |
-| ⑥ | 双产物交付 | 式(3) + 依赖图并行 · **扩展层** | `['final']` | `composer` → `timeline.json` / MP4 / `*.mmxpack.zip` |
+| ⑤ | 分镜提示词 · 分镜图 · 分镜板 | **式(2)(4)(7)(8)** | `['keyframe','review','transition','camera']` | `keyframe`(k=2) → `review` 择优 → `transition` 端点帧 → `camera-graph` 汇总；收尾按**分镜画面设置**（九宫格 / 六宫格 / 四宫格 / 条漫四联 / 二十五宫格 / 单图）用真实关键帧合成每段分镜板。**本步不出视频** |
+| ⑥ | 视频生成与成片交付 | **式(3)** + 依赖图并行 · **扩展层** | `['video','transition','final']`（仅导演包时收窄为 `['final']`） | `video` 逐镜头图生视频 → `transition` 续跑转场视频 → `composer` → `timeline.json` / MP4 / `*.mmxpack.zip` |
 
 **分阶段调度的实现**：`src/core/orchestrator.mjs` 的 `runProject(id, { scope })` 在 `computeTargets()` 中按节点类型白名单筛选目标，运行期动态展开的节点也按同一白名单过滤；不传 `scope` 时保持原有「运行完整流水线」行为不变。后端 `POST /api/projects/:id/step`（`src/api/routes.mjs · executeSteps`）把步骤翻译成 `scope`，逐步或一次性执行，并通过 SSE `project:meta` 广播状态。
 
@@ -62,6 +62,8 @@
   │          → event / scene / shots 节点携带 `<FRAGMENT_i_START>…</FRAGMENT_i_END>`
   └─ ⑤⑥    → anchor / ref 边 → 关键帧候选 → 择优 → 片段 → 时间线 / 导演包
 ```
+
+**⑤ 的画面上游是「分镜画面设置」**（`management.storyboard`，纯函数层 `core/storyboard-settings.mjs`）：版式决定每段几格、画幅决定单格比例（单格画幅恒等于成片画幅，换版式不会把格子拉长）、提示词公式决定关键帧 prompt 里出现哪几段（景别 / 角色 / 风格 / 连续性 / 画幅）。分镜规划据此给每个镜头打「第 N 格」，分镜板合成据此排版；业务口径收在 `storyboard-sheets` Agent 里，详见 [`AGENTS.md`](AGENTS.md) §12。
 
 ---
 
@@ -176,6 +178,16 @@
 
 **修复前的真实缺陷**：片段时长散落在 5 处硬编码（分镜 `4+(i%3)`、视频 / 时间线 / 拼接默认 5s、单集包固定 5s），实测产出 12 个片段、时长 4/5/6s 循环、总 60s，而验收清单不含时长项，于是被判「全流程已达成」。现在 30s / 3s → 10 个片段，导演包 `timeline.json` 10 段 × 72 帧 = 720 帧，成片 ffprobe 实测 30.00s，8 项验收全达成。
 
+### 5.5 成片真实性与 AI 制片对话：让「调用过」与「对话过」都可核对（论文之外的扩展层）
+
+**成片真实性（`core/film-policy.mjs`）**：时长规格解决「多长」，真实性策略解决「是不是真的」。`real` 策略（默认）要求每个片段 `provider === 'comfyui'` 且有真实视频文件且未标合成预览，成片必须由真实片段拼接（`source === 'comfyui'` 或 `isRealVideo === true`）；`preview` 策略须显式切换，产物标 `preview-frames` 并在验收记降级。`evaluateFilm()` 输出 `level / blockers / realClips`，与 `verifyRuntime()` 一起把「30s 成片已生成」拆成可逐条证伪的断言——修复前 ComfyUI 一次未被调用，系统却判「全流程已达成」。
+
+**AI 制片对话（`core/step-chat.mjs` 分步 + `core/production-chat.mjs` 项目级）**：每一步的操作都能用中文一句话完成，意图不依赖 LLM（正则分类，零 Key 可用），每个意图都落到与 UI 按钮相同的业务函数（`applyManageAction / executeSteps / runDirector / extractProjectCharacters / assignVoices`），因此「对话改了什么」与「按钮改了什么」在数据层不可区分。三条工程保证：
+
+1. **留痕即记录**：每条消息存意图、参数、实际调用的接口与等价 `curl`，按步落盘 `data/conversations/` 并双写 `management.stepChats`；
+2. **复刻即导出**：`export?format=md` 生成含「按顺序的一键复刻命令串」的 Markdown，`format=json` 可脚本重放——其他用户照抄 curl 即可复现整段流程；
+3. **分账即透明**：步骤执行的 token 记 `step.tokens`，对话生成记 `step.chatTokens`，合计可解释。
+
 ---
 
 ## 6. 可验证清单（机制是否真的落地）
@@ -198,7 +210,7 @@
 | 短剧成片规格（§5.4） | 工作台 ① 的「短剧成片规格」显示 `30s ÷ 3s = 10 个片段 · 24fps · 720 帧`；`GET /runtime` 的 `timeline` 10 段各 3s；跑完后 `final.data.timeline` 10 段 / `duration=30`、每个 `video` 节点 `duration=3`、`film.duration=30` 且 `film.measured=true`；导演包 `timeline.json` 10 段 × `durationSec=3` / `totalFrames=720`；`GET /film` 下载后用 ffprobe 实测 30.00s |
 | 项目管理 | 侧栏搜索 / 筛选 / 收藏 / 归档 / 复制 / 标签，管理面板的快照创建与恢复 |
 
-### 6.1 自动化验证（`npm test` → 346 项全通过）
+### 6.1 自动化验证（`npm test` → 479 项全通过）
 
 机制层面的"真的落地"由测试固化，而非仅靠肉眼检查：
 
@@ -220,6 +232,7 @@
 | 交付格式 | `outputModeOf()` 三态映射；导演包 ZIP 经 Python `zipfile.testzip()` 逐条 CRC 校验 |
 | 导演技能与最终产物验收（§5.3） | `tests/director-skills.test.mjs`：技能清单 / 运行计划（六步 vs 四步）/ 交付设置覆盖 / 验收分级（达成·降级·缺失）/ **时长规格不符即判未达成** / 零 Key 导演阐述；`tests/director-run.test.mjs`：空项目真实编排到 62 节点与 35 文件导演包、六步全 done、**10 片段 × 3s = 30s、ffprobe 实测成片、导演包 timeline 10 段 / 720 帧**、角色音色写回、换技能同步交付设置与强制重打包、缺原著阻断、空步骤链不伪造执行记录 |
 | 短剧成片规格（§5.4） | `tests/runtime-spec.test.mjs`：30/3→10 推导、非整除对齐与钳制、`allocateShots()` 在任意场景数下总和恒等于片段数、项目状态与管理动作、验收逐条列出失败项（含还原「12 片段 / 60s」旧缺陷）、**真实 ffmpeg 成片 ffprobe 实测 30s**、`stitchClips()` 报告实测时长而非标称值 |
+| 成片真实性与制片对话（§5.5） | `tests/film-policy.test.mjs`：`isRealClip` / `isRealFilm` 口径、`evaluateFilm` 在 real/preview 与缺口组合下的分级（零真实片段判缺失、少一段判缺失、预览显式降级）；`tests/step-chat.test.mjs` 32 项与 `tests/production-chat.test.mjs` 9 项：意图分类、对话改 bible/runtime/policy 真实落库、长任务互斥、**导出含一键复刻命令串**、JSON 可重放 |
 | 图调度（DAG 分层） | `tests/graph.test.mjs`：`topoLayers()` 分层、`descendants/ancestors` 上下游子图、`autoLayout()` 自动布局、`validate()` 环检测 |
 | 持久层一致性 | `tests/store.test.mjs`：列表缓存同毫秒连改仍读到最新索引、快照封顶 20 份且同毫秒不互相覆盖 |
 | 极简创建与延迟上传 | `tests/novel-project.test.mjs`：空 text 返回骨架（六步全 pending、停在第 ① 步、不建分集节点但保留画布 DAG）；`attachSource()` 注入节点并完成 ①②；过短正文仍被 40 字校验拦截 |

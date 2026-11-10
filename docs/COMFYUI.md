@@ -10,6 +10,51 @@
 
 三类工作流各自独立成库（`imageWorkflowLib` / `videoWorkflowLib` / `audioWorkflowLib`，选中态 `*ActiveId`，镜像字段 `*Workflow` 供消费端零改动读取）。**音频工作流是可选项**：不导入时音色库的预设音色照常可分配、可用浏览器 SpeechSynthesis 试听，只是没有真实音频样本、角色页的「🎲 抽卡音色」置灰。
 
+### 2.5 媒体生成接口档案与板块绑定（设置页可视化）
+
+**界面怎么用**：设置 → 第二个 Tab 顶部的「🔌 媒体生成接口档案」卡片列出全部档案；点行首 `▸` 展开，可编辑能力标签、常用参数、`extra` 自定义占位符（JSON 对象）、`nodeOverrides` 与档案级 `bindings`（可增删行），点「保存档案」即时落盘；「▶ 测试」按该档案当前参数真实试跑一次。下方「板块 → 接口绑定」有 11 个下拉，选「跟随默认」即解绑，改完点「保存板块绑定」。参数留空表示沿用全局 / 项目自动规格。
+
+生成入口旁的「本次接口」下拉按「项目 + 板块」分别记忆（localStorage）：封面对话框输入栏、角色面板（多视图 / 定妆板各一个）、🎲 抽卡音色、项目工作台的角色 / 封面入口、剧集页「分镜板」与「导出与生成」页顶部的接口栏。**同类档案少于 2 份时不插入下拉**（跟随默认即可，不打扰界面）。默认项会显示当前板块绑定的档案名；临时选中的档案只影响本次请求，不改变全局绑定。切换 / 关闭项目会同步恢复该项目自己的选择。
+
+一个**接口档案** = 一份 ComfyUI「导出(API)」的工作流 JSON + **一套只属于它的请求参数**。
+三类库（`imageWorkflowLib` / `videoWorkflowLib` / `audioWorkflowLib`）里的每一项都是接口档案，
+可标注能力（`capability`：文生图 / 图生图 / 多参考生图 / 图生视频 / TTS…），
+并给不同**板块**绑定不同档案：例如封面用文生图、角色定妆用多参考生图、关键帧用图生图、视频用图生视频。
+
+**板块清单**（`MEDIA_SCOPES`，未绑定时回退该类别的当前选中项，行为与升级前一致）：
+
+| 类别 | 板块 scope | 对应生成入口 |
+|---|---|---|
+| image | `cover` | 设置页 / 项目封面的 `/cover/generate` |
+| image | `poster` | 海报（ providers `kind:'poster'` ） |
+| image | `character` / `character-view` / `character-sheet` | 角色定妆照 / 多视图 / 设定板 |
+| image | `keyframe` / `storyboard` | 分镜关键帧 / 分镜板 |
+| image | `transition` / `grid` | 转场图 / 宫格图 |
+| video | `video` | 图生视频片段 |
+| audio | `voice` | 音色抽卡（TTS） |
+
+**每个档案的 `params`**（未填的字段沿用全局与项目自动规格；填了就**优先于**项目画幅自动推断的宽高）：
+
+| 字段 | 说明 |
+|---|---|
+| `width` / `height` / `steps` / `cfg` | 覆盖 `{{width}}` `{{height}}` `{{steps}}` `{{cfg}}` 与自动识别注入 |
+| `fps` / `frames` | 视频帧率与单片段帧数 |
+| `negativePrompt` / `filenamePrefix` / `model` | 负向词、产物前缀、模型名（`{{model}}`） |
+| `timeoutMs` / `pollIntervalMs` | 单次执行的超时与轮询间隔 |
+| `extra` | 自定义占位符表，如 `{"lora":"filmGrain"}` → 工作流里可写 `{{lora}}` |
+
+`nodeOverrides`（`[{node,input,value}]`）在注入的最前一步精确写入指定节点，值里也能写占位符：
+`{"node":"12","input":"ckpt_name","value":"{{model}}"}` 可让同一套流程按档案切换 checkpoint / UNET / LoRA。
+档案自带的 `bindings` 会替换该类别的全局显式绑定，方便图生图工作流指定不同的提示词节点。
+
+**解析优先级**（`resolveInterface()` 是唯一解析点）：
+`本次请求 interfaceId` > `scopeBindings[板块]` > 类别 `activeId` > 旧镜像字段 `*Workflow`。
+所有生成入口（封面 / 定妆 / 关键帧 / 视频 / 音色抽卡 / 试跑 / 注入自检）都走这条链；
+未绑定板块、档案参数为空时，输出与升级前完全一致。调用日志与产物记录里会带上本次接口 id / 名称。
+
+配置落在全局 `data/comfyui.json` 的 `scopeBindings` 与各库项的 `params` / `nodeOverrides` /
+`bindings` / `capability` 字段；老配置在每次读取时幂等补空字段，工作流本体与镜像绝不丢失。
+
 **逐个工作流独立测试**：每类工作流库的每一行都有「▶ 测试」按钮，只向本地 ComfyUI 提交**该工作流一次真实生成**，不牵动其它行。结果框会显示耗时、成功 / 失败原因、`prompt_id`、产物数量与缩略图（音频工作流显示 `<audio controls>` 播放器而不是缩略图）、注入位置与策略、注入告警；实时进度日志追加在同一结果框中，并把成功 / 失败状态写回该行的 `lastTest` 徽标，可随时点按钮重跑。「▶ 测试全部」则按库顺序串行跑完所有行。同一时间只允许一个试跑任务（单项或批量），避免抢占 ComfyUI 队列。接口也支持可选的自定义测试提示词 `prompt`（音频工作流按朗读文案处理）。
 
 **参数注入分三层，优先级从高到低**：
@@ -49,6 +94,8 @@ extra/manifest.json / README.md    来源信息与导入步骤
 
 路径全部 ASCII、不含模型权重；也可切换「通用 ComfyUI 包」，输出 `manifest.json + shots.json + images/ + workflows/*.json`。
 
+导演包里的工作流不再只写全局镜像：两个通用入口（`workflows/*_api.json` / `extra/comfyui_*_workflow_api.json`，文件名保持兼容）按 `keyframe` / `video` 板块解析出**实际会执行的接口档案**；每个显式绑定的板块再额外导出一份 `*_scope_<板块>_api.json`，并在 `manifest.interfaces` 里记录文件名、档案 id、名称与解析来源（`via`），便于核对包里的工作流来自哪份接口。
+
 ### 4. 相关接口
 
 | 方法 | 路径 | 用途 |
@@ -68,6 +115,13 @@ extra/manifest.json / README.md    来源信息与导入步骤
 | POST | `/api/projects/:id/voices/set` | 手动指定音色；**传候选 id 时自动先转正再绑定**（`promoted: true`），避免角色引用会被 TTL 清掉的候选 |
 | GET / POST | `/api/projects/:id/director-pack` | 下载 / 重新生成导演包 |
 | GET | `/api/projects/:id/film` | 下载拼接后的成片 MP4 |
+| GET | `/api/comfyui/interfaces` | 全部接口档案概览（含参数 / 节点覆盖 / 能力 / 板块绑定，不含工作流本体）+ 板块清单 |
+| POST | `/api/comfyui/interfaces` | 导入接口文件：`{kind, name, workflow, capability?, params?, nodeOverrides?, bindings?}` 或 `{kind, items:[...]}` |
+| PUT | `/api/comfyui/interfaces/:id` | 局部更新档案（改名 / 合并 params，传 null 清空某参数 / 节点覆盖 / 绑定 / 能力；`active:true` 设为默认） |
+| DELETE | `/api/comfyui/interfaces/:id` | 删除档案，自动清掉指向它的板块绑定；删的是选中项时同步清镜像 |
+| PUT | `/api/comfyui/bindings` | 保存板块绑定：整表 `{bindings:{cover:'wf_x'}}` 或单条 `{scope, interfaceId}`；传空 id 解绑；跨类别绑定返回 400 |
+
+生成类接口可带 `interfaceId` 临时覆盖本次使用的接口档案：封面 `/cover/generate` 与 `/cover/ai`、角色定妆 `/characters/views(/all)`、剧集 `/episodes/:no/grids|video|step`、音色抽卡 `/voices/draw`，以及 `/api/comfyui/analyze`、`/run-test`。路由把请求级选择挂到 ComfyUI 配置（`cfg.requestInterfaceId`），由 `createProviders` 的 `runComfy` 统一兜底解析，业务层不必逐层透传；不传时仍按板块绑定 / 默认档案走，行为与升级前一致。`test-one` / `test-batch` 已按被测试的档案参数执行。
 
 ### 5. 音色抽卡（TTS / 语音克隆工作流）
 

@@ -7,36 +7,168 @@ import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
   saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
 import { topoLayers } from '../core/graph.mjs';
 import { resolveRuntimeSpec, allocateShots, shotSequenceStarts } from '../core/runtime-spec.mjs';
+import { parseScriptLine, formatDuration } from '../core/screenplay.mjs';
+import { extractCharacters } from '../core/novel.mjs';
+import { isLikelyPersonName, SURNAMES, NON_PERSON_NAMES } from '../core/character-names.mjs';
+import { resolveStoryboardSettings, panelIndexOf, describeStoryboardSettings } from '../core/storyboard-settings.mjs';
 
 const textOf = (v) => String(v || '').trim();
-const brief = (s, n = 46) => (String(s || '').length > n ? `${String(s).slice(0, n)}…` : String(s || ''));
+// 截断时补上没闭合的引号：剧本 / 分集卡片上的「他还说：「别回头…」」不能缺右引号
+const brief = (s, n = 46) => {
+  const t = String(s || '');
+  if (t.length <= n) return t;
+  const cut = t.slice(0, n);
+  const open = (cut.match(/[「“]/g) || []).length;
+  const close = (cut.match(/[」”]/g) || []).length;
+  return `${cut}${open > close ? '」' : ''}…`;
+};
 
 function findScript(ctx) {
   // 上游可能是 script 节点，也可能是携带剧本副本的 RAG / 规划节点
   return ctx.upstream.find((n) => n.data?.script)?.data?.script || ctx.node.data.script || null;
 }
 
+/* ---------------------------------------------------------- 式(1) 的输入准备
+ * 「剧本不够详细」的另一个根因在输入端：旧实现只把分集 summary + 300 字摘录
+ * 交给编剧，模型手上没有细节可写，只能还回概述。这里改为每集最多 750 字原文、
+ * 最多 12 集（≈9k 字），并把项目角色属性一起下发，让剧本能落到具体的人与物。
+ */
+const SCRIPT_MAX_EPISODES = 12;
+const SCRIPT_EXCERPT_PER_EPISODE = 750;
+
+/** 分集简报：优先用 management.episodes 的完整原文，其次才是节点上缓存的梗概 */
+function episodeBriefs(project, node = {}) {
+  const list = Array.isArray(project.management?.episodes) ? project.management.episodes : [];
+  const src = list.length ? list : (Array.isArray(node.data?.novelEpisodes) ? node.data.novelEpisodes : []);
+  return src.slice(0, SCRIPT_MAX_EPISODES).map((e, i) => {
+    const raw = String(e.text || e.excerpt || '').replace(/\s+/g, ' ').trim();
+    return {
+      no: Number(e.no) || i + 1,
+      title: textOf(e.title),
+      summary: brief(textOf(e.summary), 200),
+      hook: brief(textOf(e.hook), 160),
+      excerpt: raw.length > SCRIPT_EXCERPT_PER_EPISODE ? `${raw.slice(0, SCRIPT_EXCERPT_PER_EPISODE)}…` : raw,
+      sourceTitles: Array.isArray(e.sourceTitles) ? e.sourceTitles.slice(0, 3) : [],
+    };
+  });
+}
+
+/**
+ * 从原著正文里认出「谁在这部戏里说话」。
+ * 只用于剧本兜底：优先「名字 + 冒号 + 引号」这种最强说话人信号，
+ * 其次「名字 + 说 / 问 / 皱眉 / 转身」这类叙述提示。抽不到再退回通用启发式抽取。
+ */
+function castFromText(text = '', limit = 8) {
+  const s = String(text || '');
+  if (!s) return [];
+  const score = new Map();
+  const bump = (raw, w) => {
+    const name = String(raw || '').trim();
+    if (name.length < 2) return;
+    // 「刘左」这种真实人名会被通用规则里的方位词规则挡掉（左 / 右），
+    // 但姓氏开头、又不是明确的非人名（回头 / 刀光 / 门口）时应当收下
+    const ok = isLikelyPersonName(name)
+      || (SURNAMES.includes(name[0]) && !NON_PERSON_NAMES.has(name));
+    if (!ok) return;
+    score.set(name, (score.get(name) || 0) + w);
+  };
+  // 冒号前那一小段（「林夏举着灯笼站在门口：」「沈砚把铜钱放在桌上：」）里认名字：
+  // 小说很少规规矩矩写「林夏：」，多数是「名字 + 动作 + ：」。取这段里最靠左的「姓氏 + 一个字」，
+  // 那就是这句的主语 / 说话人；从右往左会被「站在门口」里的常见姓氏字抢走（夏 → 夏举）。
+  for (const m of s.matchAll(/([^。！？\n]{1,14})[：:]\s*[「“"]/g)) {
+    const head = m[1];
+    for (let i = 0; i < head.length - 1; i += 1) {
+      if (!SURNAMES.includes(head[i])) continue;
+      const name = head.slice(i, i + 2);
+      if (isLikelyPersonName(name) || !NON_PERSON_NAMES.has(name)) { bump(name, 3); break; }
+    }
+  }
+  // 沈砚低声说 / 刘左皱眉 / 林夏站在（引号台词之外的叙述提示）
+  for (const m of s.matchAll(/(?<![\u4e00-\u9fa5])([\u4e00-\u9fa5]{2,4})(?=(?:低声|沉声|轻声|冷笑|苦笑|皱眉|点头|摇头|转身|抬头|开口|说道|问道|回答|说|问|答|道|喊|叫|站起|走进|推开|盯着|看着))/g)) bump(m[1], 1);
+  return [...score.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'))
+    .slice(0, limit).map(([name]) => name);
+}
+
+/** 角色表：优先项目管理里维护的结构化属性（人工改过的也算数），其次才是启发式候选 */
+function scriptCast(project, node = {}) {
+  const managed = (project.management?.characters || []).filter((c) => c && c.name);
+  const toEntry = (c, i) => ({
+    name: c.name, role: c.role || (i === 0 ? '主角' : '配角'), age: c.age || '',
+    gender: c.gender || '', personality: c.personality || '', appearance: c.appearance || '',
+  });
+  const fromNode = Array.isArray(node.data?.characters) ? node.data.characters.filter((c) => c?.name) : [];
+  const text = String(project.management?.source?.text || node.data?.text || node.data?.novelExcerpt || '');
+  // 第 ③ 步常常在第 ④ 步「角色资产库」之前跑：这时管理里的角色表还是空的（或只有主角）。
+  // 只有一两个人却要写对话戏时，Provider 会把所有台词判给同一个名字，
+  // 所以少于 2 人时用正文里认出来的说话人补齐；人工维护过 2 人以上则完全以管理表为准。
+  if (managed.length >= 2) return managed.slice(0, 12).map(toEntry);
+  const detected = castFromText(text, 8);
+  const names = [...new Set([...managed.map((c) => c.name), ...detected, ...fromNode.map((c) => c.name)])].slice(0, 8);
+  if (names.length) {
+    const byName = new Map([...fromNode, ...managed].map((c) => [c.name, c]));
+    return names.map((name, i) => toEntry({ ...byName.get(name), name }, i));
+  }
+  return extractCharacters(text, 6).map((c) => c.name).filter(Boolean)
+    .map((name, i) => toEntry({ name }, i));
+}
+
+function countDialogue(script = {}) {
+  let n = 0;
+  for (const s of (Array.isArray(script.scenes) ? script.scenes : [])) {
+    for (const line of (Array.isArray(s.script) ? s.script : [])) {
+      if (parseScriptLine(line).kind === 'dialogue') n += 1;
+    }
+  }
+  return n;
+}
+
 defineAgent({
   id: 'screenwriter', label: '编剧智能体', group: '叙事', icon: '✎', color: '#a78bfa',
-  description: '把一句话创意扩展为统一格式的剧本（论文式 1）',
+  description: '把一句话创意 / 小说分集写成详尽的统一格式剧本（论文式 1）：逐集展开场次，每场带人物、目标、冲突、转折、节拍与转场',
   async run(ctx) {
     const idea = textOf(ctx.node.data.text) || textOf(ctx.inputs.find((i) => i.text)?.text) || '一位侦探在雨夜收到一封没有署名的信';
+    const bible = ctx.project.management?.bible || {};
+    const episodes = episodeBriefs(ctx.project, ctx.node);
+    const characters = scriptCast(ctx.project, ctx.node);
+    const runtime = ctx.settings?.runtime?.schema === 1 ? ctx.settings.runtime : resolveRuntimeSpec(ctx.project);
     ctx.progress(0.2);
-    // 创作项目：小说标题 / 分集梗概 / 原著角色随输入下发，保证剧本来自用户上传的内容
+    // 创作项目：小说标题 / 分集梗概与原文 / 原著角色随输入下发，保证剧本来自用户上传的内容
     const script = await ctx.providers.generate('screenplay', {
       idea, style: ctx.settings.style,
-      title: ctx.node.data.novelTitle || undefined,
-      episodes: ctx.node.data.novelEpisodes || undefined,
-      characters: ctx.node.data.characters || undefined,
+      title: ctx.node.data.novelTitle || bible.title || undefined,
+      genre: bible.genre || undefined,
+      tone: bible.tone || undefined,
+      logline: bible.logline || undefined,
+      worldview: bible.worldview ? brief(bible.worldview, 240) : undefined,
+      episodes: episodes.length ? episodes : undefined,
+      characters: characters.length ? characters : ctx.node.data.characters || undefined,
       novelExcerpt: ctx.node.data.novelExcerpt || undefined,
+      // 时长规格随输入下发：写剧本时就知道这一集大概多长，避免写出 20 分钟塞进 30 秒的戏
+      runtime: { totalSeconds: runtime.totalSeconds, clipSeconds: runtime.clipSeconds, clipCount: runtime.clipCount },
     }, ctx.signal);
-    ctx.log('think', `识别到 ${script.characters.length} 位角色、${script.scenes.length} 个场景，正在统一剧本格式`);
+
+    const scenes = Array.isArray(script.scenes) ? script.scenes : [];
+    const dialogue = countDialogue(script);
+    const duration = Number(script.durationSec) || 0;
+    ctx.log('think', `识别到 ${script.characters?.length || 0} 位角色、${scenes.length} 场、${dialogue} 句对白，预估 ${formatDuration(duration)}，正在统一剧本格式`);
+    if (duration > runtime.totalSeconds) {
+      // 剧本是「故事需要多长」，成片规格是「这一版拍多长」：两者不一致时说清楚，别让用户以为算错了
+      ctx.log('info', `剧本预估 ${formatDuration(duration)}，超过成片规格 ${runtime.totalSeconds}s：第⑤步会按规格截取镜头，长剧本用于分集拍摄`);
+    }
+    if (episodes.length && scenes.length) {
+      const missing = episodes.map((e) => e.no).filter((no) => !scenes.some((s) => Number(s.episodeNo) === Number(no)));
+      if (missing.length) ctx.log('warn', `第 ${missing.join('、')} 集还没有对应场次（剧本覆盖 ${scenes.length} 场），可在「本集剧本」里单独补齐`);
+    }
     ctx.progress(0.8);
     ctx.setTitle(`剧本 · ${script.title}`);
     ctx.patch({
       text: idea, script,
-      summary: `${script.genre}｜${script.logline}`,
-      sceneCount: script.scenes.length, characterCount: script.characters.length,
+      summary: `${script.genre || '未分类'}｜${scenes.length} 场 · ${dialogue} 句对白 · 预估 ${formatDuration(duration)}`,
+      sceneCount: scenes.length, characterCount: script.characters?.length || 0,
+      dialogueCount: dialogue, durationSec: duration,
+      acts: Array.isArray(script.acts) ? script.acts.length : 0,
+      coverage: script.coverage || null,
     });
   },
 });
@@ -74,9 +206,75 @@ defineAgent({
   id: 'decomposer', label: '层次化叙事分解', group: '叙事', icon: '⑂', color: '#22d3ee',
   description: '事件 → 场景 → 镜头递归分解，运行中动态展开画布（论文式 5）',
   async run(ctx) {
-    const script = findScript(ctx) || { scenes: [], characters: [] };
+    // 上游（RAG 节点）可能带着旧一轮的空剧本副本（scenes/characters 都为空）：
+    // 优先取「非空」的那份，再退回画布剧本节点，最后才是空骨架——
+    // 否则角色表会丢成空数组，分镜里出现主题模板的玩具角色而不是原著角色。
+    const usable = (s) => s && (Array.isArray(s.scenes) && s.scenes.length
+      || Array.isArray(s.characters) && s.characters.length);
+    const fromUpstream = findScript(ctx);
+    const fromScriptNode = ctx.project.nodes.find((n) => n.type === 'script')?.data?.script || null;
+    // 画布剧本节点是式(1)的唯一事实来源；上游节点的 script 只是随路副本，
+    // 可能是旧一轮的陈旧拷贝（有场景但角色表为空），因此优先取剧本节点本身。
+    let script = usable(fromScriptNode) ? fromScriptNode
+      : usable(fromUpstream) ? fromUpstream
+        : (fromUpstream || fromScriptNode || { scenes: [], characters: [] });
+    /**
+     * 剧本兜底：第③步没跑通（历史项目 / 节点中断 / 模型异常）时 script.scenes 为空，
+     * 后面的 events 只能拆出 0 个事件 → 0 场景 → 0 镜头，第⑤步就永远「没有分镜」。
+     * 这里按分集梗概 / 原著段落临时补出可拍摄的场景，让分解链继续往下走；
+     * 明确记一条 warn，提示用户回第③步重跑以拿到完整剧本与台词（不假装剧本已生成）。
+     */
+    if (!Array.isArray(script.scenes) || !script.scenes.length) {
+      const eps = (ctx.project.management?.episodes || []).filter((e) => e && (e.summary || e.text));
+      const source = textOf(ctx.node.data.originalCorpus) || textOf(ctx.project.management?.source?.text);
+      const chunks = source ? chunkNovel(source) : [];
+      const fallbackScenes = (eps.length
+        ? eps.map((e, i) => ({
+          id: `sc_fallback_${i + 1}`,
+          location: e.title || `第 ${e.no || i + 1} 集`,
+          time: i === 0 ? '开篇' : '接续',
+          summary: textOf(e.summary) || brief(String(e.text || '').replace(/\s+/g, ' '), 80),
+        }))
+        : chunks.slice(0, 3).map((c, i) => ({
+          id: `sc_fallback_${i + 1}`,
+          location: `原著段落 ${i + 1}`,
+          time: i === 0 ? '开篇' : '接续',
+          summary: brief(String(c.text || '').replace(/\s+/g, ' '), 80),
+        }))).slice(0, 4);
+      if (fallbackScenes.length) {
+        script = {
+          ...script,
+          scenes: fallbackScenes,
+          logline: script.logline || fallbackScenes[0].summary || '',
+          characters: script.characters || [],
+          __fallback: true,
+        };
+        ctx.log('warn', `第③步剧本为空，已按分集梗概临时建立 ${fallbackScenes.length} 个场景继续分解；建议回到第③步重跑以获得完整剧本与台词`);
+      }
+    }
     const context = ctx.upstream.find((n) => n.data?.context)?.data?.context || null;
     const sceneLimit = Math.max(1, Math.min(4, Number(ctx.node.data.sceneLimit) || 2));
+    // 重跑分解前先清掉上一轮展开的节点：本节点 data.spawned 记录了它创建的 id，
+    // 连带删除这些节点下游的镜头链（关键帧 / 择优 / 片段 / 转场），否则重跑会留下两套重复节点。
+    const CORE_TYPES = new Set(['idea', 'script', 'episode', 'rag', 'character', 'plan', 'camera', 'final', 'note', 'upload']);
+    const spawned = Array.isArray(ctx.node.data.spawned) ? ctx.node.data.spawned.filter(Boolean) : [];
+    if (spawned.length) {
+      const byId = new Map(ctx.project.nodes.map((n) => [n.id, n]));
+      const doomed = new Set(spawned.filter((id) => byId.has(id) && !CORE_TYPES.has(byId.get(id).type)));
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const e of ctx.project.edges) {
+          if (doomed.has(e.from) && !doomed.has(e.to)) { doomed.add(e.to); grew = true; }
+        }
+      }
+      for (const id of [...doomed]) if (CORE_TYPES.has(byId.get(id)?.type)) doomed.delete(id);
+      if (doomed.size) {
+        ctx.project.nodes = ctx.project.nodes.filter((n) => !doomed.has(n.id));
+        ctx.project.edges = ctx.project.edges.filter((e) => !doomed.has(e.from) && !doomed.has(e.to));
+        ctx.log('info', `已清理上一轮展开的 ${doomed.size} 个节点，重新生成事件 → 场景 → 镜头链`);
+      }
+    }
     // 短剧时长规格：全片镜头总数必须精确等于片段总数（30s / 3s → 10 个镜头）
     const runtime = ctx.settings?.runtime?.schema === 1 ? ctx.settings.runtime : resolveRuntimeSpec(ctx.project);
     ctx.progress(0.25);
@@ -146,7 +344,7 @@ defineAgent({
         // 预生成镜头概要，供机位依赖图与一致性报告使用；片段随 shots 提示词下发（式 6）
         const shots = await ctx.providers.generate('shots', {
           scene: sceneSpec, count: shotCount, clipSeconds: runtime.clipSeconds, idea: script.logline,
-          fragments,
+          characters: script.characters, fragments,
         }, ctx.signal);
         const planned = (shots.shots || []).slice(0, shotCount).map((s, k) => ({
           ...s, shotNo: sequenceStart + k, sequence: sequenceStart + k, duration: runtime.clipSeconds,
@@ -249,10 +447,18 @@ defineAgent({
     // 导演风格随上下文下发（编排器注入 settings.aesthetic）；
     // 分镜阶段就要带上主色 / 光线 / 媒介，否则后续出图只能看见镜头本身而看不见风格。
     const aesthetic = ctx.settings?.aesthetic || null;
+    // 分镜画面设置随分镜规划下发：镜头按「分镜板第几格」组织景别变化，
+    // 出来的九宫格才是一段完整的镜头语法（远→中→近→特写），而不是九张同景别。
+    const sheet = resolveStoryboardSettings(ctx.project);
     const res = await ctx.providers.generate('shots', {
       scene, count, clipSeconds, idea: d.script?.logline,
+      characters: d.script?.characters,
       fragments: d.fragments || formatFragments(d.relevantChunks, 4),
       aesthetic,
+      frame: {
+        layout: sheet.layout, cols: sheet.cols, rows: sheet.rows, cells: sheet.cells,
+        aspect: sheet.resolvedAspect, note: describeStoryboardSettings(sheet),
+      },
     }, ctx.signal);
     const shots = (res.shots || []).slice(0, count).map((s, i) => ({
       ...s, sequence: sequenceStart + i, shotNo: sequenceStart + i, duration: clipSeconds,
@@ -260,6 +466,8 @@ defineAgent({
       aestheticId: aesthetic?.id || null,
       paletteName: aesthetic?.paletteName || null,
       medium: aesthetic?.medium?.length ? aesthetic.medium[(sequenceStart + i) % aesthetic.medium.length] : null,
+      // 格位：分镜板（九宫格 / 六宫格…）里这一镜落在第几格，宫格图与灯箱都按它对齐
+      panel: panelIndexOf(sheet, sequenceStart + i),
     }));
     // LLM 少给镜头时补齐，保证「片段数 = clipCount」严格成立（零 Key mock 会正好给 count 个）
     const template = shots[shots.length - 1] || {
@@ -330,7 +538,8 @@ defineAgent({
     ctx.progress(0.95);
     ctx.patch({
       shots, shotCount: shots.length, chain, scene,
-      summary: `${shots.length} 镜头 · ${shots.length - 1} 转场锚点 · ${shots.length * 4 + shots.length - 1} 个节点`,
+      sheet: { layout: sheet.layout, cols: sheet.cols, rows: sheet.rows, cells: sheet.cells, aspect: sheet.resolvedAspect },
+      summary: `${shots.length} 镜头 · ${shots.length - 1} 转场锚点 · ${shots.length * 4 + shots.length - 1} 个节点 · 分镜板 ${sheet.cols}×${sheet.rows}`,
     });
   },
 });
@@ -354,10 +563,12 @@ defineAgent({
     const videos = (ctx.project.nodes || []).filter((n) => n.type === 'video');
     const doneVideos = videos.filter((n) => n.status === 'done').length;
     ctx.progress(0.9);
+    // 第⑤步只出分镜图：此时片段通常还是 0/N，不能让它看起来像「漏生成」。
+    const clipNote = doneVideos ? `${doneVideos}/${videos.length} 个片段已出` : `${videos.length} 个片段待第⑥步生成`;
     ctx.patch({
       cameras: cams, anchorCount: anchors, parallelLayers,
       shotCount: flatShots.length, videoReady: `${doneVideos}/${videos.length}`,
-      summary: `${cams.length} 个机位 · ${parallelLayers} 个可并发层 · ${anchors} 条视觉锚点 · ${videos.length} 个片段节点`,
+      summary: `${cams.length} 个机位 · ${parallelLayers} 个可并发层 · ${anchors} 条视觉锚点 · ${clipNote}`,
     });
     ctx.log('think', `拓扑分层完成：无依赖机位可并发生成，依赖机位继承前驱视觉锚点`);
   },

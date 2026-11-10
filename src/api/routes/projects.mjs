@@ -1,23 +1,25 @@
 // 项目域：新建 / 导入 / 运行控制 / 模板重建 / 自动排布 / 画布对话 / 项目 CRUD
-import { json, readBody } from '../http.mjs';
+import { json, readBody, NOVEL_BODY_LIMIT } from '../http.mjs';
 import { MATCH } from './match.mjs';
 import { loadProject, saveProject, deleteProject, uid } from '../../core/store.mjs';
 import { emit } from '../../core/events.mjs';
 import { buildNovelProject, attachSource } from '../../pipelines/novel-project.mjs';
-import { broadcastMeta } from '../../core/step-runner.mjs';
+import { broadcastMeta, reconcileSteps } from '../../core/step-runner.mjs';
 import { stepProgress } from '../../core/project-steps.mjs';
 import { buildTemplate } from '../../pipelines/templates.mjs';
 import { validate, autoLayout } from '../../core/graph.mjs';
 import { runProject, stopProject, isRunning } from '../../core/orchestrator.mjs';
 import { chatWithCanvas } from '../../agents/canvas-agent.mjs';
 import { buildSourceView } from '../../core/source-view.mjs';
+import { verifyDirectorDeliverables } from '../../core/director-skills.mjs';
 
 export async function handleProjects(req, res, url) {
   const { pathname } = url;
   const method = req.method || 'GET';
 
   if (pathname === '/api/projects' && method === 'POST') {
-    const body = await readBody(req);
+    // 创作项目可在创建时直接带上整本小说（files / text），按小说上限放行请求体
+    const body = await readBody(req, NOVEL_BODY_LIMIT);
     // 新逻辑：创作项目只要求「项目名称」必填，小说 / 分集 / 风格全部进项目后逐步补充或 AI 生成
     if ((body.kind === 'novel' || body.novel) && !String(body.name || '').trim()) {
       return json(res, { error: '项目名称不能为空：先给项目起个名字，其他信息可以之后逐步补充' }, 400), true;
@@ -60,7 +62,8 @@ export async function handleProjects(req, res, url) {
     const project = loadProject(id);
     if (!project) return json(res, { error: '项目不存在' }, 404), true;
     if (isRunning(id)) return json(res, { error: '项目正在运行，稍后再上传' }, 409), true;
-    const body = await readBody(req);
+    // 小说全文走请求体上传，按小说上限放行（默认 8MB 装不下百万字原著）
+    const body = await readBody(req, NOVEL_BODY_LIMIT);
     try {
       const r = attachSource(project, {
         text: body?.text, filename: body?.filename, split: body?.split,
@@ -158,7 +161,15 @@ export async function handleProjects(req, res, url) {
     const id = projMatch[1];
     if (method === 'GET') {
       const project = loadProject(id);
-      return project ? (json(res, project), true) : (json(res, { error: '项目不存在' }, 404), true);
+      if (!project) return json(res, { error: '项目不存在' }, 404), true;
+      // 打开项目时校正「已完成但没产物」的步骤（如第⑤步只有占位图），
+      // 否则刷新后依然显示全绿，用户找不到真正的缺口。
+      const fixed = reconcileSteps(project);
+      if (fixed.length) saveProject(project);
+      // 实时最终产物验收（临时字段，不落盘）：第⑦步面板的「当前状态」数据源，
+      // management.director.lastRun 只是上次导演全流程跑完时的历史快照。
+      project.verification = verifyDirectorDeliverables(project);
+      return json(res, project), true;
     }
     if (method === 'PUT') {
       const body = await readBody(req);
@@ -166,6 +177,7 @@ export async function handleProjects(req, res, url) {
         return json(res, { error: '项目数据不完整' }, 400), true;
       }
       body.id = id;
+      delete body.verification;   // 前端回传的临时字段：以服务端实时计算为准，绝不落盘
       const check = validate(body.nodes, body.edges);
       if (!check.ok) emit('log', { projectId: id, level: 'warn', message: `画布存在 ${check.dangling} 条悬空边或 ${check.cycles.length} 个环，已自动忽略` });
       saveProject(body);

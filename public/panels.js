@@ -2,6 +2,7 @@
 import { NODE_TYPES, typeOf, STATUS_LABEL, previewHTML } from './nodes.js';
 import { showPage } from './page.js';
 import { $, esc, fmt } from './utils.js';
+import { SCOPE_LABELS, scopeList, interfacesForScope, invalidateInterfaces } from './interface-picker.js';
 
 
 /* ---------- Toast ---------- */
@@ -52,9 +53,21 @@ export async function openSettings(project, onSave) {
   let cfg = {};
   let roster = { models: [], activeModelId: '' };   // 全局模型库（所有 AI 入口共用）
   let editingId = null;   // 正在编辑的档案 id；null = 新增
+  // 媒体生成接口档案概览：GET /config 的 summary 与 /interfaces 同构，避免重复请求
+  let ifaceData = { interfaces: [], scopeBindings: {}, scopes: [] };
+  const applySummary = (summary) => {
+    if (!summary) return;
+    ifaceData = {
+      interfaces: Array.isArray(summary.interfaces) ? summary.interfaces : [],
+      scopeBindings: summary.scopeBindings || {},
+      scopes: Array.isArray(summary.scopes) ? summary.scopes : [],
+    };
+  };
   try {
     const r = await fetch('/api/comfyui/config');
-    cfg = (await r.json()).config || {};
+    const d = await r.json();
+    cfg = d.config || {};
+    applySummary(d.summary);
   } catch { /* 后端不可达时仍允许编辑模型设置 */ }
   try {
     const r = await fetch('/api/system/llm-models');
@@ -114,6 +127,17 @@ export async function openSettings(project, onSave) {
         </div>
         <div class="field"><label>ComfyUI 地址</label><input id="cf-base" value="${esc(cfg.baseUrl || 'http://127.0.0.1:8188')}" placeholder="http://127.0.0.1:8188"></div>
         <div class="cf-note">需以 <code>--listen 127.0.0.1 --port 8188</code> 启动 ComfyUI。未配置对应工作流时，该环节自动使用 Mock 自绘，流水线不会中断。</div>
+      </div>
+
+      <div class="cf-section" id="iface-section">
+        <h4>🔌 媒体生成接口档案 <span class="cf-tag">一份 API 工作流 + 一套请求参数</span></h4>
+        <div class="cf-note">每个接口档案就是一份 ComfyUI「导出(API)」工作流，可以单独设置负向词、宽高、步数、CFG、帧率帧数、模型名、自定义占位符与节点级覆盖；<b>参数留空表示沿用全局值</b>。下方「板块绑定」决定封面 / 定妆 / 关键帧 / 视频 / 音色各自用哪个接口；生成入口旁的下拉还能临时覆盖本次选择。</div>
+        <div class="cf-row" style="margin-top:9px">
+          <button class="btn" id="iface-refresh" type="button">↻ 刷新档案</button>
+          <button class="btn primary" id="iface-save-bindings" type="button">保存板块绑定</button>
+        </div>
+        <div class="iface-lib" id="iface-lib"></div>
+        <div id="iface-bindings"></div>
       </div>
 
       <div class="cf-section">
@@ -476,6 +500,11 @@ export async function openSettings(project, onSave) {
 
   const applyConfig = (d) => {
     if (d?.config) { cfg = d.config; renderLib('image'); renderLib('video'); renderLib('audio'); }
+    // 接口档案与板块绑定同源：库项增删改 / 试跑写回 lastTest 后同步刷新本卡片与页面上下拉
+    applySummary(d?.summary);
+    renderInterfaces();
+    renderBindings();
+    invalidateInterfaces().catch(() => {});
   };
 
   const deleteItem = async (kind, entry, isActive) => {
@@ -730,6 +759,194 @@ export async function openSettings(project, onSave) {
     root.querySelector(`#cf-testall-${kind}`)?.addEventListener('click', () =>
       testBatch(kind, (cfg[libKey(kind)] || []).map((e) => e.id)));
   }
+
+  /* ---------- 媒体生成接口档案：一套参数 / 节点覆盖 / 板块绑定 ---------- */
+  const IFACE_PARAMS = [
+    { key: 'negativePrompt', label: '负向提示词', type: 'text', wide: true },
+    { key: 'model', label: '模型名 {{model}}', type: 'text' },
+    { key: 'filenamePrefix', label: '产物文件名前缀', type: 'text' },
+    { key: 'width', label: '宽 width', type: 'number' },
+    { key: 'height', label: '高 height', type: 'number' },
+    { key: 'steps', label: '步数 steps', type: 'number' },
+    { key: 'cfg', label: 'CFG', type: 'number' },
+    { key: 'fps', label: '帧率 fps', type: 'number' },
+    { key: 'frames', label: '帧数 frames', type: 'number' },
+    { key: 'timeoutMs', label: '超时 ms', type: 'number' },
+    { key: 'pollIntervalMs', label: '轮询 ms', type: 'number' },
+  ];
+  const IFACE_KIND_LABEL = { image: '出图', video: '视频', audio: '音频' };
+  const openIfaceIds = new Set();
+  let bindingsDirty = false;
+
+  const ifaceById = (id) => (ifaceData.interfaces || []).find((e) => e.id === id) || null;
+
+  function paramSummary(e) {
+    const p = e.params || {};
+    const keys = Object.keys(p).filter((k) => k !== 'extra' && p[k] !== '' && p[k] !== undefined && p[k] !== null);
+    const bits = keys.slice(0, 5).map((k) => `${k}=${String(p[k]).slice(0, 16)}`);
+    if (p.extra && Object.keys(p.extra).length) bits.push(`extra:${Object.keys(p.extra).length}`);
+    if (!bits.length) return '沿用全局参数';
+    return `${bits.join(' · ')}${keys.length > 5 ? ` …+${keys.length - 5}` : ''}`;
+  }
+
+  function rowHTML(kind, r = {}) {
+    return `<div class="iface-row" data-row="${kind}">
+      <input data-cell="node" placeholder="节点 id" value="${esc(r.node || '')}">
+      <input data-cell="input" placeholder="输入名" value="${esc(r.input || '')}">
+      <input data-cell="value" placeholder="${kind === 'override' ? '值 / {{model}}' : '{{prompt}} / {{negative_prompt}}'}" value="${esc(r.value ?? '')}">
+      <button class="wf-del" type="button" data-act="del-row" title="删除这一行">✕</button>
+    </div>`;
+  }
+  const rowsHTML = (kind, list) => `<div data-rows="${kind}">${(Array.isArray(list) ? list : []).map((r) => rowHTML(kind, r)).join('')}</div>`;
+
+  function renderInterfaces() {
+    const box = root.querySelector('#iface-lib');
+    if (!box) return;
+    const list = ifaceData.interfaces || [];
+    if (!list.length) {
+      box.innerHTML = `<div class="wf-empty">暂无接口档案 · 先在下方工作流库导入「导出(API)」JSON，即可在这里设置参数与板块绑定</div>`;
+      return;
+    }
+    box.innerHTML = list.map((e) => {
+      const open = openIfaceIds.has(e.id);
+      const bound = (e.boundScopes || []).map((s) => SCOPE_LABELS[s] || s).join('、');
+      return `<div class="iface-item ${open ? 'open' : ''}" data-id="${esc(e.id)}">
+        <div class="iface-head">
+          <button class="iface-toggle" type="button" data-act="toggle" title="展开 / 收起参数">${open ? '▾' : '▸'}</button>
+          <b class="iface-name">${esc(e.name)}</b>
+          <span class="wf-badge none">${esc(IFACE_KIND_LABEL[e.kind] || e.kind)}</span>
+          ${e.active ? '<span class="wf-badge ok">默认</span>' : ''}
+          ${e.capability ? `<span class="wf-badge">${esc(e.capability)}</span>` : ''}
+          <span class="iface-summary">${e.nodes || 0} 节点 · ${esc(paramSummary(e))}</span>
+          ${bound ? `<span class="wf-badge run" title="已绑定到这些板块">用于 ${esc(bound)}</span>` : ''}
+          <button class="wf-test" type="button" data-act="test" title="按该档案的参数真实试跑一次">▶ 测试</button>
+          <button class="btn sm" type="button" data-act="save">保存档案</button>
+        </div>
+        <div class="iface-editor" ${open ? '' : 'hidden'}>
+          <div class="field"><label>能力标签（文生图 / 图生图 / 多参考生图 …）</label>
+            <input data-field="capability" value="${esc(e.capability || '')}" placeholder="文生图"></div>
+          <div class="modal-grid">
+            ${IFACE_PARAMS.map((f) => `<div class="field" ${f.wide ? 'style="grid-column:1/-1"' : ''}><label>${esc(f.label)}</label>
+              <input type="${f.type}" data-param="${f.key}" value="${esc(e.params?.[f.key] ?? '')}" placeholder="留空 = 沿用全局"></div>`).join('')}
+          </div>
+          <div class="field"><label>自定义占位符 extra（JSON 对象，工作流里可写 {{key}}）</label>
+            <textarea class="cf-code" rows="2" data-field="extra" placeholder='{"lora":"myLora.safetensors"}'>${esc(JSON.stringify(e.params?.extra || {}, null, 2))}</textarea></div>
+          <div class="field"><label>节点覆盖 nodeOverrides（精确写模型 / LoRA / 采样器槽位，值可写 {{model}}）</label>
+            ${rowsHTML('override', e.nodeOverrides)}
+            <button class="btn sm" type="button" data-act="add-row" data-row="override">＋ 添加一行</button></div>
+          <div class="field"><label>档案级注入点 bindings（指定 {{prompt}} 写到哪个节点，留空则用全局绑定）</label>
+            ${rowsHTML('binding', e.bindings)}
+            <button class="btn sm" type="button" data-act="add-row" data-row="binding">＋ 添加一行</button></div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderBindings() {
+    const box = root.querySelector('#iface-bindings');
+    if (!box || (bindingsDirty && box.querySelector('select[data-scope]'))) return;
+    const scopes = scopeList(ifaceData);
+    box.innerHTML = `<h4 style="margin:14px 0 8px; font-size:12px">板块 → 接口绑定 <span class="cf-tag">留空 = 跟随该类别默认</span></h4>
+      <div class="modal-grid">${scopes.map((s) => {
+        const bound = ifaceData.scopeBindings?.[s.id] || '';
+        const list = interfacesForScope(ifaceData, s.id);
+        const active = list.find((e) => e.active);
+        return `<div class="field"><label>${esc(s.label)} · ${esc(s.kindLabel)}</label>
+          <select data-scope="${esc(s.id)}">
+            <option value="">${active ? `跟随默认（${esc(active.name)}）` : '跟随默认接口'}</option>
+            ${list.map((e) => `<option value="${esc(e.id)}" ${bound === e.id ? 'selected' : ''}>${esc(e.name)}${e.capability ? ` · ${esc(e.capability)}` : ''}</option>`).join('')}
+          </select></div>`;
+      }).join('')}</div>
+      <div class="cf-note">绑定后，该板块的所有生成请求都会用这份接口与它自带的参数；生成入口旁的「本次接口」下拉可临时覆盖。改完点上方「保存板块绑定」。</div>`;
+  }
+
+  const collectRows = (item, kind) => [...item.querySelectorAll(`.iface-row[data-row="${kind}"]`)].map((row) => ({
+    node: row.querySelector('[data-cell="node"]')?.value.trim() || '',
+    input: row.querySelector('[data-cell="input"]')?.value.trim() || '',
+    value: row.querySelector('[data-cell="value"]')?.value ?? '',
+  })).filter((r) => r.node && r.input);
+
+  async function saveInterface(item, e) {
+    let payload;
+    try {
+      const params = {};
+      item.querySelectorAll('[data-param]').forEach((inp) => {
+        const v = String(inp.value ?? '').trim();
+        params[inp.dataset.param] = v === '' ? '' : (inp.type === 'number' ? Number(v) : v);
+      });
+      const extraText = item.querySelector('[data-field="extra"]')?.value.trim() || '';
+      if (extraText) {
+        let extra;
+        try { extra = JSON.parse(extraText); } catch { throw new Error('自定义占位符不是合法 JSON'); }
+        if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('自定义占位符必须是 JSON 对象');
+        params.extra = extra;
+      } else params.extra = {};
+      payload = {
+        capability: item.querySelector('[data-field="capability"]')?.value.trim() || '',
+        params,
+        nodeOverrides: collectRows(item, 'override'),
+        bindings: collectRows(item, 'binding'),
+      };
+    } catch (err) { toast(`参数填写有误：${err.message}`, 'err'); return; }
+    try {
+      const d = await json(`/api/comfyui/interfaces/${encodeURIComponent(e.id)}`, 'PUT', payload);
+      applySummary(d.summary);
+      cfg = d.config || cfg;
+      renderInterfaces();
+      renderBindings();
+      await invalidateInterfaces();
+      toast(`接口档案「${e.name}」已保存`, 'ok');
+    } catch (err) { toast(`保存失败：${err.message}`, 'err'); }
+  }
+
+  root.querySelector('#iface-lib')?.addEventListener('click', (ev) => {
+    const item = ev.target.closest('.iface-item');
+    if (!item) return;
+    const e = ifaceById(item.dataset.id);
+    if (!e) return;
+    const actEl = ev.target.closest('[data-act]');
+    const act = actEl && item.contains(actEl) ? actEl.dataset.act : undefined;
+    if (act === 'toggle') {
+      if (openIfaceIds.has(e.id)) openIfaceIds.delete(e.id); else openIfaceIds.add(e.id);
+      renderInterfaces();
+      return;
+    }
+    if (act === 'del-row') { actEl.closest('.iface-row')?.remove(); return; }
+    if (act === 'add-row') {
+      item.querySelector(`[data-rows="${actEl.dataset.row}"]`)?.insertAdjacentHTML('beforeend', rowHTML(actEl.dataset.row));
+      return;
+    }
+    if (act === 'test') { testOne(e.kind, { id: e.id, name: e.name }); return; }
+    if (act === 'save') { saveInterface(item, e); }
+  });
+
+  root.querySelector('#iface-bindings')?.addEventListener('change', () => { bindingsDirty = true; });
+  root.querySelector('#iface-save-bindings')?.addEventListener('click', async () => {
+    const bindings = {};
+    root.querySelectorAll('#iface-bindings select[data-scope]').forEach((sel) => { bindings[sel.dataset.scope] = sel.value; });
+    try {
+      const d = await json('/api/comfyui/bindings', 'PUT', { bindings });
+      applySummary(d.summary);
+      cfg = d.config || cfg;
+      bindingsDirty = false;
+      renderInterfaces();
+      renderBindings();
+      await invalidateInterfaces();
+      toast('板块绑定已保存', 'ok');
+    } catch (err) { toast(`保存绑定失败：${err.message}`, 'err'); }
+  });
+  root.querySelector('#iface-refresh')?.addEventListener('click', async () => {
+    try {
+      const data = await invalidateInterfaces();
+      ifaceData = { interfaces: data.interfaces, scopeBindings: data.scopeBindings, scopes: data.scopes };
+      renderInterfaces();
+      renderBindings();
+      toast('接口档案已刷新', 'ok');
+    } catch { toast('刷新失败', 'err'); }
+  });
+
+  renderInterfaces();
+  renderBindings();
 }
 
 /* ---------- 新建项目 ---------- */
@@ -859,7 +1076,12 @@ export function renderInspector(node, project, handlers) {
 
   const kv = (k, v) => `<div class="insp-kv"><span>${esc(k)}</span><span>${esc(fmt(v))}</span></div>`;
   const extra = [];
-  if (d.script) extra.push(kv('剧本', `${d.script.title || ''} · ${d.script.genre || ''}`));
+  if (d.script) {
+    const sc = d.script;
+    const dur = Number(sc.durationSec) || (sc.scenes || []).reduce((n, s) => n + (Number(s.durationSec) || 0), 0);
+    extra.push(kv('剧本', `${sc.title || ''} · ${sc.genre || ''}`));
+    extra.push(kv('场次 / 角色', `${sc.scenes?.length || 0} 场 · ${sc.characters?.length || 0} 位${dur ? ` · 预估 ${Math.round(dur)}s` : ''}`));
+  }
   if (d.shotPlan) extra.push(kv('规划镜头', d.plannedShots || d.shotPlan.reduce((a, s) => a + (s.shots?.length || 0), 0)));
   if (d.shots) extra.push(kv('镜头数', d.shots.length));
   if (d.candidates) extra.push(kv('候选择优', `${(d.selected ?? 0) + 1} / ${d.candidates.length}`));
@@ -869,7 +1091,12 @@ export function renderInspector(node, project, handlers) {
   if (d.clip) extra.push(kv('片段时长', `${d.duration}s`));
 
   let details = '';
-  if (d.script?.scenes) details = `<div class="insp-card"><h4>剧本场景</h4><div class="pre">${esc(d.script.scenes.map((s, i) => `${i + 1}. ${s.location}（${s.time}）\n   ${s.summary}`).join('\n'))}</div></div>`;
+  if (d.script?.scenes) details = `<div class="insp-card"><h4>统一格式剧本</h4><div class="pre">${esc(d.script.scenes.map((s, i) => {
+    const head = [s.interior, s.location].filter(Boolean).join(' · ');
+    const meta = [s.time, s.durationSec ? `${s.durationSec}s` : '', `EP${s.episodeNo || 1}`].filter(Boolean).join(' · ');
+    const craft = [s.objective ? `目标：${s.objective}` : '', s.turn ? `转折：${s.turn}` : ''].filter(Boolean).join('｜');
+    return `${i + 1}. ${head}（${meta}）${craft ? `\n   ${craft}` : ''}\n   ${s.summary || ''}\n   ${(s.script || []).slice(0, 4).join('\n   ')}`;
+  }).join('\n\n'))}</div></div>`;
   else if (d.shots?.length) details = `<div class="insp-card"><h4>分镜表</h4><div class="pre">${esc(d.shots.map((s) => `${s.shotNo}. ${s.size} · ${s.angle} · ${s.movement} · ${s.duration}s\n   ${s.ffDesc}`).join('\n'))}</div></div>`;
   else if (d.events?.length) details = `<div class="insp-card"><h4>事件图谱</h4><div class="pre">${esc(d.events.map((e, i) => `${i + 1}. ${e.title}\n   ${(e.processChain || []).join(' → ')}`).join('\n'))}</div></div>`;
   else if (d.context?.passages) details = `<div class="insp-card"><h4>RAG 检索片段</h4><div class="pre">${esc([...d.context.passages, ...(d.context.notes || [])].join('\n'))}</div></div>`;

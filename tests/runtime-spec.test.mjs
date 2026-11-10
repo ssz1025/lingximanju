@@ -207,3 +207,36 @@ test('stitchClips：多片段拼接后报告实测时长，且能识别错误的
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('stitchClips：单段容差内免重编码的超时累计，最终成片按标称时长封顶', () => {
+  if (!hasFfmpeg()) return;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lxm-stitch-cap-'));
+  const names = [];
+  try {
+    // 模拟 ComfyUI 真实输出：73 帧 @24fps = 3.0417s，与规格 3s 的偏差 0.0417s
+    // 在单段容差 0.25s 内（免重编码），但 N 段累计会超出总时长验收 ±0.5s。
+    for (let i = 0; i < 4; i += 1) {
+      const local = path.join(tmp, `c${i}.mp4`);
+      const r = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i',
+        'testsrc=size=320x180:rate=24', '-frames:v', '73', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', local],
+      { encoding: 'utf8', timeout: 120000 });
+      assert.equal(r.status, 0, `造片段失败：${r.stderr || ''}`);
+      assert.ok(Math.abs(probeDuration(local) - 3.0417) < 0.05, `片段应约 3.0417s，实测 ${probeDuration(local)}s`);
+      const name = `stitch_cap_test_${i}_${Date.now()}.mp4`;
+      writeAssetBinary(name, fs.readFileSync(local));
+      names.push(name);
+    }
+    const out = stitchClips(names.map((file) => ({ file, duration: 3.0417 })), { clipSeconds: 3 });
+    assert.ok(out, '拼接失败');
+    assert.equal(out.clips, 4);
+    assert.equal(out.declaredDuration, 12);
+    assert.equal(out.measured, true);
+    assert.ok(
+      out.duration <= 12 && Math.abs(out.duration - 12) <= 0.5,
+      `实测 ${out.duration}s，应封顶在 12s 且落在 ±0.5s 验收容差内`,
+    );
+  } finally {
+    for (const name of names) { try { fs.rmSync(assetPath(name), { force: true }); } catch { /* ignore */ } }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

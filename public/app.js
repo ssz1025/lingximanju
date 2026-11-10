@@ -16,6 +16,7 @@ import * as SV from './source-view.js';
 import * as PMODEL from './project-model.js';
 import * as CC from './canvas-compose.js';
 import { ensureModelPicker, withModelId, setModelProjectScope } from './model-picker.js';
+import { setInterfaceProjectScope } from './interface-picker.js';
 import { hasOpenPage, closeTopPage, closeAllPages } from './page.js';
 import { $, escapeHTML } from './utils.js';
 import { EMPTY_CANVAS_PROJECT, groupScopeOptions, scopeOptionsSignature, scopeHint, isScopeReadOnly } from './canvas-scope.js';
@@ -34,6 +35,7 @@ const state = {
   view: 'home',
   settings: null,     // 应用级模型配置摘要（/api/bootstrap → settings）
   comfy: null,        // 本地 ComfyUI 配置摘要（含工作流是否导入）
+  api: null,          // 服务端 API 能力清单（识别「改了代码但没重启」的旧进程）
   recentId: null,
   episodeNo: null,
   // 画布范围：'overall' 全部组合画布 | 'main' 项目主画布 | 'ep:<no>' 某一集独立画布
@@ -294,18 +296,30 @@ function handleEvent(e) {
     return;
   }
   if (e.type === 'character:batch') {
+    // 逐张进度直接驱动工作台第④步的任务角色卡（缩略图 + 进度 + 状态），不再只写日志框
+    PV.applyPortraitEvent(e);
     const box = $('log-stream');
     if (e.status === 'running' && box) {
       box.className = 'log-stream lv-info';
-      box.textContent = `角色定妆图 ${Number(e.done) + 1}/${e.total} · ${e.name || ''} · ${e.view || ''}`;
-    }
-    if (e.status !== 'running' && Number(e.done) >= Number(e.total)) {
-      UI.toast(`角色定妆图批量生成结束：${e.total} 张${e.status === 'error' ? '（最后一张失败）' : ''}`,
-        e.status === 'error' ? 'err' : 'ok');
-      scheduleEpisodeRefresh();
+      box.textContent = `角色定妆图 ${Number(e.done) + 1}/${e.total} · ${e.name || ''} · ${e.label || e.view || ''}`;
     }
     // 逐张落盘：防抖后重扫项目资源，定妆图会实时出现在左侧资源列表
     scheduleSidebarRefresh();
+    return;
+  }
+  if (e.type === 'character:job') {
+    PV.applyPortraitJob(e.job);
+    if (e.job && e.job.status !== 'running') {
+      // 工作台里由任务卡统一播报（带可进视频/失败明细）；不在工作台时才在这里提示
+      if (state.view !== 'workshop') {
+        UI.toast(e.job.status === 'done'
+          ? `角色图生成完成：${e.job.generated} 张真实出图`
+          : `角色图任务结束：${e.job.message || e.job.error || ''}`,
+        e.job.status === 'done' ? 'ok' : 'warn');
+      }
+      scheduleEpisodeRefresh();
+      scheduleSidebarRefresh();
+    }
     return;
   }
 
@@ -324,6 +338,8 @@ function handleEvent(e) {
   // 项目管理层广播：六步状态、统计与进度，驱动步骤面板 / 侧栏 / 顶栏同步刷新
   if (e.type === 'project:meta') {
     p.management = e.management;
+    // 服务端随事件附带的实时最终产物验收：第⑦步面板显示「当前状态」而不是历史快照
+    if (e.verification) p.verification = e.verification;
     // e.stats 是「单个项目」的统计；state.stats 是侧栏用的「全部项目」统计，二者不能混用
     if (e.stats) state.projectStats = e.stats;
     state.liveTokens = null;   // 步骤落库后以持久化数据为准，清实时计数
@@ -355,8 +371,21 @@ function handleEvent(e) {
       n.status = e.status;
       if (e.progress !== undefined) n.progress = e.progress;
       if (e.error) n.error = e.error;
+      // 排队 / 开始 / 完成时间随事件下发：第⑥步「任务状态」看板据此显示已排队多久、已用多久，
+      // 不落盘的话刷新页面就只剩一个没有时间基准的「生成中」。
+      if (e.queuedAt || e.startedAt || e.finishedAt || e.durationMs !== undefined) {
+        n.meta = { ...(n.meta || {}) };
+        if (e.queuedAt) n.meta.queuedAt = e.queuedAt;
+        if (e.startedAt) n.meta.startedAt = e.startedAt;
+        if (e.finishedAt) n.meta.finishedAt = e.finishedAt;
+        if (e.durationMs !== undefined) n.meta.durationMs = e.durationMs;
+      }
+      // prompt_id / 提交时间等运行痕迹：看板要显示「发出去的是哪一条」，
+      // 对账时也靠它去 ComfyUI 历史里把结果认回来
+      if (e.meta && typeof e.meta === 'object') n.meta = { ...(n.meta || {}), ...e.meta };
       canvas.updateNode(n.id);
       if (state.selected.includes(n.id)) scheduleInspector();
+      if (state.view === 'workshop') PV.refreshTaskPanel?.();
       break;
     }
     case 'node:data': {
@@ -370,6 +399,7 @@ function handleEvent(e) {
       }
       canvas.updateNode(n.id);
       if (state.selected.includes(n.id)) scheduleInspector();
+      if (state.view === 'workshop') PV.refreshTaskPanel?.();
       break;
     }
     case 'node:add':
@@ -621,17 +651,21 @@ function activeCanvasGraph() {
   const p = state.project;
   if (!p) return EMPTY_CANVAS_PROJECT;
   const { kind, no } = PMODEL.parseScopeKey(state.canvasScope);
-  if (kind === 'main') return p;
+  if (kind === 'main') {
+    // 工作台新生成的角色定妆图同步进主画布的角色资产节点（缩略图 + 计数）
+    if (CC.syncMainCanvasCharacterAssets(p)) persist();
+    return p;
+  }
   if (kind === 'episode') {
     const ep = (p.management?.episodes || []).find((e) => Number(e.no) === no);
     if (!ep) { state.canvasScope = 'overall'; return composeGraph(); }
-    if (!ep.canvas || !Array.isArray(ep.canvas.nodes) || !ep.canvas.nodes.length) {
-      ep.canvas = CC.seedEpisodeCanvas(p, no);
-      persist(true);          // 播种一次即落盘，重开项目仍是同一张独立画布
-    }
-    if (!Array.isArray(ep.canvas.edges)) ep.canvas.edges = [];
-    if (!ep.canvas.viewport) ep.canvas.viewport = { x: 40, y: 30, zoom: 0.72 };
-    return ep.canvas;
+    // 每次绑定都做资源同步：新分镜板 / 角色定妆图自动补进画布并连线（幂等，无变化不落盘）
+    const synced = CC.syncEpisodeCanvasResources(p, no);
+    if (synced.changed) { ep.canvas = synced.canvas; persist(); }
+    const graph = ep.canvas;
+    if (!Array.isArray(graph.edges)) graph.edges = [];
+    if (!graph.viewport) graph.viewport = { x: 40, y: 30, zoom: 0.72 };
+    return graph;
   }
   return composeGraph();
 }
@@ -762,6 +796,7 @@ async function closeProject(opts = {}) {
   $('modal-root')?.replaceChildren();
   while (hasOpenPage()) closeTopPage();   // 页面宿主同样绑定旧项目，退出项目时全部收起
   setModelProjectScope('');               // 模型选择回到应用级默认，不带上一个项目的记忆
+  setInterfaceProjectScope('');           // ComfyUI 接口选择同理，按项目分别记忆
   state.project = null;
   state.selected = [];
   state.episodeNo = null;
@@ -988,6 +1023,9 @@ function applyBootstrap(data) {
   if (Array.isArray(data.directorSkillGroups)) state.directorSkillGroups = data.directorSkillGroups;
   if (data.runtimeDefaults) state.runtimeDefaults = data.runtimeDefaults;
   state.comfy = data.comfy || state.comfy;
+  PV.setComfySummary(state.comfy);   // 工作台第④步「一键生成全部角色图」按钮的可用态
+  if (data.api) { state.api = data.api; PV.setApiInfo(data.api); }
+  else { state.api = null; PV.setApiInfo(null); }   // 旧进程：明确按「能力缺失」处理，禁用生成并提示重启
   if (data.steps) state.steps = data.steps;
   if (data.stats) state.stats = data.stats;
   if (data.settings) state.settings = data.settings;
@@ -1005,6 +1043,7 @@ async function loadProject(id, opts = {}) {
   const p = await api(`/api/projects/${id}`);
   state.project = p; state.recentId = id;
   setModelProjectScope(p.id, p.name);    // 各 AI 入口的模型选择按项目分别记忆
+  setInterfaceProjectScope(p.id, p.name); // 各生成入口的接口选择同样按项目分别记忆
   state.selected = []; state.movedByUser = false;
   state.sourceView = null; state.assetIndex = []; state.overallGraph = null;
   state.workshopTab = 'overview';
@@ -1226,6 +1265,7 @@ async function refreshAppConfig() {
     const d = await api('/api/settings');
     state.settings = d.settings || state.settings;
     state.comfy = d.comfy || state.comfy;
+    PV.setComfySummary(state.comfy);
   } catch { /* 后端暂不可达时保留缓存 */ }
   updateHeader(); updateConfigChip(); renderHomeView();
   if (state.view === 'episode') EV.refreshEpisodeView();
@@ -1270,6 +1310,9 @@ function projectViewCtx() {
     directorBusy: state.directorBusy,
     runtime: state.project?.management?.runtime || state.runtimeDefaults,
     onSaveRuntime: (payload) => saveRuntime(payload),
+    // 第⑤步分镜画面设置：保存 / 保存并按新版式重排分镜板（纯 SVG，不出图）
+    onSaveStoryboard: (settings) => saveStoryboardSettings(settings, { regen: false }),
+    onComposeStoryboard: (settings) => saveStoryboardSettings(settings, { regen: true }),
     onTabChange: (tab) => { state.workshopTab = tab; },
     // 工作台内部触发的重绘必须走这里重新取 ctx：syncProject() 会替换 state.project 对象，
     // 若沿用渲染时闭包里的旧 ctx，会把刚落盘的导演验收报告重新渲染成空态。
@@ -1278,6 +1321,7 @@ function projectViewCtx() {
     onSelectDirectorPalette: (key) => selectDirectorPalette(key),
     onRunDirector: (payload) => runDirectorFlow(payload),
     onRunStep: (id, all, force) => runStep(id, all, force),
+    onChatStep: (id) => openStepChatFor(id),
     onManage: (tab) => openManagePanel(tab),
     onOpenCanvas: () => setView('canvas'),
     onOpenEpisode: (no) => openEpisode(no),
@@ -1307,6 +1351,10 @@ function projectViewCtx() {
       const r = PMODEL.removeSeason(m.seasons, m.episodes, no);
       m.seasons = r.seasons; m.episodes = r.episodes;
     }, '该季已合并回第一季'),
+    // 定稿 / 撤销定稿：沿用季管理的 mutate + persist(true) 模式，落盘并刷新全部联动视图
+    onFinalizeEpisode: (no, on) => applySeasonMutation((m) => {
+      m.episodes = PMODEL.markFinalized(m.episodes, no, on);
+    }, on ? `第 ${no} 集已定稿` : `第 ${no} 集已撤销定稿`),
     // 管理动作（保存信息 / 分集参数 / 交付物 / 画面设置）后：侧栏与顶栏同步，工作台由调用方重绘
     onChanged: async () => { await refreshProjects(); updateHeader(); refreshProjectSidebar(); },
     // 上传 / AI 生成小说注入成功：刷新项目（节点注入 + ①② 完成 + 分集列表）
@@ -1383,16 +1431,45 @@ async function selectDirectorPalette(paletteKey) {
  * 保存项目级短剧成片规格。片段数由服务端推导并回写，
  * 下一次一键全流程会按新片段数重新分配镜头预算与时间线。
  */
-async function saveRuntime({ totalSeconds, clipSeconds } = {}) {
+async function saveRuntime({ totalSeconds, clipSeconds, fps, resolution, filmPolicy } = {}) {
   const p = state.project;
   if (!p) throw new Error('请先打开一个项目');
+  // 只把真正给出的字段发给后端：缺省项沿用已有设置，不会被 undefined 覆盖成默认值
+  const payload = { totalSeconds, clipSeconds };
+  if (Number.isFinite(Number(fps)) && Number(fps) > 0) payload.fps = Number(fps);
+  const resText = String(resolution || '').trim();
+  if (/^\d{2,5}[×xX*]\d{2,5}$/.test(resText)) payload.resolution = resText.replace(/[xX*]/, '×');
+  if (filmPolicy === 'real' || filmPolicy === 'preview') payload.filmPolicy = filmPolicy;
   const out = await api(`/api/projects/${p.id}/runtime`, {
-    method: 'POST', body: JSON.stringify({ totalSeconds, clipSeconds }),
+    method: 'POST', body: JSON.stringify(payload),
   });
   if (p.management) p.management.runtime = out.spec;
   await refreshProjects();
   updateHeader(); refreshProjectSidebar(); renderProjectView();
   UI.toast(out.message || '成片规格已保存', 'ok');
+  return out;
+}
+
+/**
+ * 保存分镜画面设置（第⑤步操作台）。
+ * regen=false：只落设置（manage 的 storyboard 动作）。
+ * regen=true ：保存后立刻按新版式重排所有段的分镜板——纯 SVG 合成，
+ *              不动关键帧、不烧 GPU，所以可以随手切版式对比。
+ */
+async function saveStoryboardSettings(settings, { regen = false } = {}) {
+  const p = state.project;
+  if (!p) throw new Error('请先打开一个项目');
+  const payload = settings && typeof settings === 'object' ? settings : {};
+  const out = regen
+    ? await api(`/api/projects/${p.id}/storyboard/sheets`, {
+      method: 'POST', body: JSON.stringify({ settings: payload }),
+    })
+    : await api(`/api/projects/${p.id}/manage`, {
+      method: 'POST', body: JSON.stringify({ action: 'storyboard', value: payload }),
+    });
+  if (p.management && out.management?.storyboard) p.management.storyboard = out.management.storyboard;
+  await syncProject();
+  UI.toast(out.message || (regen ? '分镜板已重排' : '分镜画面设置已保存'), 'ok');
   return out;
 }
 
@@ -1501,7 +1578,7 @@ async function openManagePanel(tab) {
     if (d.management) state.project.management = d.management;
   } catch { /* 后端不可达时退回缓存的统计 */ }
   PM.openProjectManager({
-    project: state.project, stats: state.projectStats, comfy: state.comfy, tab,
+    project: state.project, stats: state.projectStats, comfy: state.comfy, api: state.api, tab,
     progress: { label: `${v.done}/${v.total}`, percent: v.percent },
     toast: UI.toast,
     onChanged: (deleted) => onProjectsChanged(deleted),

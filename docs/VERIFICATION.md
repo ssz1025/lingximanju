@@ -169,3 +169,152 @@
 | 视觉复核 | `short30-basic-full.png` / `short30-report-full.png`（收起浮层完整页）、`short30-basic.png` / `short30-report.png`（展开态）、`short30-narrow.png`：规格面板与验收报告无遮挡、错位、溢出 |
 | 交付产物 | 项目「30s 短剧 · 雨夜便利店」已落到 `data/`（62 节点 / 40 个资产引用全部存在）；成片 `short-30s.mp4`、导演包 `short-30s.mmxpack.zip` |
 | 环境说明 | 验证在隔离数据目录进行：本机全局 `app-settings.json` 配置了外部 LLM（mimo-v2.6-pro），真实目录下全流程会等待 5 分钟超时；隔离目录为零 Key mock。真实目录仅追加成品项目与其资产，未改动任何全局配置，也未覆盖既有项目 |
+
+## 2026-11-09 · AI 制片对话 + 成片真实性策略全链路验证
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「ComfyUI 并没有被真实调用，完成的视频也是非真实短剧视频」——把成片真实性做成可核对断言（real/preview 策略）；「每一步都可以通过 AI 对话框形式完成全部内容」；「记录完整对话流程方便分享其他用户复刻」 |
+| 成片真实性 | `core/film-policy.mjs`：real 默认策略下零真实片段 / 预览成片一律判缺失，绝不冒充；验收新增「ComfyUI 真实 AI 片段」项（逐片段核对 provider + 文件 + prompt_id 留痕） |
+| 分步对话 | `core/step-chat.mjs`（六步 + 项目总助理各一个会话）：意图→真实业务函数，token 分账（执行 / 对话 / 合计），按步落盘 `data/conversations/{projectId}.step-{stepId}.json` |
+| 制片对话 | `core/production-chat.mjs`（跨步单会话）：17 类中文意图零 LLM 分类，长意图（小说 / 六步 / 一键全流程）转后台任务 + 互斥，结果写回对话 |
+| 复刻导出 | 每条消息带等价 HTTP 与 curl；`steps/:stepId/chat/export` 与 `production/chat/export` 输出 Markdown（对话全文 + 一键复刻命令串 + 环境要求）与可重放 JSON |
+| 单元测试 | `npm test` **479/479**（新增 `film-policy` 9 项、`step-chat` 32 项、`production-chat` 9 项）；`npm run check` **135 文件** |
+| 真实 HTTP 冒烟 | 隔离服务 45996：**30/30**（两套对话端点、① 改片名写回 bible、⑤ 改规格 30÷3=10 落库、未知步骤 404、归档式清空、双格式导出含 curl、空消息 400） |
+| 无头浏览器 | Playwright `/tmp/pwtest/chat.mjs` **13/13**：弹窗穿透、打开项目、7 个对话入口、token 账目条、① 改片名获得回复与建议 chips、⑤ 规格回复给出「10 个片段 × 3s = 30s」与完整时间线、服务端落库核对、导出含 curl 串、0 JS 报错 |
+| 视觉复核 | `chat-step5.png`（⑤ 对话：token 条 / 零填充历史 / 完整时间线回复 / chips）、`chat-step1.png`、`chat-workshop.png`：无遮挡、错位、溢出 |
+| 修复的缺陷 | ① `classify` 把「依次跑完全部六个步骤」误判为 director（「跑完全部」抢先）→ 六步关键词优先；② `exportStepChat` 缺 curl 复刻命令 → 补等价命令与一键复刻命令串 |
+
+## 2026-11-09 · 分季分集工作台 + 分集剧本台 + 编剧智能体升级
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 工作台步骤的分集 / 分季展示界面优化；对应的剧本展示与创作；优化 agent |
+| ③ 分季分集 | 统计条（季/集/剧本覆盖/宫格覆盖/视频/覆盖率）+ 关键词搜索 + 状态筛选 chips（本地 DOM 显隐不丢焦点）+ 季折叠与覆盖条 + 「补齐本季」+ 集卡四徽标与就地「✦ 写剧本」；空季在筛选时隐藏、全量保留 |
+| ④ 剧本创作 | 由「项目级摘要卡」重做为分集剧本台：覆盖率统计条、每集一行（场次/行数/字数/来源/日期 + 三徽标）、展开阅读（对白高亮 / 动作斜体 / 质量告警 / 承接上集提示）、逐字段编辑保存（manual 来源，草稿在 SSE 重绘下不丢）、单集 / 整本 Markdown 导出 |
+| 编剧智能体 | 新增 `core/episode-script.mjs`（vars 构建 / 归一 / 统计 / 质量告警 / 编辑合并 / Markdown / 覆盖率）；生成上下文带 prevRecap / prevTail / nextHook / targetScenes / runtime；`SCREENPLAY_GUIDE` 固定进 system 提示；零 Key 兜底改为按本集原文分段 + 原文引号对白 + 本集真实角色（修复主题模板凭空角色） |
+| REST | 批量剧本支持 `nos / onlyMissing / force` 且逐集容错；`PUT /episodes/:no/script` 人工编辑（空场次 400）；`GET /episodes/:no/script/export` 与 `GET /scripts/export`；详情响应带 `scriptCoverage` 与邻居 `hasScript` |
+| 单元测试 | `npm test` **515/515**（新增 `tests/episode-script.test.mjs` 13 项）；`npm run check` **145 文件** |
+| HTTP 冒烟 | 隔离服务 46011：创建→指定集生成→详情（stats/coverage）→单集导出→PUT 编辑→空场次 400→补齐缺失（0 需求时如实提示）→整本导出→清理，**10/10** |
+| 无头浏览器 | Playwright 工作台 **18/18**（季区渲染、3 集卡片、徽标、覆盖条、搜索只显 1 集、计数同步、清空恢复、状态筛选、④ 覆盖率条、3 行、2 已写、阅读场次与对白高亮、编辑保存标题回显 + 人工编辑、导出入口、0 JS 异常）；剧集详情 **10/10**（芯片带场次数、统计条、场次正文、编辑保存、导出链接） |
+| 视觉复核 | `sw-seasons2.png` / `sw-script2.png` / `ev-script.png`：统计条、搜索筛选、季头、集卡、剧本行无溢出 / 错位 / 重叠；修复「人工编辑 · 已人工编辑」重复文案与阅读器缺片名标题 |
+
+## 2026-11-09 · 统一格式剧本 v2：从「一段概述」到「逐集逐场可拍摄」
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「统一格式剧本生成不够详细，检查 agent 并优化给出详尽的统一格式剧本」——论文式(1) `S = ScreenWriting(I; P_C(I))` 的产物必须逐集展开、每场带戏剧结构、正文行可以直接拍 |
+| 根因（5 条） | ① `SCHEMAS.screenplay` 契约只有 `location/time/summary/script`，模型没有字段可填；② 整剧兜底固定 `episodes.slice(0,3)` 每集一场，`script` 里塞的是分集梗概原文（旧项目实测：3 场、`location:"段落 1"`、`time:"开篇"`、0 句对白）；③ 单集兜底把原文整段当剧本行，没有场次头 / 动作 / 画面 / 对白之分；④ `normalizeEpisodeScript` / `mergeScriptEdit` 会丢掉新字段（保存一次就退回 v1）；⑤ 前端只显示地点 / 时间 / 概述，写了也看不见 |
+| 契约 v2 | 新增 `core/screenplay.mjs`：`schema:2`、`characters[]`（动机·秘密·弧光）、`acts[]`、`episodes[]`、`scenes[]`（`interior/location/time/durationSec/characters/summary/objective/conflict/turn/beat/mood/keyProp/props/transition/script[]`）、`durationSec`、`sceneCount`、`coverage`；`enrichScreenplay` 幂等补全；`parseScriptLine` 统一解析 `角色（情绪）：「台词」` / `动作：` / `画面：` / `旁白：` / `音效：` / `【时间 · 地点】` |
+| 提示词 | 两套准则分流：单集 `SCREENPLAY_GUIDE`、整剧 `SCREENPLAY_PROJECT_GUIDE`（逐集 ≤750 字原文、≤12 集、每集 2~3 场、每场必写目标 / 冲突 / 转折 / 节拍 / 转场、禁写镜号景别运镜） |
+| 零 Key 兜底 | 改为「转写而非虚构」：中文断句（引号内不断句，断引号后紧跟下一句台词时按两句切）、按逗号细化保证短集也能 2 场；台词归属取「本句 → 本场 → 整集」中台词之前最近被提到的人；地点 / 时间 / 道具按原文线索词取（同集地点统一、同场时间以本场线索为准）；目标 / 冲突 / 转折从原文分句里挑且互不重复；hook 已在正文演过就不再重复写 |
+| 角色表 | `narrative.scriptCast`：管理角色 ≥2 人时完全以人工维护为准；不足 2 人时从原著正文认名字补齐（`castFromText`：冒号前 14 字窗口取最左「姓氏 + 一字」＋ 叙述提示词），修掉「第③步先于第④步跑导致角色表为空、Provider 退回主题模板角色（顾言 / 程曦）」 |
+| 归一 / 编辑 / 导出 | `normalizeEpisodeScript` 保留 v2 字段并补 `no/interior/durationSec/characters/props`；`mergeScriptEdit` 按 `id` / 下标继承旧结构化字段（点一次保存不再丢目标 / 转场）；`scriptToMarkdown` 输出专业格式（基调 / 主题 / 角色动机弧光 / 场次 `> 内景 · 40″ · 人物` / 目标｜冲突｜转折 / 节拍｜道具｜转场 / 正文） |
+| 统计与告警 | `scriptStats` 按 `parseScriptLine` 判对白；新增 `scriptTiming`（预估秒数 / 每场耗时 / 声明时长）；`scriptIssues` 增加 `no_objective / no_turn / no_scene_cast / few_dialogue`（info 级，不阻断保存） |
+| 前端 | `public/episode-view.js`：统计条加「预估」，场次头显示 `内景 · 地点` + 时间 / 时长 / 人物，正文行按 台词 / 动作 / 旁白 / 场次头 着色，编辑态提示结构化字段只读；`public/panels.js` 检查器展示 `interior · location（time · Ns · EPx）`、目标 / 转折、摘要与前 4 行正文 |
+| 单元测试 | `node --test --test-concurrency=1 tests/*.test.mjs` **554/554**（新增 `tests/screenplay-detail.test.mjs` 12 项：整剧逐集多场、每场结构完整、12 集上限、同集地点不跳场 / 台词不串人 / 道具写进 `props`、单集 `targetScenes` 与承接上集、`parseScriptLine`、`enrichScreenplay` 幂等、归一与编辑保真、统计与 Markdown、`scriptIssues`、提示词契约）；`npm run check` **153 文件** |
+| 端到端（隔离数据目录 mock） | 六章小说 → 建项目（①② 自动完成）→ `executeSteps({stepId:'script'})`：`done · 1 节点 · 1 波 · 4 个场景`；剧本 `schema:2`、4 场 / 26 行正文 / 388 字 / 22 句对白 / 预估 130″；**缺字段 0**（内外景 / 地点 / 时间 / 时长 / 人物 / 目标 / 冲突 / 转折 / 节拍 / 道具 / 转场全齐）；角色 `沈砚 · 刘左 · 林夏` 全部来自原著，台词归属正确（`林夏：「埋了就能忘？」`、`刘左：「你自己看。」`） |
+| 遗留 | 分集策略把六章合成 1 集时，剧本也只剩 1 集 4 场（`coverage.totalEpisodes=1`）——这是第 ② 步切集粒度问题，不是剧本层问题；需要多集时在第 ② 步调整目标字数或集数上限 |
+
+## 2026-11-10 · 分镜画面视觉物料包：每格多图 + 站位图 + 精确提示词
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「每一个分镜画面都应有多张图片：使用的角色图片、多视图、妆照、宫格视图（新生成）、站位图（新生成）；完善分镜 agent 对生成镜头的提示词输出；分镜都是多参考图文生成视频，需要精确给出提示词」 |
+| 新增核心模块 | `core/shot-visuals.mjs`：`resolveFrameVisualPack`（出场角色的定妆多视图 + 妆照逐槽位解析，每张标注「锁什么」，超 8 槽如实截断告警）、`blockingSVG`（确定性站位图：取景框 + 三分线 + 机位运动箭头 + 1–4 人站位 + 图例，同镜头重排不跳变）、`buildFramePrompts`（按分镜画面设置的提示词公式拼首帧出图提示词与图生视频提示词，参考图逐槽位写用途，refPlan 覆盖 角色视图/妆照/首帧/宫格视图/站位图） |
+| 分镜板链路 | `generateSegmentGrid` 每格落 `blockingUrl`（站位图 SVG）、`imagePrompt` / `videoPrompt`、`visual`（角色视图明细 + 槽位 + 告警）；宫格视图 `gridUrl` 回填到每格；宫格 SVG 每格右下角带「站位」缩略图；`gridShotList` 带全部分镜表新字段 |
+| 分镜板智能体 | `storyboard-sheets` 描述与运行日志升级；`planStoryboardSheets` 新增 `visuals` 统计（blockings / promptsReady / refSlots）；重排完成消息带「每格物料」明细 |
+| 关键帧智能体 | 提示词插入 `参考图槽位：槽位N＝角色·视图（用途）` 段；节点 patch 带 `refSlots` / `refNotes` / `characterRefs`（含妆照），多参考图不再「有图但模型不知道哪张是谁」 |
+| 视频智能体 | 第⑥步逐镜头优先用第⑤步生成的精确 `videoPrompt`（首帧锚定 + 运动运镜 + 角色一致性 + 时长画幅 + 禁止项），无现成字段时按同一公式现场构建；节点带 `refPlan` / `refNote` 留痕 |
+| 导演包 | `collectShotPackages` 用精确提示词并在 `group.json` / `shots.json` 带 `refPlan`/`refNote`；单集导演包 `group.json` 的组提示词改用精确 `videoPrompt`，站位图逐格入包（`blocking/segment_NN_cell_K.svg`），README 说明每格物料 |
+| 单集视频 | `generateEpisodeVideo` 优先用每格精确 videoPrompt，老项目回退集摘要提示词 |
+| 前端 | 分镜板画廊每段卡片带「站位 / 提示词 / 参考图」物料徽标（老项目无字段不渲染空徽标） |
+| 单元测试 | `npm test` **618/618 通过**（新增 `tests/storyboard-shot-visuals.test.mjs` 7 项：物料包槽位语义、兜底与缺图告警、站位图确定性、双提示词结构、公式开关、整集链路落盘、画廊徽标）；`npm run check` **167 文件** |
+| 冒烟 | 单集导演包导出成功（6 格 × 站位图入包）；导演全流程端到端（director-run）7/7 通过 |
+
+## 2026-11-10 · 分集制作：第③步之后按集走完 ④角色和上下文 / ⑤分镜与画面 / ⑥视频与交付
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「剧本创作之后，可以分集制作，每一集都有对应的出场角色；每一集都有 角色和上下文 和 分镜与画面、视频与交付」 |
+| 方案 | 项目级六步状态机不动；新增按集执行层 `core/episode-runner.mjs`（每集步骤状态落 `ep.steps[stepId]`）+ 按集成片 `core/episode-film.mjs`（以分镜格为镜头单元：逐格 ComfyUI 视频 → ffmpeg 拼接本集成片），全部复用既有按集产物链路（单集剧本 / 分镜板 / 单集导演包） |
+| 按集三步 | ④ context：角色库为空先自动提取（复用 `extractProjectCharacters`），出场角色按原文匹配（手动关联不覆盖），生成 / 沿用本集剧本；⑤ storyboard：`ensureEpisodeBody` 分段 + `generateEpisodeGrids`（新增 `mode` 透传，可选 comfy 逐格补图）；⑥ deliver：`generateEpisodeCellVideos`（幂等跳过已有片段，单格失败不阻断）→ `stitchEpisodeFilm` → `exportEpisodePack` |
+| 状态与预检 | `ep.steps[stepId] = {status, note, startedAt, durationMs, runs, finishedAt}`；预检给出「先做哪一步」（无原文 / 无分段 / ComfyUI 未启用 / 无真实画面格）；`stitchOnly` 只拼接不烧 GPU（预检同步放行 ComfyUI 依赖）；与完整流水线互斥（`isRunning` 拦截）+ 每项目单飞（`activeEpisodeRuns`） |
+| 路由 | `POST /episodes/:no/step`（单集）、`POST /episodes/steps`（批量 `nos[]`，单集失败不阻断）、`GET /episodes/:no/film`（成片下载）；`episodeAction` 正则扩展 `step|film`，`episodeStepBatch` 先于 `:no` 消化；进度走 `episode:progress`（cellvideo 逐格）+ `episode:update` / `state` |
+| 前端 | 工作台第④⑤⑥步面板顶部「▥ 分集制作」卡（`epx-` 样式第 26 节）：每集一行产物摘要 + 每集本步状态徽标 + 单集执行 / 重做 + 批量补齐；剧集详情「导出与生成」新增本集成片卡（逐格视频 / 拼接 / 在线播放 / 下载），原单段视频降级为「快速预览片段」；header 徽标加「成片」；单集资源图 extras 增成片节点 |
+| 口径 | 成片只认 ComfyUI 真实片段（`cell.video.provider==='comfyui'`），静态图 / SVG 占位不冒充；拼接复用 `stitchClips` 的归一 / 标称封顶 / ffprobe 实测；已被清理的片段文件先剔除并如实汇报 |
+| 单元测试 | `npm test` **646/646 通过**（新增 `tests/episode-film.test.mjs` 6 项 + `tests/episode-runner.test.mjs` 10 项：格摊平与真实首帧口径、前置校验、幂等跳过、无片段拒绝、真实 ffmpeg 拼接落盘 `ep.film`、摘要口径、三步状态流转、预检阻断、手动关联保护、批量 1/2、路由正则）；`npm run check` **170 文件** |
+| 坑 | `ensureManagement` 每次重建 `management.episodes[]` 元素：按集执行后必须重新取 episode 引用再断言 / 改数据；测试夹具 management 必须带 `schema:1`，否则被判老项目整体重置 |
+
+## 2026-11-10 · 分集之后的任务关系：剧集流水线（按集任务台）
+
+| 项目 | 结果 |
+|---|---|
+| 问题 | 「分完剧集之后，后续的生成与选择的剧集任务逻辑关系展示不明确」：④⑤⑥ 三步各列一遍全集，三张几乎相同的卡互不相认；没有「当前剧集」概念，看不出这一集走到哪、下一步点哪个；项目级步骤（准备故事 / 分集）与剧集级任务（剧本 / 上下文 / 分镜 / 视频）没有视觉边界 |
+| 方案 | 新增共享组件「剧集流水线」（`public/project-view.js` · `episodeFlowHTML`）：**每集一行，横向摊开四段任务**（剧本 → 角色·上下文 → 分镜 → 视频·成片）；点集名 = 选中该集（`ui.activeNo`，按项目存 `localStorage`），行内只展开这一集的四段任务与「下一步」；「下一步」固定取四段里第一个未完成的阶段，不会跳段 |
+| 层级显性化 | 步骤导航在「分集拆解」与「剧本创作」间插入「以下按集执行」分界；卡片内两行说明条（项目级 ①②③ / 剧集级 ④⑤⑥⑦）；④⑤⑥⑦ 区头挂「剧集级 · EP xx」标签，区头主按钮由含糊的「执行本步」改为只跑当前剧集的「执行本集（EP xx）」；左侧导航「执行下一步 / 全部执行」保留整项目快跑并加注说明 |
+| 入口 | ③ 分集完成后插入「分集之后怎么走」说明条（四段完成度 + 「从 EP xx 开始制作（下一步：…）」直达第④步并选中该集）；④ 剧本台顶部加一行任务链，行徽标补「上下文」段，与流水线同口径 |
+| 行为 | 单集执行 / 重写剧本时同步选中该集；下一步按钮在该段运行中自动禁用并显示「进行中 · 分镜」；批量只补「当前这一段」的未完成集；`epStepInfo` 无真实格时不再输出「0/0 格片段」，改为「还没有可出片的分镜格 · 先出分镜」 |
+| 验证 | `npm test` **673/673 通过**（新增 `tests/episode-flow.test.mjs` 9 项：四段标签齐全 / 下一步不跳段 / 只展开选中集 / 层级文案 / 说明条起点 / 任务链高亮 / 区头只跑本集 / 空分集兜底 / 无 undefined·NaN）；`npm run check` **174 文件** |
+| 视觉 | 无头 Chrome 以 2× 渲染预览页截图核对深色 / 浅色两套主题：步骤区头「6. 分镜与画面 · 剧集级 · EP 02 · 待执行 · 执行本集（EP 02）」不挤压换行，四行剧集状态（✓完成 / 分镜中 / ✕失败 / 未开始）与展开面板层次清晰；`.pv-sstep-head` 补 `flex-wrap` 防窄屏溢出 |
+
+## 2026-11-10 · 当前剧集：切换后后续步骤完全独立，角色除外
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「增加当前剧集的概念，切换不同的剧集，后续步骤完全独立，角色除外，如果角色存在则沿用角色」：上一轮只有流水线里「展开哪一集」，④⑤⑥⑦ 内容仍是全项目混排（剧本台列全集、分镜 / 成片是画布汇总），切集还可能把上一集编辑器草稿带过来；角色库虽是项目级共享，界面没说明沿用 |
+| 全局当前集 | 新增 `activeEpisodeNo(m)` / `setActiveEpisode(p,no)` / `activeEpisodeBarHTML`：工作台顶部 sticky 常驻条（EP 号 + 集名 + 四段进度 + 上一集 / 下拉 / 下一集），按项目存 `localStorage`；顶部条、流水线、说明条、区头、单集执行、剧本生成共用一个 `ui.activeNo`，记忆失效时自动落到「第一集还没做完的那集」 |
+| 完全独立 | `ui.epUI` 按集存档剧本展开 / 编辑草稿 / 倍速，切集存档并还原目标集、重置分镜灯箱；切集设 `ui.skipCapture`，避免旧 DOM 里的剧本编辑器值盖回新集；④ 剧本台主区只渲染当前集，其余集进 `<details>` 折叠列表（点集号即切换）；⑥⑦ 的全项目画布汇总数据加「跨集汇总」标注，按集产物指向流水线 / 剧集详情页 |
+| 角色例外 | 前端：顶部条「👤 角色除外 · 已沿用 N 位，切集不重新提取」、第⑤步 `sharedCharactersHTML` 共享角色库卡、流水线上下文段「沿用全书角色库 N 位」、③ 说明条与左侧导航的例外说明。后端 `runEpisodeContext`：角色库非空直接沿用（即使 `force` 也不重抽），只有为空才首次提取一次；note 追加「沿用项目角色库 N 位（不重新提取）」；文件头注释写明唯一共享边界 |
+| 验证 | `npm test` **683/683 通过**：新增 `tests/episode-scope.test.mjs` 7 项（当前集规范化 / 顶部条文案与换集控件 / 角色空库文案 / 切集存档与非法集兜底 / 剧本台只显示当前集 / 流水线与区头对齐 / 空分集），`tests/episode-runner.test.mjs` 追加 1 项（已有角色时换集 + `force` 仍沿用、角色库不增删、本集剧本独立）；`npm run check` **175 文件** |
+| 视觉 | 无头 Chrome 2× 截图核对深 / 浅两套主题：顶部条、单集剧本台、共享角色卡、流水线四块完整不溢出；浅色主题把 10px 绿色强调改为 `#07724f`、状态胶囊文字改 `--text-2`，对比度达标 |
+
+## 2026-11-10 · 分季分集之后：按季按集顺序制作 + 定稿推进
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「分季分集之后，选择分季和分集，默认第一季、第一集；完成后定稿，顺序处理第一季第二集，处理完该季后，处理顺序的下一季；每一集都有 4、5、6、7 步骤，相互独立；角色相同直接复用」：已有 `ui.activeNo` 只是扁平全集顺序，不认季；没有「定稿」状态，四段做完仍可随时覆盖；默认落点是「第一个未完成集」而非 S1E1 |
+| 顺序队列 | `public/project-model.js` 新增 `episodeQueue`（基于 `seasonGroups`，季升序 → 季内集号升序，手动移季也正确）/ `defaultEpisode`（首个未定稿 = S1E1）/ `nextPendingEpisode`（只往后找未定稿，天然跨季）/ `adjacentEpisode`（跨季相邻）/ `seasonFinalProgress` / `markFinalized` / `isFinalized` / `episodeStageDone` / `episodeStagesDone` / `canFinalizeEpisode`。定稿写 `ep.finalized = {at, season, no}`；老数据无字段 = 未定稿、无 `season` = 第一季。前端 `epStepDoneLocal` 改委托 `episodeStageDone`，前后端四段判定同源 |
+| 当前剧集 | 顶部条升级为「季下拉（含每季定稿数）+ 该季集下拉 + 按队列跨季上/下一集 + 四段进度 + 顺序制作位 + 定稿/撤销」，新增 `data-season-select` 事件（换季自动选该季首集、空季给提示）；`activeEpisodeNo` 改为「记忆集未定稿则保持，否则落到队列首个未定稿集」；③ 说明条改顺序制作进度（季进度胶囊 + 制作队列 + 当前制作位 + 定稿按钮）；分季分集卡每集标「🔒 已定稿 / ● 当前制作位 / 待制作」并加「设为当前集」 |
+| 定稿与锁定 | 四段全绿后「✓ 定稿本集并进入下一集」→ `ctx.onFinalizeEpisode`（`public/app.js` 沿用季管理的 mutate + `persist(true)`）→ 自动 `setActiveEpisode(next)` + 跳回第 ④ 步 + toast 提示 S→E 与是否跨季。已定稿集：流水线行 🔒、四段按钮禁用、批量 nos 过滤、剧本台生成/批量按钮禁用、区头显示「🔒 本集已定稿」；后端 `runEpisodeStep` / `runEpisodeSteps` 拒绝或跳过，`/episodes/:no/script` 的 POST 生成与 PUT 编辑返回 409、批量 scripts 过滤。撤销定稿需二次确认，撤销后回到队列 |
+| 每集四步 / 角色 | ④⑤⑥⑦ 区头统一「剧集级 · S01E02 · 第 N/4 段」，主按钮只跑当前集；`EPISODE_STEPS` 的 no 从 `[4,5,6]` 对齐为 `[5,6,7]`（④ 剧本走 script 接口），文件头注释写明四段边界。角色仍是唯一例外：共享角色库卡补「不同集同一角色按 ID 直接复用、不重复提取、不重复出定妆图」，定稿 / 撤销 / 跨季都不重建角色库（后端 `runEpisodeContext` 已有沿用逻辑，测试锁死） |
+| 验证 | `npm test` **695/695 通过**：新增 `tests/episode-queue.test.mjs` 12 项（队列排序与手动移季 / 默认 S1E1 / 同季推进与跨季 / 跳过已定稿 / 全定稿兜底 / 撤销回队列 / 四段门槛与 running 不误判 / 季进度与跨季相邻 / 顶部两级选集 / 定稿锁定与批量跳过 / ③ 说明条顺序 / 角色复用），`tests/episode-runner.test.mjs` 追加「已定稿集单集 + 批量拒绝、撤销后可继续且角色仍沿用」，并同步更新 `episode-flow.test.mjs` / `episode-scope.test.mjs` 的默认集与区头断言；`npm run check` **176 文件** |
+| 视觉 | 无头 Chrome 2× 截图核对深 / 浅两套主题：季下拉 + 集下拉不挤压、顺序制作行与定稿提示完整、流水线按季分组（S01 / S02）与 🔒 锁定行清晰、说明条制作队列 `S01E01 → S01E02 → S01E03 → S02E04 → S02E05` 无截断；浅色主题新增的绿色强调统一走 `#07724f` |
+
+## 2026-11-10 · 剧集选择改为明确的中文「第 1 季 第 1 集」，去掉英文缩略
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「给出明确的剧集选择，比如第一季第一集，不要用英文缩略」：季下拉写 `S01 · 第 1 季`、集下拉写 `EP 01 · 雨夜`、顶部主标识 `S01` + `EP 01`、队列与提示写 `S01E01 → S02E04`，选集时看不出是哪季哪集。本轮按「规划先行」规则先给书面方案、用户回「按方案执行」后才改文件；拍板值：阿拉伯数字 `第 1 季 第 1 集`、集号沿用全局唯一编号、VERIFICATION 历史记录里的旧文案保留不改 |
+| 单一标签源 | `public/project-model.js` 新增 `seasonLabel(season)` → `第 1 季`、`episodeNoLabel(no)` → `第 4 集`、`episodeLabelFull(season, no)` → `第 1 季 第 4 集`、`queueItemLabel(item)`（队列项直接格式化）；异常值兜底 `第 ? 季 / 第 ? 集`，不产出 undefined / NaN。所有 UI 拼接统一走这四个函数，集号仍是全局 `ep.no`（季只是分组视图），因此第二季首集写「第 2 季 第 4 集」而非季内第 1 集 |
+| 选集与展示 | `public/project-view.js` **23 处**全部替换：顶部季下拉 → `第 1 季（1/3 集已定稿）`、集下拉 → `第 1 季 第 2 集 · 门铃 ✓定稿`、主标识合并为一个完整标签 `第 1 季 第 2 集`；③ 说明条制作队列 → `第 1 季 第 1 集 → … → 第 2 季 第 5 集`、季进度胶囊 / 当前制作位 / 定稿按钮 / 开始制作按钮；流水线季分组与行号、分季分集卡卡号与季标记、剧本台当前集与折叠列表、④⑤⑥⑦ 区头 pill 与按钮、定稿 toast。`public/episode-view.js` 详情页 `ev-no` 同步改完整标签（新引入 `PMODEL`） |
+| 样式 | `public/styles.css` 针对中文标签变长调整：`.epb-switch select` 210→272px、季下拉 190→228px、`.fl-pick` 236→292px（min-width 150→178px）、`.epb-no / .fl-no / .sw-no / .sx-ep-no / .sx-season-mark / .fl-season-mark` 加 `white-space: nowrap` 并去掉让汉字散开的 `letter-spacing`、`.sx-ep-top` 与 `.fl-queue-line b` 允许换行 / 断词。深浅主题均沿用现有变量 |
+| 验证 | `npm test` **715/715 通过**；`npm run check` **180 文件通过**。新增 `tests/episode-label.test.mjs` 5 项（纯函数格式与兜底 / 全局集号口径 / 选集控件明确 / 6 个渲染部件不含 `EP \d`、`S\d\dE\d\d`、`>S\d\d<` 且含完整中文标签 / 详情页标签静态核对），同步更新 `episode-flow.test.mjs`（8 处）、`episode-scope.test.mjs`（10 处）、`episode-queue.test.mjs`（9 处）的旧英文断言；`episode-runner.test.mjs` 等其它测试无需改动 |
+| 视觉 | 无头 Chrome 2× 截取深 / 浅两套主题：顶部条主标识「第 1 季 第 2 集」、季/集下拉选项、说明条中文制作队列、流水线季分组与每行标签、展开面板、剧本台与区头均完整可读，无截断 / 重叠 / 溢出；临时预览页 `public/__label-preview.html` 已删除 |
+
+## 2026-11-10 · 分季分集布局与全局样式统一，简化界面（功能零删减）
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「分季 · 分集。布局样式没有统一；另外优化全局布局整体风格统一；简化操作界面，优化用户体验；功能不要删减」：只读调研发现 `styles.css` 有 15 种硬编码圆角、20+ 种字号、400+ 处 9–10.5px 小字，定义了 `--radius:14px` 却只用 2 次；`.btn.sm` 从未定义但被 78 处按钮引用；分季分集卡自带 `max-width:1460px + margin:auto + padding:14px` 却嵌在已有 16px 内距的步骤卡里，形成卡中卡；第③步叠了 4 张大卡、首屏按钮过多。本轮按「规划先行」先给书面方案（含影响 / 风险 / 执行范围），用户选「按方案执行（推荐）」后才改文件 |
+| 令牌层 | `public/styles.css` 新增第 01 节共享令牌 `--radius-xs/sm/md/lg/pill`、`--sp-1…5`、`--fs-2xs…2xl`、`--btn-h`；批量令牌化 411 处 `border-radius`、160 处 `gap`、14 处单值 `padding`、388 处精确字号，工作台 `sx/sw/fl/epb` 区段再收敛 41 处零散字号到 7 级字阶。采用「新增令牌 + 局部覆盖」，没有重写整张样式表 |
+| 按钮与标签 | 正式定义 `.btn.sm / .btn.xs / .btn.block / .btn.ghost`（78 处 `sm` 立即生效）；第 29 节把 `.pv-chip / .pv-pill / .sx-chip / .sx-ep-state / .fl-count / .fl-st / .fl-season / .epb-st` 等状态标签统一为药丸圆角 + `--fs-xs` 基线，深浅主题跟随语义变量 |
+| 卡片同构 | `seasonsHTML` 导出并改为 `class="pv-card sx-wrap"`，配标准 `.pv-card-head`；`.sx-wrap, .ax-wrap` 从页面级容器（`max-width:1460px / margin:auto / padding:14px`）改为卡片内 `flex column + gap`，`.sx-season / .sx-ep` 统一边框、圆角、背景与内距层级；统计条、筛选栏、季头、集卡与工作台其它卡对齐。第④步区头 `.pv-sstep-head` 保留 `flex-wrap` 防窄屏挤压 |
+| 渐进披露 | ③ 说明条默认只留制作队列 + 主行动，层级说明 / 季进度 / 四段完成度进 `.fl-intro-more`；章节映射进 `.pv-more`；分季·定稿·角色库说明进 `.sx-foot`；季头与集卡次要动作进 `.sx-more`「更多操作」。所有 `data-act` 与业务回调原样保留 |
+| 功能零删减 | 新增 `tests/ui-style.test.mjs` 7 项：① 渲染出的 `data-act` 集合与改造前 **63 个基线完全一致**；② 令牌齐备且 `.btn.sm/.xs` 已定义；③ `.sx-wrap` 不再自带页面级宽内距、`seasonsHTML` 使用标准卡；④ `sx/sw/fl/epb` 区段不再散写圆角与小字号；⑤ 分季卡主行动可见、次要动作进折叠但 DOM 中仍存在；⑥ ③ 说明条默认只显示队列、折叠内容仍保留文案与动作；⑦ 当前剧集条 / 剧本台 / 流水线正常渲染且无 `undefined/NaN`。初版断言「当前制作位 第 1 季 第 2 集」与队列口径不符（第 1 集四段已完成但未定稿，仍停在 S1E1 等定稿），改为断言停在第 1 季第 1 集后全绿 |
+| 验证 | `node --test tests/ui-style.test.mjs` **7/7**；`npm test` **722/722**；`node scripts/check.mjs` **181 个文件**（含新增 `tests/ui-style.test.mjs`；`.html` 预览页不计入语法检查）。真实应用验证改用 Playwright + `?project=prj_mw9v9e8g26wci`（4 集 / 2 季），此前直接对 `/` 做 Headless Chrome 截图 / `--dump-dom` 会超时（SIGTERM / exit 124），改用真实项目入口后稳定 |
+| 视觉 | 无头 Chrome 2× 预览页深 / 浅 × 宽 / 窄（900px）截图 + Playwright 真实应用深 / 浅截图 `/tmp/pwtest/real-*.png`、`/tmp/pwtest/elem-*.png`：覆盖 **工作台③分季分集卡（元素级 2× 高分辨率截图）、④剧本台与流水线、项目列表首页、剧集详情页**；统计条、筛选栏、季面板、4 张集卡、当前剧集条、剧本台、详情页中文标签「第 1 季 第 1 集」均无文字截断 / 重叠 / 对比度不足；几何核对 `docOverflow=0`、`bodyOverflow=0`、无超宽卡片、0 pageerror（仅既有可选接口 `GET /api/comfyui/interfaces` 未配置返回 404，与样式无关）。「更多操作」弹出层层级正确、不裁切，仅轻微覆盖下一季标题区，未影响可读与可点 |
+| 清理 | 临时预览页 `public/__style-preview.html` 已从工作区移除；后端、数据结构、接口、分集 / 定稿 / 队列算法、集号语义、角色复用、`localStorage` 偏好、事件绑定均未改动 |
+
+## 2026-11-10 · 当前剧集不再悬浮：身份进中间导航条，控制区移入第③步分集卡
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「当前剧集 不要悬浮，直接体现在中间的导航条中；显示格式第1季-1」：`.epb` 是 `position: sticky; top:0; z-index:9` + 阴影的三行常驻条，滚动时压住步骤卡。按「规划先行」先给只读调研 + 书面方案 + 布局示意图，用户通过 4 个选项拍板：位置 = **A 中间竖向步骤窄栏**、原控制区 = **移到第③步「分季 · 分集」卡片内**、格式 = **仅导航条新增短标签**、集号 = **全局唯一编号** |
+| 短标签 | `public/project-model.js` 新增 `episodeLabelShort(season, no)` → `第1季-1`（无空格 / 连字符 / 全局 `ep.no`），异常值兜底 `第?季-?`；`第2季-4` 表示第二季首集仍沿用全局集号。**不改动** `seasonLabel / episodeNoLabel / episodeLabelFull / queueItemLabel`，其余位置仍是完整中文「第 1 季 第 1 集」，上一轮中文标签回归测试全部保持 |
+| 导航条 | `navHTML()` 导出并在 `.pv-nav-head` 之后插入 `.pv-nav-ep`（当前剧集 + `第1季-1` + 「切换剧集在第③步分集卡内」提示）；收起态 `.pv-rail-ep` 把同一串拆成「第1季 / -1」两行（30px 宽，`clipped=false`）；窄屏 ≤1080px 横向步骤条改成一行且收起时仍常驻。`updateRail` / `setNavCollapsed` 不重建 DOM，标识不受影响 |
+| 去悬浮 | `renderProjectView` 的 `<main class="pv-ssteps">` 不再渲染 `activeEpisodeBarHTML`；该函数改为由 `seasonsHTML` 在 `.pv-card.sx-wrap` 卡头之后、统计条之前调用。`styles.css` 第 28 节把 `.epb` 从 `sticky / z-index:9 / box-shadow` 改为 `position: relative` 的卡片内嵌控制带；剧本台「换集用顶部条」文案同步改成「第③步分集卡内」。季/集下拉、上/下一集、四段进度、顺序制作、定稿 / 撤销、角色例外说明全部保留 |
+| 一致性 | `ui.activeNo = activeEpisodeNo(m)` 从 `host.innerHTML` 之前移到拼装 `bodies` **之前**——因为 `seasonsHTML` 内部现在会渲染控制区与每集「● 当前制作位」，必须先对齐再渲染，避免同一张卡里两处身份不一致 |
+| 验证 | 新增 `tests/nav-episode.test.mjs` **10/10**：短标签格式与全局集号 / 展开态标签 / 收起态两行与 title / 切集跨季同步 / 空分集兜底 / 卡片内控制区顺序与定稿入口 / 主内容不再含顶部条 / CSS 不再 sticky / 63 个 `data-act` 不变 / 第 28 节仍无硬编码字号圆角。**`npm test` 732/732 通过**；`node scripts/check.mjs` 通过 |
+| 视觉 | Playwright 真实应用 `?project=prj_mw9v9e8g26wci` 深 / 浅 × 展开 / 收起 × 1000px 窄屏，截图 `/tmp/pwtest/navep-*.png`、`/tmp/pwtest/rail-*.png`：导航条与 40px 状态轨均显示 `第1季-1` 且无裁切；`.epb` 计算样式 `position: relative`、`box-shadow: none`、确在 `.pv-card.sx-wrap` 内且位于卡头之后；主滚动容器下滚 900px 后 `epb.top` 由 2393 → 1493（随内容走，不再吸顶）；`docOverflow=0`、0 pageerror |
+| 边界 | 后端、数据结构、接口、`episodeQueue` / 定稿 / 锁定 / 自动推进、角色复用、`localStorage` 偏好、63 个事件入口均未改动 |

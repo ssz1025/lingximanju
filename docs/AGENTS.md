@@ -15,17 +15,17 @@
 
 ---
 
-## 2. 智能体清单（11 个节点型 + 3 个项目级业务 / 流程型 + 1 个对话型）
+## 2. 智能体清单（11 个节点型 + 4 个项目级业务 / 流程型 + 1 个对话型）
 
 | # | id | 角色 | 输入 | 输出（`node.data`） | 依赖 |
 |---|---|---|---|---|---|
-| 1 | `screenwriter` | 编剧 | `idea.text` | `script`: 标题、类型、角色表、场景剧本数组 | 论文式(1) |
+| 1 | `screenwriter` | 编剧 | `idea.text` + 分集梗概与原文 + 项目角色 | `script`（v2，契约见 `core/screenplay.mjs`）：标题 / 类型 / 梗概 / 基调 / 角色表（动机·秘密·弧光）/ 幕结构 / 分集映射 / 场次表（内外景·地点·时间·时长·人物·目标·冲突·转折·节拍·道具·转场 + 可拍摄正文行） | 论文式(1) |
 | 2 | `decomposer` | 叙事分解 | `script` / `idea.text` | `events[]`：`{title, summary, processChain}`；运行中生成 `event` 节点与下游 `scene` 节点 | 式(5) |
 | 3 | `rag` | 全局上下文 | 原文 + 各节点描述 | `context`: 检索片段、角色动机、伏笔；把增强描述写回目标节点 | 式(6) |
 | 4 | `character` | 角色造型 | `script.characters` | `characters[]`：`{name, appearance, palette, portraitUrl}`；生成三视图 SVG | ViMax 角色抽取 |
-| 5 | `storyboard` | 分镜规划 | `scene` + `script` | `shots[]`：`{shotNo, size, angle, movement, ffDesc, motionDesc, duration}`；逐镜头建 `shot` 节点 | 式(2) |
+| 5 | `storyboard` | 分镜规划 | `scene` + `script` + 分镜画面设置（格数 / 画幅） | `shots[]`：`{shotNo, size, angle, movement, ffDesc, motionDesc, duration, panel}`；`panel` 是镜头在分镜板里的格位（见 §12），逐镜头建 `shot` 节点 | 式(2) |
 | 6 | `camera-graph` | 机位依赖图 | 同场景 `shots[]` | `cameras[]`：`{id, shots, parent, anchorFrom}`；建立 `anchor` 虚线边 | 式(7) |
-| 7 | `keyframe` | 关键帧生成 | 镜头规格 + 角色资产 + 锚点图 | `candidates[]`：`{url, prompt, refs}`（k 个） | 式(3) 上半 |
+| 7 | `keyframe` | 关键帧生成 | 镜头规格 + 角色资产 + 锚点图 + 分镜画面设置（提示词公式 / 画幅 / 格位） | `candidates[]`：`{url, prompt, refs}`（k 个） | 式(3) 上半 |
 | 8 | `review` | VLM 质量择优 | `candidates[]` | `selected`: 索引、分数、理由；`keyframeUrl` | 式(4) / RQ6 |
 | 9 | `video` | 镜头视频 | 选中关键帧 + 运动描述 | `clip`: `{poster, frames[], duration, url, file, provider}`；ComfyUI 模式产出真实片段 | 式(3) 下半 |
 | 10 | `transition` | 转场空间锚点 | 两机位关键帧 | `transition`: `{url, fromCam, toCam, spatialNotes}` | 式(8) |
@@ -36,10 +36,13 @@
 > `voice-assigner` 只负责「从已有音色库里挑一个最合适的」。若要库里**没有**合适的音色，走音色抽卡（`POST /api/projects/:id/voices/draw`）：调用本地 ComfyUI TTS 工作流跑 N 次产出候选音频，进 `data/voice-drafts.json` 候选池（24h TTL）。抽卡不经过 Agent——它是用户驱动的交互动作，不是自动化决策；候选转正后（`/voices/[drafts/:id/]save`）才成为 Agent 可选的库内音色。
 | 14 | `character-extractor` | 角色提取 | 原著全文检索片段（BM25 + 原文证据窗口） | 候选角色（含 `evidence` / 静态动态特征），证据校验后合并进 `management.characters` | 项目级业务 Agent |
 | 15 | `director` | 导演智能体（流程型） | 项目选择的导演技能 + 一句话构想 | 不产出单个节点：编排能力 Agent → `executeSteps()` 六步 → 导演包 → `management.director.lastRun` 验收报告 | 项目级流程 Agent |
+| 16 | `storyboard-sheets` | 分镜板智能体 | `management.storyboard`（分镜画面设置）+ 全项目真实分镜图 | 不产出节点：按版式重排 `segments[].gridUrl / gridLayout / gridCells`，返回 `{grids, cells, layout, description, message}` | 项目级业务 Agent |
 
-> 注：12 为对话型 Agent，由 `/api/projects/:id/chat` 单独驱动；13–15 为项目级 Agent，注册在同一 registry（`/api/bootstrap` 可见），可被画布节点或 REST 直接调用，但**不直接产出画布节点**。其中 `director` 是「编排的编排」，主流程仍走 §4 的拓扑调度与六步状态机，详见 [`THEORY.md`](THEORY.md) §5.3；全片时长规格与成片验收见 §5.4。
+> 注：12 为对话型 Agent，由 `/api/projects/:id/chat` 单独驱动；13–16 为项目级 Agent，注册在同一 registry（`/api/bootstrap` 可见），可被画布节点或 REST 直接调用，但**不直接产出画布节点**。其中 `director` 是「编排的编排」，主流程仍走 §4 的拓扑调度与六步状态机，详见 [`THEORY.md`](THEORY.md) §5.3；全片时长规格与成片验收见 §5.4。`storyboard-sheets` 的业务口径见 §12。
 
-**分组**：叙事组（1–3）、资产组（4、13、14）、镜头组（5–6）、生成组（7–10）、交付组（11）、交互组（12）、导演组（15）。
+**分组**：叙事组（1–3）、资产组（4、13、14）、镜头组（5–6、16）、生成组（7–10）、交付组（11）、交互组（12）、导演组（15）。
+
+> 编剧的零 Key 兜底（`providers.mjs` 的 `mockProjectScreenplay` / `mockScene`）只做「转写」不做「虚构」：原文按句切场（引号内不断句、断引号后紧跟下一句台词时按两句处理），引号内容按「台词之前最近被提到的人」归属，地点 / 时间 / 道具从原文线索词里取（同集地点统一，同场时间以本场线索为准），目标 / 冲突 / 转折从原文句子里挑且互不重复；分集没带原文时用整段小说按集数均分回填。角色表不足 2 人时从正文认名字补齐（`castFromText`），否则 Provider 会退回主题模板角色（顾言 / 程曦），剧本里冒出小说中不存在的人。
 
 ---
 
@@ -245,3 +248,68 @@ ctx.patch({ film, directorPack, runtime, deliverables: { outputMode, video, dire
 - 每次 ComfyUI 提交写入日志：`已排队 <prompt_id> · 注入 N 个参数`、完成耗时、下载产物数。
 - 参考图上传、回退 Mock、拼接失败、导演包生成均有 `ctx.log` / SSE 日志。
 - 成片节点的 `meta` 仍记录耗时与成本估算；`report.realClips` 记录真实片段数，便于区分 Mock 与真实出片。
+
+### 11.6 对话型入口（step-chat / production-chat）
+
+对话不是第 12 个 Agent，而是**既有 Agent 与业务函数的对话式壳**：意图分类（零 LLM 正则）→ 与 UI 按钮完全相同的调用（`applyManageAction` / `executeSteps` / `runDirector` / `extractProjectCharacters` / `assignVoices` / `ensureDirectorPack`）→ 回复带等价 HTTP 与 curl。因此「对话改了什么」在数据层与按钮操作不可区分，token 分账也按「执行（重跑步骤）/ 对话（LLM 生成）」分开记。
+
+- `step-chat`（`core/step-chat.mjs`）：六步各一个会话 + 项目总助理；长任务互斥、归档式清空；`exportStepChat` 输出含**一键复刻命令串**的 Markdown。
+- `production-chat`（`core/production-chat.mjs`）：跨步单会话，17 类意图，长意图转后台任务（SSE `production:chat`），`exportChat` 输出全流程复刻记录。
+
+---
+
+## 12. 分镜画面设置：一个设置，三个智能体
+
+### 12.1 为什么要有这一层
+
+过去第⑤步写死「每段 3×3 宫格图」，是三处独立硬编码（分镜规划的行数、关键帧提示词、收尾渲染）。结果换版式要改三个文件，且很容易出现「面板显示 6 格、实际出图还是 9 格」。现在把版式收敛成**一份设置**（`management.storyboard`，纯函数层 `core/storyboard-settings.mjs`），由 `storyboard-sheets` Agent 收口业务口径，其它 Agent 只读不写。
+
+```js
+management.storyboard = {
+  layout: 'grid9',        // grid9 | grid6 | grid4 | strip4 | grid25 | single
+  cols: 3, rows: 3, cells: 9,   // 由 layout 推导后一并落盘，避免各处重算
+  aspect: 'inherit',      // inherit | 16:9 | 9:16 | 1:1 | 4:3（inherit 跟随项目画幅）
+  source: 'mixed',        // mixed（真图优先 + 剪影占位）| keyframe（只排真实分镜图）| schematic（纯示意）
+  captionMode: 'spec',    // spec（景别·机位·运动 + 动作）| action | prompt | none
+  guides: 'thirds',       // none | thirds | center（格内构图参考线）
+  showNo: true, watermark: true,
+  prompt: { spec: true, character: true, style: true, continuity: true, aspect: true },  // 提示词公式开关
+}
+```
+
+### 12.2 六个版式与它们的用途
+
+| id | 版式 | 格数 | 适用场景（调研结论） |
+|---|---|---|---|
+| `grid9` | 九宫格 3×3 | 9 | 动作序列、蒙太奇段落，默认值 |
+| `grid6` | 六宫格 3×2 | 6 | 对话场、需要更详细构图的场景 |
+| `grid4` | 四宫格 2×2 | 4 | 关键瞬间、提案与评审页 |
+| `strip4` | 条漫四联 4×1 | 4 | 竖屏条漫、连续动作横带 |
+| `grid25` | 二十五宫格 5×5 | 25 | 整集总览、角色一致性检查 |
+| `single` | 单图 1×1 | 1 | 定版镜头、封面级单帧 |
+
+**版面几何 = 格子数 × 单格画幅**（`sheetSpec()`）：单格画幅恒等于成片画幅，所以九宫格横屏是 1344×870、六宫格横屏是 1344×620、条漫四联是 1618×348 —— 换版式不会把单格拉成长条，也不会把整图硬压成固定比例。
+
+### 12.3 三个消费点
+
+| 消费点 | 读到什么 | 行为 |
+|---|---|---|
+| `narrative`（分镜规划） | `frame: {layout, cols, rows, cells, aspect, note}` | 每个镜头写 `panel = panelIndexOf(settings, sequenceStart + i)`，即「第 N 格」，进节点 `data.patch.sheet` |
+| `visual`（关键帧） | `ctx.patch.sheet` + `settings.prompt` 开关 | 提示词按开关拼装：ffDesc ｜ 景别·机位·运动 ｜ 出场角色 ｜ 风格锚点 ｜ 空间连续性 ｜ `framePromptNote()`（格位 + 画幅）｜ 候选说明；关掉某项就整段不出现，不是拼个空字符串 |
+| `storyboard-sheets`（合成） | 整份设置 + `collectProjectFrames()` | `regenerateProjectGrids()` 纯 SVG 重排：真实图按 `shotNo` 排序入格、缺图按 `source` 画剪影或「待出图」、说明条按 `captionMode`、参考线按 `guides`、序号/署名按开关 |
+
+### 12.4 接口与调用关系
+
+```
+GET  /api/projects/:id/storyboard/sheets   → planStoryboardSheets()   只读统计（几个版式、几张板、几张真图、几张板已过期）
+POST /api/projects/:id/storyboard/sheets   → composeStoryboardSheets() 保存设置（可选 patch）+ 重排全部分镜板
+POST /api/projects/:id/manage {action:'storyboard'} → 只保存设置，不重排（面板「保存设置」按钮）
+```
+
+步骤收尾（`step-runner.syncEpisodeGrids`）、剧集路由（`action:'grids'`）与上面两个路由**共用同一个 Agent 函数**，所以「面板上看到的版式」与「实际落盘的 SVG」永远同源。`plan.stale > 0` 表示用户改过版式但还没重排，前端会提示「⌗ 保存并重排分镜板」。
+
+### 12.5 边界与降级
+
+- **重排不动关键帧**：合成分镜板是纯 SVG 拼接，不重跑图像模型、不烧 GPU；改版式、改说明条、改参考线都是秒级。
+- **不伪造产物**：`source: 'keyframe'` 且该段没有真实图时，格子画虚线框 + 「待出图」，页脚写「真实分镜图 0/N 格」，绝不把剪影占位说成已出图。
+- **前端同源同文**：`public/project-options.js` 复制了与后端完全一致的版式 / 画幅 / 来源 / 说明条 / 参考线 / 提示词公式常量（前端不 import 服务端模块），`tests/storyboard-settings.test.mjs` 断言两边 id 逐项一致，只在一边加版式会被测试挡住。

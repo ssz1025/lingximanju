@@ -184,3 +184,83 @@ test('buildNovelProject 未选交付物时抛出错误', () => {
     /至少/,
   );
 });
+
+/* ---------------------------------------------------------------------------
+ * 超长小说自动分季：每 12 集一季，手动移季保留；重算分集不清空用户分组。
+ * -------------------------------------------------------------------------*/
+const LONG_NOVEL = (() => {
+  const out = ['百卷长书'];
+  for (let c = 1; c <= 30; c++) {
+    out.push('', `第${c}章 卷${c}`, '');
+    out.push(FILLER.repeat(12) + `（第${c}章结尾）`); // 每章约 340 字 → targetChars=300 时一章一集
+    out.push('');
+  }
+  return out.join('\n');
+})();
+
+test('attachSource 超长小说自动分季：每 12 集一季并登记 seasons', () => {
+  const built = buildNovelProject({ kind: 'novel', name: '自动分季' });
+  const r = attachSource(built.project, {
+    text: LONG_NOVEL, filename: 'long-novel.txt',
+    split: { strategy: 'chapter', targetChars: 300, maxEpisodes: 30 },
+  });
+  const records = built.project.management.episodes;
+  assert.ok(records.length > 12, `应有超过 12 集（实际 ${records.length}）才能触发分季`);
+  const firstSeasonEps = records.filter((e) => e.season === 1);
+  const secondSeasonEps = records.filter((e) => e.season === 2);
+  assert.ok(firstSeasonEps.length > 0 && secondSeasonEps.length > 0, '至少应有两个非空季');
+  assert.ok(records.every((e) => Number(e.season) >= 1), '每集都应有季归属');
+  const seasons = built.project.management.seasons || [];
+  const maxSeason = Math.max(...records.map((e) => e.season));
+  assert.equal(seasons.length >= maxSeason, true, 'seasons[] 应登记所有用到的季号');
+  assert.ok(/自动分 \d+ 季/.test(r.message), `上传消息应说明自动分季：${r.message}`);
+});
+
+test('手动分季在重算分集后保留', () => {
+  const built = buildNovelProject({ kind: 'novel', name: '手动分季保留' });
+  attachSource(built.project, {
+    text: LONG_NOVEL, filename: 'long-novel.txt',
+    split: { strategy: 'chapter', targetChars: 300, maxEpisodes: 30 },
+  });
+  const m = built.project.management;
+  // 用户把第 1 集手动移到第 3 季
+  m.episodes[0].season = 3;
+  const r = refreshEpisodes(built.project, { split: { strategy: 'chapter', targetChars: 300, maxEpisodes: 30 } });
+  assert.ok(r.records.length > 12);
+  assert.equal(m.episodes[0].season, 3, '手动移过的季不应被重算冲掉');
+  assert.ok(m.seasons.some((s) => Number(s.no) === 3), '第 3 季应保留登记');
+});
+
+test('split.seasonSize 自定义每季集数（上传与重算两入口都生效）', () => {
+  // 上传入口：每季 10 集 → 30 集应分 3 季
+  const built = buildNovelProject({ kind: 'novel', name: '自定义每季集数' });
+  attachSource(built.project, {
+    text: LONG_NOVEL, filename: 'long-novel.txt',
+    split: { strategy: 'chapter', targetChars: 300, maxEpisodes: 30, seasonSize: 10 },
+  });
+  const m = built.project.management;
+  assert.equal(m.split.seasonSize, 10, 'seasonSize 应写进 management.split');
+  assert.equal(new Set(m.episodes.map((e) => e.season)).size, 3, '30 集按每季 10 集应分 3 季');
+  assert.equal(m.episodes[9].season, 1, '第 9 集（索引 9）应在第 1 季');
+  assert.equal(m.episodes[10].season, 2, '第 10 集（索引 10）应在第 2 季');
+
+  // 重算入口：换回每季 15 集 → 未手动移季的集应重新归季
+  const r = refreshEpisodes(built.project, {
+    split: { strategy: 'chapter', targetChars: 300, maxEpisodes: 30, seasonSize: 15 },
+  });
+  const fresh = m.episodes.filter((e) => Number(e.season) === Math.floor(m.episodes.indexOf(e) / 15) + 1);
+  assert.equal(fresh.length, m.episodes.length, '未手动移季的集应按新 seasonSize 归季');
+  assert.equal(new Set(m.episodes.map((e) => e.season)).size, 2, '30 集按每季 15 集应分 2 季');
+  assert.equal(m.split.seasonSize, 15, '重算后 seasonSize 应更新为 15');
+  assert.ok(/自动分 2 季/.test(r.message), `重算消息应说明分季：${r.message}`);
+});
+
+test('split.seasonSize 缺省 / 非法值兜底为 12', () => {
+  const built = buildNovelProject({ kind: 'novel', name: 'seasonSize 兜底' });
+  attachSource(built.project, {
+    text: LONG_NOVEL, filename: 'long-novel.txt',
+    split: { strategy: 'chapter', targetChars: 300, maxEpisodes: 30, seasonSize: 0 },
+  });
+  const m = built.project.management;
+  assert.equal(new Set(m.episodes.map((e) => e.season)).size >= 3, true, '非法 seasonSize 应回落默认 12（30 集 → ≥3 季）');
+});

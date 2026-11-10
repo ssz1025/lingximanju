@@ -36,6 +36,17 @@ function makeNode(id, type, title, x, y, data = {}, status = 'idle', meta = {}) 
   };
 }
 
+/** 单集画布统一的作用域标记：meta 供画布过滤，data.scopeRef 供组合画布反查 */
+function tagNode(node, epNo) {
+  node.meta = { ...(node.meta || {}), scope: 'episode', episodeNo: epNo };
+  node.data = {
+    ...(node.data || {}),
+    episodeNo: epNo,
+    scopeRef: { kind: 'episode', no: epNo },
+  };
+  return node;
+}
+
 /** 按集号查 episode，找不到返回 null（兼容缺 management / episodes） */
 function findEpisode(project, no) {
   return arr(project?.management?.episodes).find((e) => num(e?.no) === num(no)) || null;
@@ -67,16 +78,8 @@ export function seedEpisodeCanvas(project, no) {
   const nodes = [];
   const edges = [];
 
-  // 单集画布统一的作用域标记：meta 供画布过滤，data.scopeRef 供组合画布反查
-  const tag = (node) => {
-    node.meta = { ...(node.meta || {}), scope: 'episode', episodeNo: epNo };
-    node.data = {
-      ...(node.data || {}),
-      episodeNo: epNo,
-      scopeRef: { kind: 'episode', no: epNo },
-    };
-    return node;
-  };
+  // 单集画布统一的作用域标记（复用 tagNode）
+  const tag = (node) => tagNode(node, epNo);
 
   // --- root -------------------------------------------------------------
   const rootId = `ep_${epNo}_root`;
@@ -178,19 +181,17 @@ export function composeOverallCanvas(project) {
     return { nodes: [], edges: [], viewport: { ...OVERALL_VIEWPORT }, stats: { ...zeroStats } };
   }
 
-  // --- 第一遍：取画布（缺失则临时 seed，绝不写回）+ 包围盒 ---------------
+  // --- 第一遍：取画布（缺失则播种；已有画布也先做资源同步，保证新分镜板 / 角色图可见） ---
   const items = [];
   let seededCount = 0;
   for (let s = 0; s < groups.length; s += 1) {
     const g = groups[s];
     for (let i = 0; i < g.episodes.length; i += 1) {
       const ep = g.episodes[i];
-      let canvas = (ep.canvas && Array.isArray(ep.canvas.nodes) && ep.canvas.nodes.length)
-        ? ep.canvas : null;
-      if (!canvas) {
-        canvas = seedEpisodeCanvas(project, num(ep.no));
-        seededCount += 1;
-      }
+      const hadCanvas = Boolean(ep.canvas && Array.isArray(ep.canvas.nodes) && ep.canvas.nodes.length);
+      if (!hadCanvas) seededCount += 1;
+      // syncEpisodeCanvasResources 是纯函数：播种 / 增补资源节点都不写回 ep.canvas
+      const canvas = syncEpisodeCanvasResources(project, num(ep.no)).canvas;
       const cnodes = arr(canvas.nodes);
       const cedges = arr(canvas.edges);
       const maxX = cnodes.length
@@ -291,6 +292,190 @@ export function composeOverallCanvas(project) {
       seededCount,
     },
   };
+}
+
+/* ---------------------------------------------------------------------------
+ * 2.5 资源同步：把最新生成的分镜板 / 角色定妆图等同步进单集画布
+ *
+ * 背景：ep.canvas 一旦播种就随项目持久化，之后在工作台生成分镜板（ep.segments[].gridUrl）
+ * 或角色定妆图（m.characters[].views）只会改剧集数据，画布上看不到也没有连线。
+ * 本函数以「确定性 id + 幂等增改」把资源节点补进画布：
+ *  - 段节点 ep_<no>_seg_<j> / 分镜板节点 ep_<no>_grid_<j>（段 → 分镜板 flow 边）
+ *  - 角色节点 ep_<no>_chr_<charId>（资产节点 → 角色 ref 边），资产节点带缩略图数据
+ *  - 清理已失效的自动节点（分段重切后多余的 seg/grid、取消关联的 chr）
+ *  - 绝不移动既有节点，也不删除用户手搭的节点（只认确定性 id 的自动节点）
+ * 纯函数：不修改入参 project / ep.canvas，返回 { canvas, changed }。
+ * -------------------------------------------------------------------------*/
+
+/** 角色的任一可用定妆图：优先正面，其次任意视图 */
+function portraitUrlOf(char) {
+  const views = char?.views && typeof char.views === 'object' ? char.views : {};
+  return String(views.front?.url || Object.values(views).find((v) => v?.url)?.url || '');
+}
+
+/** 本集出场角色：优先 characterIds 精确关联，否则按姓名 / 别名在原文中出现兜底 */
+function involvedCharacters(ep, allChars) {
+  const chars = arr(allChars).filter((c) => c?.id);
+  let picked = [];
+  if (Array.isArray(ep?.characterIds) && ep.characterIds.length) {
+    const byId = new Map(chars.map((c) => [String(c.id), c]));
+    picked = ep.characterIds.map((id) => byId.get(String(id))).filter(Boolean);
+  } else {
+    const text = String(ep?.text || '') + String(ep?.summary || '');
+    if (text) {
+      picked = chars.filter((c) => {
+        const names = [c.name, ...(Array.isArray(c.aliases) ? c.aliases : [])]
+          .filter((n) => String(n || '').trim().length >= 2);
+        return names.some((n) => text.includes(n));
+      }).slice(0, 12);
+    }
+  }
+  return picked.map((char) => ({ char, url: portraitUrlOf(char) }));
+}
+
+export function syncEpisodeCanvasResources(project, no) {
+  const epNo = num(no);
+  const ep = findEpisode(project, epNo);
+  const hadCanvas = Boolean(ep?.canvas && Array.isArray(ep.canvas.nodes) && ep.canvas.nodes.length);
+
+  // 无画布数据时播种；有则克隆（绝不直接改入参的 ep.canvas）
+  let canvas;
+  if (!ep) {
+    canvas = { nodes: [], edges: [], viewport: { ...NOT_FOUND_VIEWPORT } };
+    return { canvas, changed: false };
+  }
+  canvas = hadCanvas ? clone(ep.canvas) : seedEpisodeCanvas(project, epNo);
+  if (!Array.isArray(canvas.edges)) canvas.edges = [];
+  if (!canvas.viewport) canvas.viewport = { ...SEED_VIEWPORT };
+
+  // changed 以「与项目里已持久化的 ep.canvas 是否一致」为基准（本函数是纯函数，不写回）
+  const storedJson = JSON.stringify(ep.canvas || null);
+  const nodeById = new Map(canvas.nodes.map((n) => [String(n?.id), n]));
+  const edgeById = new Map(canvas.edges.map((e) => [String(e?.id), e]));
+  const putNode = (node) => {
+    if (!nodeById.has(node.id)) { canvas.nodes.push(node); nodeById.set(node.id, node); }
+  };
+  const putEdge = (edge) => {
+    // 端点必须真实存在，避免制造悬空边
+    if (edgeById.has(edge.id) || !nodeById.has(edge.from) || !nodeById.has(edge.to)) return;
+    canvas.edges.push(edge); edgeById.set(edge.id, edge);
+  };
+
+  const segments = arr(ep.segments);
+  const involved = involvedCharacters(ep, project?.management?.characters);
+
+  // --- 分段节点 + 分镜板节点（含 URL 更新） ------------------------------
+  segments.forEach((s, idx) => {
+    const j = idx + 1;
+    const segId = `ep_${epNo}_seg_${j}`;
+    const segTitle = cut(labelOf(s, `分段 ${j}`), 30);
+    const segData = {
+      summary: cut((s && typeof s === 'object' ? s.summary : '') || segTitle, 120),
+      segment: {
+        no: num(s?.no, j),
+        title: cut(labelOf(s, `分段 ${j}`), 40),
+        chars: num(s?.chars),
+        cells: Array.isArray(s?.cells) ? s.cells.length : num(s?.cells),
+      },
+    };
+    const segNode = nodeById.get(segId);
+    if (segNode) {
+      if (segNode.title !== segTitle) segNode.title = segTitle;
+      segNode.data = { ...(segNode.data || {}), ...segData };
+    } else {
+      putNode(tagNode(makeNode(segId, 'scene', segTitle, 720, 60 + (j - 1) * 140, segData), epNo));
+    }
+    const gridUrl = s?.gridUrl ? String(s.gridUrl) : '';
+    const gridId = `ep_${epNo}_grid_${j}`;
+    if (gridUrl) {
+      const gridNode = nodeById.get(gridId);
+      if (gridNode) {
+        if (gridNode.data?.url !== gridUrl) gridNode.data = { ...(gridNode.data || {}), url: gridUrl };
+        if (gridNode.status !== 'done') gridNode.status = 'done';
+      } else {
+        putNode(tagNode(makeNode(gridId, 'keyframe', cut(labelOf(s, `分段 ${j}`), 30), 1060, 60 + (j - 1) * 140, {
+          url: gridUrl,
+        }, 'done'), epNo));
+      }
+      putEdge({ id: `ep_${epNo}_e_seggrid_${j}`, from: segId, to: gridId, kind: 'flow' });
+    }
+  });
+
+  // --- 角色定妆图节点 + 资产节点汇总 ------------------------------------
+  const assetId = `ep_${epNo}_character`;
+  const rootId = `ep_${epNo}_root`;
+  const anchorId = nodeById.has(assetId) ? assetId : (nodeById.has(rootId) ? rootId : null);
+  involved.forEach(({ char, url }, i) => {
+    const chrId = `ep_${epNo}_chr_${char.id}`;
+    const chrNode = nodeById.get(chrId);
+    if (chrNode) {
+      if (chrNode.title !== char.name) chrNode.title = String(char.name);
+      chrNode.data = { ...(chrNode.data || {}), name: char.name, url };
+      if (url && chrNode.status !== 'done') chrNode.status = 'done';
+    } else {
+      putNode(tagNode(makeNode(chrId, 'character', String(char.name), 1400, 60 + (5 + i) * 140, {
+        name: char.name, url,
+      }, url ? 'done' : 'idle'), epNo));
+    }
+    if (anchorId) putEdge({ id: `ep_${epNo}_e_charasset_${char.id}`, from: anchorId, to: chrId, kind: 'ref' });
+  });
+  const assetNode = nodeById.get(assetId);
+  if (assetNode) {
+    const nextData = { ...(assetNode.data || {}), count: involved.length };
+    if (involved.length) {
+      // 只在有角色时写入缩略图数据，避免空数组 diff 导致每次同步都误报变化
+      nextData.characters = involved.map(({ char, url }) => ({ name: char.name, portraitUrl: url }));
+    }
+    if (JSON.stringify(assetNode.data) !== JSON.stringify(nextData)) assetNode.data = nextData;
+    if (involved.some((x) => x.url) && assetNode.status === 'idle') assetNode.status = 'done';
+  }
+
+  // --- 产物节点状态只升不降（剧本 / 导演包 / 视频生成后点亮） -----------
+  [['script', Boolean(ep.script)], ['pack', Boolean(ep.pack)], ['video', Boolean(ep.video)]]
+    .forEach(([key, done]) => {
+      const n = nodeById.get(`ep_${epNo}_${key}`);
+      if (n && done && n.status === 'idle') n.status = 'done';
+    });
+
+  // --- 清理失效的自动节点：重切后多余的分段 / 无图分镜板 / 取消关联的角色
+  const involvedIds = new Set(involved.map(({ char }) => String(char.id)));
+  const segRe = new RegExp(`^ep_${epNo}_seg_(\\d+)$`);
+  const gridRe = new RegExp(`^ep_${epNo}_grid_(\\d+)$`);
+  const chrRe = new RegExp(`^ep_${epNo}_chr_(.+)$`);
+  const drop = new Set();
+  for (const n of canvas.nodes) {
+    const id = String(n?.id || '');
+    const ms = id.match(segRe);
+    if (ms && num(ms[1]) > segments.length) { drop.add(id); continue; }
+    const mg = id.match(gridRe);
+    if (mg && (num(mg[1]) > segments.length || !arr(ep.segments)[num(mg[1]) - 1]?.gridUrl)) { drop.add(id); continue; }
+    const mc = id.match(chrRe);
+    if (mc && !involvedIds.has(mc[1])) drop.add(id);
+  }
+  if (drop.size) {
+    canvas.nodes = canvas.nodes.filter((n) => !drop.has(String(n?.id)));
+    canvas.edges = canvas.edges.filter((e) => !drop.has(String(e?.from)) && !drop.has(String(e?.to)));
+  }
+
+  return { canvas, changed: JSON.stringify(canvas) !== storedJson };
+}
+
+/* ---------------------------------------------------------------------------
+ * 2.6 主画布角色资产同步：工作台生成的定妆图同步进主画布的「角色资产」节点
+ * 直接就地更新 project.nodes（主画布本身就是 project），返回是否有变化。
+ * -------------------------------------------------------------------------*/
+export function syncMainCanvasCharacterAssets(project) {
+  const characters = arr(project?.management?.characters)
+    .map((c) => ({ name: String(c?.name || ''), portraitUrl: portraitUrlOf(c) }))
+    .filter((c) => c.name);
+  let changed = false;
+  for (const n of arr(project?.nodes)) {
+    if (n?.type !== 'character') continue;
+    const nextData = { ...(n.data || {}), count: characters.length, characters };
+    if (JSON.stringify(n.data) !== JSON.stringify(nextData)) { n.data = nextData; changed = true; }
+    if (characters.length && n.status === 'idle') { n.status = 'done'; changed = true; }
+  }
+  return changed;
 }
 
 /* ---------------------------------------------------------------------------

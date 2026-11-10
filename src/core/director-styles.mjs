@@ -391,6 +391,23 @@ export const DIRECTOR_STYLES = [
 
 export const STYLE_BY_ID = Object.fromEntries(DIRECTOR_STYLES.map((s) => [s.id, s]));
 
+/* --------------------------------------------------------------------------
+ * 自定义风格注册表：持久化与 IO 在 core/director-style-store.mjs（唯一写入方），
+ * 本文件保持纯逻辑——注册表只被 store 模块注入，查询函数合并内置 + 自定义两份。
+ * ------------------------------------------------------------------------ */
+let CUSTOM_STYLES = [];
+
+/** 注入 / 替换自定义风格（store 模块在加载、保存、删除后调用） */
+export function registerCustomStyles(list) {
+  CUSTOM_STYLES = (Array.isArray(list) ? list : [])
+    .filter((s) => s && typeof s === 'object' && s.id && !STYLE_BY_ID[s.id]);
+}
+
+/** 全部风格 = 内置十位 + 自定义（顺序：内置在前，自定义按保存顺序追加） */
+export function allDirectorStyles() {
+  return [...DIRECTOR_STYLES, ...CUSTOM_STYLES];
+}
+
 /**
  * 常见别名 → 规范 id（中文名 / 英文写法 / 片名意象 / 旧数据都能落到同一份档案）。
  * 查询时先做「小写 + 去空格与连字符」归一，因此 `ANG LEE`、`ang-lee`、`angLee` 同一结果。
@@ -427,13 +444,18 @@ export function normalizeStyleId(id) {
   const raw = String(id ?? '').trim();
   if (!raw) return '';
   if (STYLE_BY_ID[raw]) return raw;
+  // 自定义风格：精确 id 或归一化键都能命中
+  const custom = CUSTOM_STYLES.find((s) => s.id === raw)
+    || CUSTOM_STYLES.find((s) => styleKey(s.id) === styleKey(raw));
+  if (custom) return custom.id;
   const key = styleKey(raw);
   return ID_BY_KEY[key] || ALIAS_BY_KEY[key] || '';
 }
 
 export function getDirectorStyle(id) {
   const key = normalizeStyleId(id);
-  return key ? STYLE_BY_ID[key] || null : null;
+  if (!key) return null;
+  return STYLE_BY_ID[key] || CUSTOM_STYLES.find((s) => s.id === key) || null;
 }
 
 export function isDirectorStyle(id) {
@@ -557,6 +579,7 @@ export function styleCard(id) {
   return {
     id: style.id, icon: style.icon, label: style.label, director: style.director,
     workTitle: style.workTitle, tagline: style.tagline,
+    custom: !!style.custom,
     palettes: (style.palettes || []).map((p) => ({ ...p })),
     defaultPalette: style.defaultPalette,
     medium: [...(style.medium || [])].slice(0, 2),
@@ -575,7 +598,7 @@ export function paceLabel(pace = {}) {
 }
 
 export function listStyleCards() {
-  return DIRECTOR_STYLES.map((s) => styleCard(s.id));
+  return allDirectorStyles().map((s) => styleCard(s.id));
 }
 
 /**

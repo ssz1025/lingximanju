@@ -23,7 +23,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './store.mjs';
 
-const FILE = path.join(DATA_DIR, 'voices.json');
+// 音色库文件路径惰性求值：voices.mjs 会被 project-steps.mjs（char-upsert 的音色校验）
+// 引用，而 store.mjs 又引用 project-steps.mjs —— 循环链上若在模块顶层就取 DATA_DIR，
+// voices 的顶层代码会先于 store 的初始化执行，触发 TDZ（Cannot access 'DATA_DIR'）。
+// 惰性后首次读写才解析路径，那时 store 必然已就绪。
+let _file = null;
+function voicesFile() {
+  _file = _file || path.join(DATA_DIR, 'voices.json');
+  return _file;
+}
 
 const GENDERS = ['男', '女', '中性'];
 const AGE_GROUPS = ['儿童', '青年', '中年', '老年'];
@@ -155,8 +163,8 @@ function clampPitch(v) {
 
 export function loadVoices() {
   try {
-    if (fs.existsSync(FILE)) {
-      const raw = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+    if (fs.existsSync(voicesFile())) {
+      const raw = JSON.parse(fs.readFileSync(voicesFile(), 'utf8'));
       if (Array.isArray(raw.voices)) return raw.voices.map(normalizeVoice);
     }
   } catch (err) {
@@ -169,9 +177,9 @@ export function loadVoices() {
 export function saveVoices(list = []) {
   const voices = (Array.isArray(list) ? list : []).map(normalizeVoice);
   const payload = { schema: 1, updatedAt: Date.now(), voices };
-  const tmp = `${FILE}.${process.pid}.tmp`;
+  const tmp = `${voicesFile()}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
-  fs.renameSync(tmp, FILE);
+  fs.renameSync(tmp, voicesFile());
   return voices;
 }
 
@@ -307,6 +315,41 @@ export function matchAll(characters = [], library = null) {
       voiceId: voice ? voice.id : null,
       voiceName: voice ? voice.name : null,
       reason: reasons.join('；') || '未找到合适音色',
+      score,
+    };
+  });
+}
+
+/**
+ * 批量唯一匹配：为角色列表各挑一个「互不重复」的最佳音色。
+ *
+ * 为什么不能用 matchAll：它对每个角色独立取全局最优，两个性别年龄性格都相近的角色
+ * 几乎必然撞到同一个音色；而「每个角色的音色不能重复」是硬约束。
+ * 贪心策略：按传入顺序逐个角色挑选，每个角色在「还没被占用」的音色里打分取最优；
+ * 库里音色不够分时，后面的角色拿不到音色（voiceId=null，由前端提示未绑定）。
+ *
+ * @param {Array} characters 角色数组（需含 id/name）
+ * @param {Array} [library] 音色库（不传则自动读取）
+ * @param {object} [opts] { taken: Set<string> } 预占用的音色 id 集合
+ *   （其它项目 / 已手动绑定的角色占掉的音色，本轮不允许再分配出去）
+ * @returns {Array} 与 matchAll 同结构的 assignments（voiceId 可为 null）
+ */
+export function matchAllUnique(characters = [], library = null, opts = {}) {
+  const voices = library || loadVoices();
+  const taken = opts.taken instanceof Set ? new Set(opts.taken) : new Set(opts.taken || []);
+  return (Array.isArray(characters) ? characters : []).map((c) => {
+    const free = voices.filter((v) => !taken.has(v.id));
+    // free 为空时不能交给 matchVoice：它会把「空数组」当成「没传库」回退 loadVoices()，
+    // 导致音色不够分时后面的角色从磁盘库里捡走别人的音色，破坏唯一性。
+    const mt = free.length ? matchVoice(c, free) : { voice: null, score: 0, reasons: [] };
+    const { voice, score, reasons } = mt;
+    if (voice) taken.add(voice.id);
+    return {
+      characterId: c.id || '',
+      characterName: c.name || '',
+      voiceId: voice ? voice.id : null,
+      voiceName: voice ? voice.name : null,
+      reason: voice ? (reasons.join('；') || '未找到合适音色') : '可用的不重复音色已用完',
       score,
     };
   });

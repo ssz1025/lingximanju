@@ -8,6 +8,7 @@ import { resolveComfyConfig } from './comfy-config.mjs';
 import { resolveModelSettings } from './app-settings.mjs';
 import { resolveProjectAesthetic } from './director-styles.mjs';
 import { resolveRuntimeSpec } from './runtime-spec.mjs';
+import { reconcileProjectComfy, watchComfyJobs } from './comfy-reconcile.mjs';
 import { uid } from './store.mjs';
 
 const activeRuns = new Map();
@@ -31,7 +32,14 @@ function computeTargets(project, nodeId, scope) {
   if (nodeId) return descendants(edges, nodeId);
   const types = new Set(scope || []);
   const inScope = (id) => !types.size || types.has(nodes.find((n) => n.id === id)?.type);
-  const roots = nodes.filter((n) => (n.status === 'idle' || n.status === 'error') && inScope(n.id)).map((n) => n.id);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  // 上游还在跑（running / queued）的节点不能当起点：否则「对账后只剩择优待跑」时，
+  // 择优会抢在关键帧回填之前执行，报「没有可评审的关键帧候选」。
+  const busyParent = (id) => edges.some((e) => e.to === id
+    && ['running', 'queued'].includes(byId.get(e.from)?.status || ''));
+  const roots = nodes
+    .filter((n) => (n.status === 'idle' || n.status === 'error') && inScope(n.id) && !busyParent(n.id))
+    .map((n) => n.id);
   const set = new Set();
   for (const id of roots) for (const d of descendants(edges, id)) if (inScope(d)) set.add(d);
   return set;
@@ -62,10 +70,46 @@ export async function runProject(projectId, opts = {}) {
     comfy: resolveComfyConfig(project),
     // 短剧时长规格随上下文下发：分镜预算、单片段时长、成片时间线全部同源
     runtime: resolveRuntimeSpec(project),
+    // 阶段意图：第⑤步（storyboard）只为分镜出图，转场节点不得偷偷调用图生视频；
+    // 只有第⑥步（videoStage=true）才允许真正出片段 / 转场视频。
+    videoStage: opts.videoStage === true,
     // 导演风格随上下文下发：Provider 据此改写正负提示词与 Mock 调色板，
     // 分镜智能体据此写入主色 / 光线 / 媒介。没选风格技能时为 null（行为不变）。
     aesthetic: resolveProjectAesthetic(project),
   };
+
+  /**
+   * 残留节点自愈（先对账，再决定谁需要重跑）：
+   * 节点状态是持久化的，而「正在跑」只活在本进程内存里。服务重启 / 请求中断 /
+   * 客户端取消都会留下 status=queued/running 的节点；ComfyUI 的队列与历史却是独立进程，
+   * 图很可能已经出好了。过去这里一律复位成 idle 再全量重烧，等于把已跑完的结果扔掉重来。
+   * 现在先问 ComfyUI：已完成的直接取回、仍在队列的保留状态（不重发），
+   * 只有 ComfyUI 侧也查不到的任务才复位成待执行。
+   */
+  const staleNodes = (project.nodes || []).filter((n) => n.status === 'running' || n.status === 'queued');
+  if (staleNodes.length) {
+    const report = await reconcileProjectComfy(project, {
+      config: settings.comfy, runId, resetMissing: true,
+      log: (level, message) => emit('log', { projectId, runId, level, message }),
+    });
+    if (!report.ok) {
+      // ComfyUI 连不上：退回旧行为，宁可重算也不能让这一步「0 节点直接成功」
+      for (const n of staleNodes) {
+        n.status = 'idle'; n.progress = 0;
+        emit('node:status', { projectId, runId, nodeId: n.id, status: 'idle', progress: 0 });
+      }
+      emit('log', { projectId, runId, level: 'warn',
+        message: `残留节点 ${staleNodes.length} 个，但 ComfyUI 暂时不可用（${report.message}），已全部复位为待执行` });
+    } else {
+      const parts = [`取回 ${report.adopted.length} 条已完成`];
+      if (report.running.length) parts.push(`${report.running.length} 条仍在 ComfyUI 运行（不重发）`);
+      if (report.queued.length) parts.push(`${report.queued.length} 条仍在 ComfyUI 排队（不重发）`);
+      if (report.reset.length) parts.push(`${report.reset.length} 条在 ComfyUI 查无结果，将重新发送`);
+      emit('log', { projectId, runId, level: 'info',
+        message: `上次中断的残留任务已对账：${parts.join(' · ')}` });
+    }
+  }
+
   const concurrency = Math.max(1, Math.min(8, Number(settings.concurrency) || 3));
   const scopeTypes = new Set(opts.scope || []);
   const inScope = (id) => !scopeTypes.size || scopeTypes.has(project.nodes.find((n) => n.id === id)?.type);
@@ -107,7 +151,10 @@ export async function runProject(projectId, opts = {}) {
         const node = project.nodes.find((n) => n.id === id);
         if (node && node.status !== 'done') {
           node.status = 'queued'; node.progress = 0; node.error = '';
-          emit('node:status', { projectId, runId, nodeId: id, status: 'queued', progress: 0 });
+          // 任务看板要能回答「这条是什么时候发出去的」：排队时间必须落盘，
+          // 否则刷新页面后只剩一个孤零零的「排队中」，无法判断卡了多久。
+          node.meta = { ...(node.meta || {}), queuedAt: Date.now(), startedAt: null, finishedAt: null };
+          emit('node:status', { projectId, runId, nodeId: id, status: 'queued', progress: 0, queuedAt: node.meta.queuedAt });
         }
       }
       scheduleSave();
@@ -202,7 +249,8 @@ export async function runProject(projectId, opts = {}) {
       providers, signal, runState, settings,
     });
     node.status = 'running'; node.progress = 0.05; node.error = '';
-    emit('node:status', { projectId, runId, nodeId, status: 'running', progress: 0.05 });
+    node.meta = { ...(node.meta || {}), startedAt: Date.now(), finishedAt: null };
+    emit('node:status', { projectId, runId, nodeId, status: 'running', progress: 0.05, startedAt: node.meta.startedAt });
     ctx.log('think', `${agent.label} 正在处理「${node.title}」…`);
     const t0 = Date.now();
     const fallbacksBefore = stats.fallbacks;
@@ -214,9 +262,11 @@ export async function runProject(projectId, opts = {}) {
       const durationMs = Date.now() - t0;
       const cost = agent.group === '生成' ? 0.045 : agent.group === '叙事' ? 0.012 : 0.006;
       node.meta = { ...(node.meta || {}), durationMs, cost, runId, provider: providers.mode,
+        finishedAt: Date.now(),
         llmFallback: stats.fallbacks - fallbacksBefore };
       stats.executed += 1; stats.cost += cost;
-      emit('node:status', { projectId, runId, nodeId, status: 'done', progress: 1 });
+      emit('node:status', { projectId, runId, nodeId, status: 'done', progress: 1,
+        startedAt: node.meta.startedAt || null, finishedAt: node.meta.finishedAt, durationMs });
       emit('node:data', { projectId, runId, nodeId, data: node.data });
       ctx.log('info', `${agent.label} 完成 · ${durationMs}ms · $${cost.toFixed(3)}`);
     } catch (err) {
@@ -226,8 +276,11 @@ export async function runProject(projectId, opts = {}) {
         return;
       }
       node.status = 'error'; node.error = err?.message || String(err);
+      node.meta = { ...(node.meta || {}), finishedAt: Date.now(),
+        durationMs: Date.now() - t0 };
       stats.failed += 1;
-      emit('node:status', { projectId, runId, nodeId, status: 'error', progress: node.progress, error: node.error });
+      emit('node:status', { projectId, runId, nodeId, status: 'error', progress: node.progress,
+        error: node.error, startedAt: node.meta.startedAt || null, finishedAt: node.meta.finishedAt });
       ctx.log('error', `「${node.title}」失败：${node.error}`);
     }
     scheduleSave();
@@ -242,6 +295,17 @@ export async function runProject(projectId, opts = {}) {
   };
   project.runs = [summary, ...(project.runs || [])].slice(0, 20);
   flush();
+  // 本次运行结束了，但可能还有任务是「已提交、ComfyUI 仍在算」（例如并发上限外的排队、
+  // 或用户在任务中途停止）。起一个后台观察，等它们完成就把结果取回来，
+  // 不需要用户守着页面，更不需要再点一次生成。
+  const stillPending = (project.nodes || []).filter(
+    (n) => n.status === 'running' || n.status === 'queued',
+  );
+  if (stillPending.length) {
+    watchComfyJobs(projectId, settings.comfy);
+    emit('log', { projectId, runId, level: 'info',
+      message: `还有 ${stillPending.length} 条任务在 ComfyUI 侧未完成：后台会自动取回结果，不会重复生成` });
+  }
   emit(outcome === 'done' ? 'run:done' : 'run:error', {
     projectId, runId, status: outcome, summary,
     message: outcome === 'cancelled' ? '运行已取消' : outcome === 'error' ? '运行异常结束' : '编排完成',

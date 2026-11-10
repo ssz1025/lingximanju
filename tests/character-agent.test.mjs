@@ -132,3 +132,17 @@ test('角色提取 Agent 已注册为一等公民', () => {
   assert.ok(meta.description.includes('检索'));
   assert.equal(typeof getAgent('character-extractor')?.run, 'function', '画布节点应能执行该 Agent');
 });
+
+test('extractProjectCharacters：主角只以「刘左同志」出现、从不紧跟说话动词也不能漏', async () => {
+  const text = `${'刘左同志看着窗外，一言不发。'.repeat(6)}林夏说：“走吧。”`;
+  const project = { id: 'prj_char_main', name: '验证', settings: {} };
+  const m = { source: { title: '主线', text }, episodes: [], characters: [] };
+  const r = await extractProjectCharacters({ project, m, mode: 'heuristic' });
+  const names = r.extracted.map((c) => c.name);
+  assert.ok(names.includes('刘左'), `主角必须进结果：${names.join(',')}`);
+  assert.equal(typeof r.stats.supplemented, 'number', '统计里要能看出补了几位');
+  // 补/抽出来的人都必须带能在原著逐字定位的证据
+  for (const c of r.extracted) {
+    for (const ev of c.evidence || []) assert.ok(text.includes(ev.quote), `${c.name} 的证据必须是原文子串`);
+  }
+});

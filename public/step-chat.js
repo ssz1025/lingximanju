@@ -10,6 +10,17 @@
 import { openAIChat } from './ai-chat.js';
 import { esc } from './utils.js';
 
+/** 各步输入框的占位示例：让用户一眼知道「这一步能说什么」 */
+const PLACEHOLDERS = {
+  upload: '把片名改成《雨夜便利店》，类型悬疑，画风用冷调水墨',
+  episodes: '按 1200 字一集，最多 4 集，重新拆',
+  script: '重新生成第 2 集剧本，基调更冷峻',
+  context: '把林晚改成：月白长裙、清冷眉眼',
+  storyboard: '做成 45 秒短剧，每个片段 3 秒',
+  deliver: '只要导演包，不要成片视频',
+  project: '现在做到哪一步了？',
+};
+
 const fmtTok = (n) => {
   const v = Number(n) || 0;
   if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
@@ -83,7 +94,7 @@ export function openStepChat(o = {}) {
   const chat = openAIChat({
     title: `💬 ${label}`,
     subtitle: `${projectName} · 在这里直接改这一步`,
-    placeholder: '说一句要改什么，例如「按 1200 字一集，最多 4 集」…',
+    placeholder: `说一句要改什么，例如「${PLACEHOLDERS[stepId] || PLACEHOLDERS.project}」…`,
     onSend: async ({ text, ui }) => {
       ui.setBusy(true, 'Agent 正在处理这一步…（重跑步骤可能要几十秒）');
       try {

@@ -1,5 +1,5 @@
 /* ============================================================================
- * 剧集资源无限画布：展示「章节 → 本集 → 段落 → 宫格图 / 角色 / 剧本 / 产物」
+ * 剧集资源无限画布：展示「章节 → 本集 → 段落 → 分镜板 / 角色 / 剧本 / 产物」
  * 以及项目真实画布上的连线关系。
  *
  * 与 public/canvas.js 的区别：这是只读的资源关系视图，自带平移 / 缩放 / 节点拖动 /
@@ -14,7 +14,7 @@ const COLORS = {
   character: '#f472b6', script: '#fbbf24', pack: '#a78bfa', video: '#fb7185', canvas: '#94a3b8',
 };
 const KIND_LABEL = {
-  episode: '本集', chapter: '章节', segment: '段落', grid: '宫格图',
+  episode: '本集', chapter: '章节', segment: '段落', grid: '分镜板',
   character: '角色', script: '剧本', pack: '导演包', video: '视频', canvas: '画布节点',
 };
 
@@ -41,7 +41,7 @@ export function mountEpisodeCanvas(host, graph, opts = {}) {
         <svg class="ecv-edges" width="4200" height="3200" xmlns="http://www.w3.org/2000/svg"></svg>
         <div class="ecv-nodes"></div>
       </div>
-      <div class="ecv-empty" ${nodes.length ? 'hidden' : ''}>暂无资源链接，先生成宫格图或剧本后再来看</div>
+      <div class="ecv-empty" ${nodes.length ? 'hidden' : ''}>暂无资源链接，先生成分镜板或剧本后再来看</div>
     </div>
     <div class="ecv-inspector" hidden></div>
   </div>`;

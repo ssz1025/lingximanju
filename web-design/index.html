@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>灵犀漫剧 lingximanju · 把一部小说，做成一部漫剧</title>
+<meta name="description" content="16 个智能体、一张无限画布、六步走完从原著到成片。本地优先的 AI 漫剧制片工作台：分集、剧本、角色定妆、分镜、关键帧、视频与导演包，全程可编辑、可回滚。">
+<meta name="theme-color" content="#080a0f">
+<meta property="og:title" content="灵犀漫剧 lingximanju · 把一部小说，做成一部漫剧">
+<meta property="og:description" content="16 个智能体，一张无限画布，六步走完从原著到成片。数据只留在本机。">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/hero-app.webp">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23ff8a4c'/><path d='M9 10h14M9 16h14M9 22h9' stroke='%230d1016' stroke-width='3' stroke-linecap='round'/></svg>">
+<style>
+/* ==========================================================================
+   灵犀漫剧 · 宣传页
+   零外部依赖：系统字体、内联 SVG、原生 JS，可直接双击打开或用任意静态服务托管
+   ========================================================================== */
+
+:root {
+  --bg: #080a0f;
+  --bg-2: #0b0e15;
+  --panel: #111722;
+  --panel-2: #161e2b;
+  --line: rgba(255, 255, 255, .075);
+  --line-strong: rgba(255, 255, 255, .14);
+  --text: #eef2f8;
+  --text-2: #b8c2d4;
+  --muted: #7f8ba0;
+  --accent: #ff8a4c;
+  --accent-2: #ffb27a;
+  --accent-3: #8b9bff;
+  --green: #34d399;
+  --amber: #fbbf24;
+  --radius: 22px;
+  --max: 1180px;
+  --font: "SF Pro Display", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.22, .61, .36, 1);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(900px 620px at 78% -8%, rgba(255, 138, 76, .16), transparent 62%),
+    radial-gradient(760px 560px at 8% 18%, rgba(139, 155, 255, .12), transparent 65%),
+    radial-gradient(700px 500px at 52% 108%, rgba(255, 138, 76, .07), transparent 70%),
+    linear-gradient(180deg, #080a0f 0%, #090c12 48%, #080a0f 100%);
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: .028;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+::selection { background: rgba(255, 138, 76, .28); color: #fff; }
+img { max-width: 100%; display: block; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; }
+h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; }
+p { margin: 0; }
+ul { margin: 0; padding: 0; list-style: none; }
+code { font-family: var(--mono); font-size: .88em; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+
+.container { width: min(var(--max), calc(100% - 48px)); margin-inline: auto; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.accent { color: var(--accent); }
+
+/* 顶部滚动进度 */
+.progress { position: fixed; inset: 0 auto auto 0; height: 2px; width: 0; z-index: 100; background: linear-gradient(90deg, var(--accent), var(--accent-2), var(--accent-3)); box-shadow: 0 0 12px rgba(255, 138, 76, .5); }
+
+/* ---------- 导航 ---------- */
+.nav { position: fixed; top: 0; left: 0; right: 0; z-index: 90; transition: background .3s var(--ease), border-color .3s, backdrop-filter .3s; border-bottom: 1px solid transparent; }
+.nav.scrolled { background: rgba(8, 10, 15, .78); backdrop-filter: blur(18px) saturate(150%); border-bottom-color: var(--line); }
+.nav-inner { height: 70px; display: flex; align-items: center; gap: 26px; }
+.logo { display: flex; align-items: center; gap: 11px; flex-shrink: 0; }
+.logo-mark { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; font-size: 17px; font-weight: 800; color: #17110d; background: linear-gradient(135deg, #ffc08c, var(--accent)); box-shadow: 0 6px 22px rgba(255, 138, 76, .3); }
+.logo-text { display: flex; flex-direction: column; line-height: 1.1; }
+.logo-text strong { font-size: 15px; letter-spacing: .04em; }
+.logo-text small { font-size: 10px; color: var(--muted); letter-spacing: .16em; text-transform: uppercase; }
+.nav-links { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.nav-links a { padding: 8px 13px; border-radius: 9px; font-size: 13.5px; color: var(--text-2); transition: .2s; }
+.nav-links a:hover { color: var(--text); background: rgba(255, 255, 255, .055); }
+.nav-actions { display: flex; align-items: center; gap: 10px; }
+.nav-gh { font-size: 13.5px; color: var(--text-2); padding: 8px 10px; display: inline-flex; align-items: center; gap: 7px; }
+.nav-gh:hover { color: var(--text); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid var(--line-strong); border-radius: 12px; padding: 11px 18px; font-size: 14px; font-weight: 600; background: rgba(255, 255, 255, .04); color: var(--text); cursor: pointer; transition: transform .2s var(--ease), background .2s, border-color .2s, box-shadow .2s; white-space: nowrap; }
+.btn:hover { transform: translateY(-1px); background: rgba(255, 255, 255, .075); border-color: rgba(255, 255, 255, .22); }
+.btn-primary { color: #1a0f08; border-color: transparent; background: linear-gradient(135deg, #ffc08c, var(--accent) 58%, #ff7a45); box-shadow: 0 10px 34px rgba(255, 138, 76, .32), inset 0 1px 0 rgba(255, 255, 255, .35); }
+.btn-primary:hover { box-shadow: 0 14px 44px rgba(255, 138, 76, .45), inset 0 1px 0 rgba(255, 255, 255, .4); background: linear-gradient(135deg, #ffcb9d, #ff9459 58%, #ff8250); }
+.btn-lg { padding: 14px 24px; font-size: 15px; border-radius: 14px; }
+.btn-ghost { background: rgba(255, 255, 255, .03); }
+.nav-toggle { display: none; width: 42px; height: 42px; border-radius: 11px; border: 1px solid var(--line-strong); background: rgba(255, 255, 255, .04); cursor: pointer; align-items: center; justify-content: center; }
+.nav-toggle span { display: block; width: 17px; height: 1.5px; background: var(--text); position: relative; }
+.nav-toggle span::before, .nav-toggle span::after { content: ""; position: absolute; left: 0; width: 17px; height: 1.5px; background: var(--text); }
+.nav-toggle span::before { top: -5px; } .nav-toggle span::after { top: 5px; }
+
+/* ---------- 通用区块 ---------- */
+section { position: relative; }
+.section { padding: 110px 0; }
+.section-head { max-width: 760px; margin-bottom: 52px; }
+.eyebrow { display: inline-flex; align-items: center; gap: 9px; font-family: var(--mono); font-size: 11.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); margin-bottom: 18px; }
+.eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+.section-title { font-size: clamp(30px, 3.4vw, 46px); letter-spacing: -.025em; }
+.section-sub { margin-top: 16px; color: var(--text-2); font-size: 16.5px; line-height: 1.75; }
+.section-head.center { margin-inline: auto; text-align: center; }
+.section-head.center .eyebrow { justify-content: center; }
+
+/* ---------- Hero ---------- */
+.hero { padding: 142px 0 34px; overflow: hidden; }
+.hero-grid { display: grid; grid-template-columns: 1.02fr .98fr; gap: 54px; align-items: center; }
+.badge { display: inline-flex; align-items: center; gap: 9px; padding: 6px 13px 6px 8px; border-radius: 100px; border: 1px solid rgba(255, 138, 76, .28); background: rgba(255, 138, 76, .07); font-size: 12.5px; color: #ffcba8; margin-bottom: 26px; }
+.badge b { display: inline-flex; align-items: center; gap: 5px; background: rgba(255, 138, 76, .16); border-radius: 100px; padding: 2px 9px; font-weight: 600; font-size: 11.5px; color: var(--accent-2); }
+.hero h1 { font-size: clamp(46px, 5.4vw, 78px); line-height: 1.04; letter-spacing: -.035em; }
+.hero h1 .line { display: block; }
+.hero h1 .grad { background: linear-gradient(100deg, #ffd2ae 0%, #ff9a5e 44%, #ff6b4a 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero-sub { margin-top: 26px; font-size: 17px; line-height: 1.8; color: var(--text-2); max-width: 540px; }
+.hero-sub strong { color: var(--text); font-weight: 600; }
+.hero-cta { display: flex; align-items: center; gap: 12px; margin-top: 34px; flex-wrap: wrap; }
+.hero-note { margin-top: 20px; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+.hero-note span { display: inline-flex; align-items: center; gap: 6px; }
+.hero-note i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+.hero-note em { font-style: normal; color: rgba(127, 139, 160, .55); }
+
+.hero-visual { position: relative; perspective: 1600px; }
+.hero-glow { position: absolute; inset: 8% -8% -10% -6%; z-index: 0; background: radial-gradient(closest-side, rgba(255, 138, 76, .22), transparent 72%); filter: blur(30px); }
+.shot { position: relative; z-index: 1; border-radius: 18px; overflow: hidden; border: 1px solid rgba(255, 255, 255, .17); background: #0d121b; box-shadow: 0 44px 110px rgba(0, 0, 0, .62), 0 0 0 1px rgba(255, 255, 255, .035) inset, 0 1px 0 rgba(255, 255, 255, .1) inset; transform: rotateY(-7deg) rotateX(2.4deg) translateZ(0); transition: transform .7s var(--ease); }
+.hero-visual:hover .shot { transform: rotateY(-2deg) rotateX(1deg); }
+.shot-bar { height: 38px; display: flex; align-items: center; gap: 7px; padding: 0 14px; background: linear-gradient(180deg, #1a2130, #131a26); border-bottom: 1px solid rgba(255, 255, 255, .07); }
+.shot-bar i { width: 9px; height: 9px; border-radius: 50%; background: #334052; }
+.shot-bar i:nth-child(1) { background: #ff6b5e; } .shot-bar i:nth-child(2) { background: #f5be4f; } .shot-bar i:nth-child(3) { background: #4ecf7d; }
+.shot-url { margin-left: 8px; flex: 1; height: 20px; border-radius: 6px; background: rgba(255, 255, 255, .05); color: var(--muted); font-family: var(--mono); font-size: 9.5px; display: flex; align-items: center; justify-content: center; letter-spacing: .02em; }
+.shot img { width: 100%; height: auto; }
+.shot::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, transparent 62%, rgba(8, 10, 15, .36)); }
+.float-card { position: absolute; z-index: 3; display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-radius: 13px; background: rgba(17, 23, 34, .82); border: 1px solid rgba(255, 255, 255, .13); backdrop-filter: blur(14px); box-shadow: 0 18px 40px rgba(0, 0, 0, .45); font-size: 12px; animation: float 7s ease-in-out infinite; }
+.float-card .fc-ico { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: rgba(255, 138, 76, .12); color: var(--accent); font-size: 14px; }
+.float-card b { display: block; font-size: 12.5px; font-weight: 650; line-height: 1.3; }
+.float-card small { display: block; font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+.fc-1 { top: 15%; left: -7%; }
+.fc-2 { bottom: 18%; right: -6%; animation-delay: -2.4s; }
+.fc-3 { bottom: -4%; left: 8%; animation-delay: -4.2s; }
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+
+/* 数据条 */
+.statbar { margin-top: 74px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: grid; grid-template-columns: repeat(4, 1fr); }
+.stat { padding: 26px 24px; border-left: 1px solid var(--line); }
+.stat:first-child { border-left: 0; padding-left: 0; }
+.stat b { display: block; font-size: 34px; font-weight: 750; letter-spacing: -.03em; line-height: 1.1; }
+.stat b small { font-size: 15px; font-weight: 600; color: var(--muted); margin-left: 3px; letter-spacing: 0; }
+.stat span { display: block; margin-top: 7px; font-size: 12px; color: var(--muted); letter-spacing: .02em; }
+
+/* 跑马灯 */
+.marquee { margin-top: 56px; overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent); }
+.marquee-track { display: flex; gap: 0; width: max-content; animation: marquee 42s linear infinite; }
+.marquee-track span { padding: 0 22px; font-family: var(--mono); font-size: 11.5px; letter-spacing: .22em; color: rgba(184, 194, 212, .5); text-transform: uppercase; white-space: nowrap; display: flex; align-items: center; gap: 22px; }
+.marquee-track span::after { content: "·"; color: var(--accent); opacity: .7; }
+@keyframes marquee { to { transform: translateX(-50%); } }
+
+/* ---------- 痛点 ---------- */
+.pain { padding: 100px 0; }
+.pain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.pain-card { position: relative; padding: 30px 30px 28px; border-radius: 20px; border: 1px solid var(--line); background: linear-gradient(160deg, rgba(22, 30, 43, .6), rgba(12, 16, 24, .55)); overflow: hidden; }
+.pain-card::before { content: attr(data-n); position: absolute; right: 18px; top: 4px; font-family: var(--mono); font-size: 72px; font-weight: 800; color: rgba(255, 255, 255, .035); letter-spacing: -.06em; }
+.pain-card h3 { font-size: 20px; margin-bottom: 10px; }
+.pain-card p { color: var(--text-2); font-size: 14.5px; line-height: 1.8; max-width: 92%; }
+.pain-turn { margin-top: 30px; display: flex; align-items: center; gap: 16px; padding: 24px 28px; border-radius: 18px; border: 1px solid rgba(255, 138, 76, .22); background: linear-gradient(90deg, rgba(255, 138, 76, .09), rgba(139, 155, 255, .05)); }
+.pain-turn .pt-ico { width: 40px; height: 40px; flex: 0 0 40px; border-radius: 11px; display: grid; place-items: center; background: rgba(255, 138, 76, .14); color: var(--accent); }
+.pain-turn p { font-size: 15.5px; color: var(--text); }
+.pain-turn p b { color: var(--accent-2); font-weight: 650; }
+
+/* ---------- 六步流水线 ---------- */
+.pipeline { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.pipeline::before { content: ""; position: absolute; left: 4%; right: 4%; top: 54px; height: 1px; background: linear-gradient(90deg, transparent, rgba(255, 138, 76, .35) 12%, rgba(139, 155, 255, .3) 88%, transparent); }
+.step { position: relative; padding: 24px 24px 22px; border-radius: 20px; border: 1px solid var(--line); background: linear-gradient(165deg, rgba(20, 27, 39, .92), rgba(11, 15, 23, .92)); transition: transform .3s var(--ease), border-color .3s, background .3s; }
+.step:hover { transform: translateY(-4px); border-color: rgba(255, 138, 76, .3); background: linear-gradient(165deg, rgba(28, 35, 49, .95), rgba(13, 18, 27, .95)); }
+.step-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.step-ico { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: rgba(255, 138, 76, .1); border: 1px solid rgba(255, 138, 76, .2); color: var(--accent); position: relative; z-index: 1; }
+.step-ico svg { width: 21px; height: 21px; }
+.step-num { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: .12em; }
+.step h3 { font-size: 19px; margin-bottom: 9px; }
+.step p { font-size: 13.5px; color: var(--text-2); line-height: 1.75; min-height: 70px; }
+.step-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+.tag { font-family: var(--mono); font-size: 10px; letter-spacing: .02em; color: var(--text-2); padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: rgba(255, 255, 255, .03); }
+.tag.hot { color: var(--accent-2); border-color: rgba(255, 138, 76, .25); background: rgba(255, 138, 76, .07); }
+.step-formula { margin-top: 18px; padding-top: 13px; border-top: 1px dashed var(--line); font-family: var(--mono); font-size: 10px; color: rgba(127, 139, 160, .8); display: flex; align-items: center; gap: 7px; }
+.step-formula::before { content: "↳"; color: var(--accent); }
+.pipeline-note { margin-top: 26px; display: flex; gap: 12px; align-items: flex-start; padding: 18px 22px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255, 255, 255, .02); font-size: 13.5px; color: var(--text-2); }
+.pipeline-note b { color: var(--text); }
+.pipeline-note .pn-ico { color: var(--green); flex: 0 0 auto; margin-top: 2px; }
+
+/* ---------- Bento ---------- */
+.bento { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+.card { position: relative; overflow: hidden; padding: 26px; border-radius: 22px; border: 1px solid var(--line); background: linear-gradient(165deg, rgba(19, 26, 38, .92), rgba(10, 14, 21, .94)); }
+.card::after { content: ""; position: absolute; width: 300px; height: 300px; right: -110px; top: -130px; background: radial-gradient(closest-side, rgba(255, 138, 76, .12), transparent); pointer-events: none; }
+.card .kicker { display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
+.card .kicker::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.card h3 { font-size: 22px; margin-bottom: 10px; }
+.card p { color: var(--text-2); font-size: 14px; line-height: 1.75; }
+.card .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
+.span-7 { grid-column: span 7; } .span-5 { grid-column: span 5; }
+.span-4 { grid-column: span 4; } .span-12 { grid-column: span 12; }
+
+.card-canvas { min-height: 420px; display: flex; flex-direction: column; }
+.card-canvas .cc-body { margin-top: auto; position: relative; z-index: 1; }
+.card-canvas .cc-shot { position: absolute; inset: 96px -40px -40px 22%; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255, 255, 255, .1); opacity: .92; transform: rotate(-1.5deg); box-shadow: 0 30px 70px rgba(0, 0, 0, .5); }
+.card-canvas .cc-shot img { width: 100%; height: 100%; object-fit: cover; object-position: left top; }
+.card-canvas .cc-shot::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10, 14, 21, .05) 30%, rgba(10, 14, 21, .95) 100%); }
+.card-canvas .cc-caption { position: relative; z-index: 2; margin-top: 250px; display: flex; gap: 18px; flex-wrap: wrap; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); }
+.card-canvas .cc-caption b { color: var(--accent-2); font-weight: 600; }
+
+.card-cast { display: flex; flex-direction: column; }
+.cast-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 20px; }
+.cast { position: relative; border-radius: 12px; overflow: hidden; aspect-ratio: 3 / 4; border: 1px solid rgba(255, 255, 255, .1); }
+.cast img { width: 100%; height: 100%; object-fit: cover; object-position: top center; transition: transform .6s var(--ease); filter: saturate(.92) contrast(1.02); }
+.cast:hover img { transform: scale(1.045); }
+.cast span { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 8px 7px; font-size: 11px; color: #fff; background: linear-gradient(180deg, transparent, rgba(5, 8, 13, .86)); display: flex; justify-content: space-between; align-items: center; }
+.cast span i { font-style: normal; font-family: var(--mono); font-size: 9px; color: var(--accent-2); }
+
+.card-board { display: flex; flex-direction: column; }
+.board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 18px; }
+.board figure { margin: 0; position: relative; border-radius: 7px; overflow: hidden; aspect-ratio: 9 / 16; border: 1px solid rgba(255, 255, 255, .08); }
+.board img { width: 100%; height: 100%; object-fit: cover; }
+.board figcaption { position: absolute; left: 5px; top: 5px; width: 17px; height: 17px; border-radius: 4px; display: grid; place-items: center; font-family: var(--mono); font-size: 9px; background: rgba(8, 10, 15, .72); border: 1px solid rgba(255, 255, 255, .16); color: #fff; }
+.board-meta { margin-top: 10px; display: flex; justify-content: space-between; font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+
+.card-agents { min-height: 360px; display: flex; flex-direction: column; }
+.agent-graph { position: relative; margin-top: auto; height: 178px; }
+.agent-graph svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.agent-graph .ag-node { fill: #1a2232; stroke: rgba(255, 255, 255, .14); }
+.agent-graph .ag-node.hot { fill: rgba(255, 138, 76, .14); stroke: rgba(255, 138, 76, .55); }
+.agent-graph text { font-family: var(--mono); font-size: 7.5px; fill: #b8c2d4; }
+.agent-graph .ag-line { stroke: rgba(255, 255, 255, .16); stroke-width: 1; fill: none; }
+.agent-graph .ag-line.hot { stroke: rgba(255, 138, 76, .55); stroke-dasharray: 3 4; }
+.agent-graph .pulse { animation: pulse 2.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+.card-comfy pre { margin: 16px 0 0; padding: 14px 16px; border-radius: 11px; background: #0a0e15; border: 1px solid var(--line); overflow-x: auto; font-family: var(--mono); font-size: 10.5px; line-height: 1.8; color: #a9b7cc; }
+.card-comfy pre b { color: var(--accent-2); font-weight: 500; }
+.card-comfy pre i { color: #6f7f96; font-style: normal; }
+.card-comfy pre em { color: #7dd3a7; font-style: normal; }
+
+.styles-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
+.style-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 100px; border: 1px solid var(--line); background: rgba(255, 255, 255, .025); font-size: 11px; color: var(--text-2); }
+.style-pill i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+.card-deliver { display: flex; gap: 18px; align-items: stretch; }
+.card-deliver .df-img { flex: 0 0 112px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line-strong); position: relative; }
+.card-deliver .df-img img { width: 100%; height: 100%; object-fit: cover; }
+.card-deliver .df-img::after { content: "▶"; position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 20px; background: rgba(8, 10, 15, .18); text-shadow: 0 2px 10px rgba(0, 0, 0, .6); }
+.card-deliver .df-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.card-deliver .df-list span { font-size: 12.5px; color: var(--text-2); display: flex; align-items: center; gap: 8px; }
+.card-deliver .df-list span::before { content: "✓"; color: var(--green); font-size: 11px; }
+
+.card-wide { display: grid; grid-template-columns: 1.15fr .85fr; gap: 30px; align-items: center; }
+.chat-mock { display: flex; flex-direction: column; gap: 9px; }
+.bubble { max-width: 88%; padding: 10px 13px; border-radius: 12px; font-size: 12.5px; line-height: 1.6; }
+.bubble.user { align-self: flex-end; background: rgba(255, 138, 76, .13); border: 1px solid rgba(255, 138, 76, .22); color: #ffd7bd; border-bottom-right-radius: 4px; }
+.bubble.ai { align-self: flex-start; background: rgba(255, 255, 255, .045); border: 1px solid var(--line); color: var(--text-2); border-bottom-left-radius: 4px; }
+.bubble.ai code { color: var(--accent-2); background: rgba(255, 138, 76, .1); padding: 1px 5px; border-radius: 4px; }
+.data-tree { font-family: var(--mono); font-size: 11px; line-height: 2; color: var(--text-2); background: rgba(5, 8, 13, .5); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.data-tree .dt-root { color: var(--accent-2); }
+.data-tree .dt-muted { color: var(--muted); }
+.data-tree .dt-green { color: var(--green); }
+
+/* ---------- 界面画廊 ---------- */
+.gallery-tabs { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 20px; }
+.gallery-tab { border: 1px solid var(--line); background: rgba(255, 255, 255, .025); color: var(--text-2); border-radius: 10px; padding: 8px 14px; font-size: 13px; cursor: pointer; transition: .2s; }
+.gallery-tab:hover { color: var(--text); border-color: var(--line-strong); }
+.gallery-tab[aria-selected="true"] { color: #1a0f08; background: linear-gradient(135deg, #ffc08c, var(--accent)); border-color: transparent; font-weight: 650; }
+.gallery-stage { position: relative; border-radius: 20px; overflow: hidden; border: 1px solid var(--line-strong); background: #0a0e15; box-shadow: 0 30px 80px rgba(0, 0, 0, .45); }
+.gallery-stage::before { content: ""; position: absolute; inset: 0 auto auto 0; height: 34px; width: 100%; z-index: 2; background: linear-gradient(180deg, rgba(8, 10, 15, .55), transparent); pointer-events: none; }
+.gallery-panel { display: none; }
+.gallery-panel.active { display: block; animation: fadeUp .45s var(--ease); }
+.gallery-panel img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: top center; cursor: zoom-in; }
+.gallery-cap { display: grid; grid-template-columns: 1.1fr .9fr; gap: 20px; padding: 20px 24px; border-top: 1px solid var(--line); background: rgba(255, 255, 255, .018); }
+.gallery-cap h3 { font-size: 17px; margin-bottom: 5px; }
+.gallery-cap p { font-size: 13px; color: var(--text-2); }
+.gallery-cap .gc-tags { display: flex; gap: 6px; flex-wrap: wrap; align-content: center; justify-content: flex-end; }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* ---------- 技术底座 ---------- */
+.tech-grid { display: grid; grid-template-columns: .95fr 1.05fr; gap: 44px; align-items: center; }
+.tech-list { display: flex; flex-direction: column; gap: 16px; margin-top: 26px; }
+.tech-item { display: flex; gap: 14px; }
+.tech-item .ti-ico { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 9px; display: grid; place-items: center; background: rgba(139, 155, 255, .1); border: 1px solid rgba(139, 155, 255, .2); color: var(--accent-3); }
+.tech-item b { display: block; font-size: 14.5px; margin-bottom: 3px; }
+.tech-item p { font-size: 13px; color: var(--text-2); line-height: 1.7; }
+.terminal { border-radius: 16px; border: 1px solid var(--line-strong); background: #0a0e15; overflow: hidden; box-shadow: 0 26px 70px rgba(0, 0, 0, .45); }
+.terminal-bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, .025); }
+.terminal-bar i { width: 9px; height: 9px; border-radius: 50%; background: #334052; }
+.terminal-bar i:nth-child(1) { background: #ff6b5e; } .terminal-bar i:nth-child(2) { background: #f5be4f; } .terminal-bar i:nth-child(3) { background: #4ecf7d; }
+.terminal-bar span { margin-left: 8px; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.terminal pre { margin: 0; padding: 22px 20px; font-family: var(--mono); font-size: 12px; line-height: 2; color: #a9b7cc; overflow-x: auto; }
+.terminal .t-cmd { color: #eef2f8; }
+.terminal .t-cmd::before { content: "$ "; color: var(--accent); }
+.terminal .t-out { color: #6f7f96; }
+.terminal .t-ok { color: #7dd3a7; }
+.terminal .t-key { color: var(--accent-2); }
+.tech-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 44px; }
+.tech-card { padding: 22px; border-radius: 16px; border: 1px solid var(--line); background: rgba(255, 255, 255, .022); }
+.tech-card b { display: block; font-size: 14.5px; margin-bottom: 6px; }
+.tech-card p { font-size: 12.5px; color: var(--text-2); line-height: 1.7; }
+.tech-card .tc-n { font-family: var(--mono); font-size: 10px; color: var(--accent); letter-spacing: .14em; display: block; margin-bottom: 10px; }
+
+/* ---------- 对比 ---------- */
+.compare-wrap { border: 1px solid var(--line); border-radius: 20px; overflow: hidden; background: rgba(255, 255, 255, .015); }
+.compare { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.compare th, .compare td { padding: 15px 18px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+.compare thead th { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .04em; background: rgba(255, 255, 255, .02); }
+.compare thead th:nth-child(4) { color: var(--accent-2); }
+.compare tbody tr:last-child td { border-bottom: 0; }
+.compare tbody td:first-child { color: var(--text); font-weight: 600; width: 20%; }
+.compare tbody td:nth-child(2), .compare tbody td:nth-child(3) { color: var(--muted); }
+.compare tbody td:nth-child(4) { color: var(--text-2); background: rgba(255, 138, 76, .045); }
+.compare tbody td:nth-child(4) b { color: var(--accent-2); font-weight: 600; }
+.compare .yes { color: var(--green); }
+.compare .no { color: rgba(127, 139, 160, .75); }
+
+/* ---------- FAQ ---------- */
+.faq-list { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.faq { border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, .02); overflow: hidden; }
+.faq summary { list-style: none; cursor: pointer; padding: 17px 20px; font-size: 14.5px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; font-family: var(--mono); color: var(--accent); font-size: 19px; font-weight: 400; transition: transform .25s; flex: 0 0 auto; }
+.faq[open] summary::after { transform: rotate(45deg); }
+.faq .faq-body { padding: 0 20px 18px; font-size: 13.5px; color: var(--text-2); line-height: 1.8; }
+.faq .faq-body code { background: rgba(255, 255, 255, .06); padding: 1px 5px; border-radius: 4px; }
+
+/* ---------- 最终 CTA ---------- */
+.cta { position: relative; margin: 40px 0 0; padding: 74px 0; overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: radial-gradient(700px 300px at 50% 0%, rgba(255, 138, 76, .16), transparent 70%); }
+.cta::before { content: ""; position: absolute; inset: 0; background-image: linear-gradient(rgba(255, 255, 255, .035) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, .035) 1px, transparent 1px); background-size: 56px 56px; mask-image: radial-gradient(600px 260px at 50% 35%, #000, transparent 78%); }
+.cta-inner { position: relative; text-align: center; }
+.cta h2 { font-size: clamp(32px, 4.2vw, 54px); letter-spacing: -.03em; }
+.cta p { margin-top: 16px; color: var(--text-2); font-size: 16px; }
+.cta .hero-cta { justify-content: center; margin-top: 30px; }
+.cmdbox { display: inline-flex; align-items: center; gap: 14px; margin-top: 26px; padding: 9px 10px 9px 18px; border-radius: 12px; border: 1px solid var(--line-strong); background: rgba(5, 8, 13, .7); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
+.cmdbox .cb-text { color: var(--text); }
+.cmdbox button { border: 0; border-radius: 8px; padding: 7px 12px; font-size: 11.5px; font-family: var(--font); background: rgba(255, 138, 76, .14); color: var(--accent-2); cursor: pointer; transition: .2s; }
+.cmdbox button:hover { background: rgba(255, 138, 76, .24); }
+
+/* ---------- 页脚 ---------- */
+.footer { padding: 56px 0 34px; }
+.footer-grid { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 30px; }
+.footer-brand p { margin-top: 14px; font-size: 12.5px; color: var(--muted); line-height: 1.8; max-width: 260px; }
+.footer h4 { font-size: 11.5px; color: var(--muted); letter-spacing: .14em; text-transform: uppercase; margin-bottom: 14px; font-weight: 600; }
+.footer ul { display: flex; flex-direction: column; gap: 9px; }
+.footer ul a { font-size: 13px; color: var(--text-2); transition: .2s; }
+.footer ul a:hover { color: var(--accent-2); }
+.footer-bottom { margin-top: 44px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 18px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.footer-bottom .fb-links { display: flex; gap: 18px; }
+.footer-bottom a:hover { color: var(--text); }
+
+/* 灯箱 */
+.lightbox { position: fixed; inset: 0; z-index: 200; display: none; align-items: center; justify-content: center; padding: 4vw; background: rgba(4, 6, 10, .9); backdrop-filter: blur(10px); }
+.lightbox.open { display: flex; animation: fadeUp .3s var(--ease); }
+.lightbox img { max-width: 100%; max-height: 90vh; border-radius: 12px; border: 1px solid var(--line-strong); box-shadow: 0 40px 120px rgba(0, 0, 0, .7); }
+.lightbox button { position: absolute; top: 22px; right: 26px; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line-strong); background: rgba(255, 255, 255, .06); color: var(--text); font-size: 19px; cursor: pointer; }
+
+/* 进入动画 */
+.reveal { opacity: 0; transform: translateY(22px); transition: opacity .7s var(--ease), transform .7s var(--ease); }
+.reveal.in { opacity: 1; transform: none; }
+.reveal[data-delay="1"] { transition-delay: .08s; }
+.reveal[data-delay="2"] { transition-delay: .16s; }
+.reveal[data-delay="3"] { transition-delay: .24s; }
+.reveal[data-delay="4"] { transition-delay: .32s; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1100px) {
+  .hero-grid { grid-template-columns: 1fr; gap: 60px; }
+  .hero-visual { max-width: 760px; margin-inline: auto; width: 100%; }
+  .float-card.fc-1 { left: -2%; } .float-card.fc-2 { right: -2%; }
+  .tech-grid { grid-template-columns: 1fr; gap: 30px; }
+  .tech-cards { grid-template-columns: 1fr 1fr 1fr; }
+  .span-7, .span-5, .span-4 { grid-column: span 12; }
+  .card-canvas { min-height: 380px; }
+  .card-wide { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .nav-links { display: none; }
+  .nav-toggle { display: inline-flex; }
+  .nav-actions .btn { display: none; }
+  .nav-links.open { display: flex; position: absolute; top: 70px; left: 16px; right: 16px; flex-direction: column; align-items: stretch; gap: 4px; padding: 12px; border-radius: 16px; border: 1px solid var(--line-strong); background: rgba(10, 14, 21, .97); backdrop-filter: blur(20px); box-shadow: 0 30px 60px rgba(0, 0, 0, .6); }
+  .nav-links.open a { padding: 11px 12px; }
+  .pipeline { grid-template-columns: 1fr 1fr; }
+  .pipeline::before { display: none; }
+  .pain-grid { grid-template-columns: 1fr; }
+  .statbar { grid-template-columns: 1fr 1fr; }
+  .stat:nth-child(3) { border-left: 0; padding-left: 0; }
+  .stat { border-top: 1px solid var(--line); }
+  .stat:nth-child(-n+2) { border-top: 0; }
+  .faq-list { grid-template-columns: 1fr; }
+  .gallery-cap { grid-template-columns: 1fr; }
+  .gallery-cap .gc-tags { justify-content: flex-start; }
+  .compare-wrap { overflow-x: auto; }
+  .compare { min-width: 720px; }
+  .footer-grid { grid-template-columns: 1fr 1fr; }
+  .tech-cards { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .container { width: calc(100% - 36px); }
+  .section { padding: 78px 0; }
+  .hero { padding-top: 118px; }
+  .hero h1 { font-size: clamp(38px, 10vw, 54px); }
+  .hero-sub { font-size: 15.5px; }
+  .hero-cta .btn { width: 100%; }
+  .float-card { display: none; }
+  .stat b { font-size: 28px; }
+  .pipeline { grid-template-columns: 1fr; }
+  .step p { min-height: 0; }
+  .cast-row { gap: 6px; }
+  .card { padding: 22px; }
+  .card-deliver { flex-direction: column; }
+  .card-deliver .df-img { flex: 0 0 auto; height: 180px; }
+  .gallery-tab { flex: 1 1 auto; }
+  .footer-grid { grid-template-columns: 1fr; gap: 26px; }
+  .footer-bottom { flex-direction: column; align-items: flex-start; }
+  .cmdbox { flex-direction: column; align-items: stretch; gap: 9px; padding: 12px; text-align: center; }
+  .cmdbox button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .reveal { opacity: 1; transform: none; }
+}
+</style>
+</head>
+<body>
+<div class="progress" id="progress" aria-hidden="true"></div>
+<a class="skip-link" href="#main" style="position:absolute;left:-9999px;top:8px;z-index:300;background:#ff8a4c;color:#1a0f08;padding:10px 16px;border-radius:8px;font-weight:600" onfocus="this.style.left='16px'" onblur="this.style.left='-9999px'">跳到主要内容</a>
+
+<!-- ================= 导航 ================= -->
+<header class="nav" id="nav">
+  <div class="container nav-inner">
+    <a class="logo" href="#top" aria-label="灵犀漫剧首页">
+      <span class="logo-mark">◈</span>
+      <span class="logo-text"><strong>灵犀漫剧</strong><small>lingximanju</small></span>
+    </a>
+    <nav class="nav-links" id="navLinks" aria-label="主导航">
+      <a href="#pain">为什么</a>
+      <a href="#pipeline">六步流程</a>
+      <a href="#features">核心能力</a>
+      <a href="#gallery">真实界面</a>
+      <a href="#tech">技术底座</a>
+      <a href="#compare">对比</a>
+      <a href="#faq">常见问题</a>
+    </nav>
+    <div class="nav-actions">
+      <a class="nav-gh" href="https://github.com/ssz1025/lingximanju" target="_blank" rel="noopener">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        GitHub
+      </a>
+      <a class="btn btn-primary" href="#start">开始创作</a>
+      <button class="nav-toggle" id="navToggle" aria-label="打开菜单" aria-expanded="false" aria-controls="navLinks"><span></span></button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <!-- ================= Hero ================= -->
+  <section class="hero" id="top">
+    <div class="container">
+      <div class="hero-grid">
+        <div class="hero-copy reveal">
+          <span class="badge"><b>本地优先</b> 零依赖 · 600 项测试 · 数据不出机器</span>
+          <h1>
+            <span class="line">把一部小说，</span>
+            <span class="line grad">做成一部漫剧。</span>
+          </h1>
+          <p class="hero-sub">
+            16 个智能体，一张无限画布，六步走完从原著到成片。
+            分集、剧本、角色定妆、分镜、关键帧、视频与导演包——
+            <strong>每一步都看得见、改得动、跑得回。</strong>
+          </p>
+          <div class="hero-cta">
+            <a class="btn btn-primary btn-lg" href="#start">立即开始创作
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5"/></svg>
+            </a>
+            <a class="btn btn-lg btn-ghost" href="#pipeline">看完整流程</a>
+          </div>
+          <div class="hero-note">
+            <span><i></i>Node.js ≥ 18</span><em>·</em>
+            <span>无需构建</span><em>·</em>
+            <span>无 API Key 也能跑通全流程</span>
+          </div>
+        </div>
+
+        <div class="hero-visual reveal" data-delay="1" id="heroVisual">
+          <div class="hero-glow"></div>
+          <div class="shot">
+            <div class="shot-bar"><i></i><i></i><i></i><span class="shot-url">127.0.0.1:45367 · 无限画布智能体影像工坊</span></div>
+            <img src="assets/hero-app.webp" width="2400" height="1500" alt="灵犀漫剧项目列表页：六步引导、模型状态与项目卡片" fetchpriority="high">
+          </div>
+          <div class="float-card fc-1"><span class="fc-ico">◈</span><div><b>16 个智能体</b><small>DAG 分层 · 同层并发</small></div></div>
+          <div class="float-card fc-2"><span class="fc-ico" style="color:#8b9bff;background:rgba(139,155,255,.12)">✓</span><div><b>VLM 择优</b><small>best-of-k 质量闸门</small></div></div>
+          <div class="float-card fc-3"><span class="fc-ico" style="color:#34d399;background:rgba(52,211,153,.12)">▤</span><div><b>两种交付</b><small>成片 MP4 · 导演包</small></div></div>
+        </div>
+      </div>
+
+      <div class="statbar reveal" data-delay="2">
+        <div class="stat"><b data-count="16">16</b><span>专职智能体，各管一段工序</span></div>
+        <div class="stat"><b data-count="6">6</b><span>步制片流水线，每步可单独重跑</span></div>
+        <div class="stat"><b data-count="600">600</b><span>项自动化测试，覆盖纯逻辑与 HTTP</span></div>
+        <div class="stat"><b>0<small>依赖</small></b><span>运行时零第三方依赖，单进程启动</span></div>
+      </div>
+
+      <div class="marquee" aria-hidden="true">
+        <div class="marquee-track">
+          <span>原著改编</span><span>分集拆解</span><span>统一剧本</span><span>角色定妆</span><span>RAG 上下文</span><span>分镜板</span><span>关键帧</span><span>VLM 择优</span><span>机位锚点</span><span>视频片段</span><span>ffmpeg 成片</span><span>导演包</span>
+          <span>原著改编</span><span>分集拆解</span><span>统一剧本</span><span>角色定妆</span><span>RAG 上下文</span><span>分镜板</span><span>关键帧</span><span>VLM 择优</span><span>机位锚点</span><span>视频片段</span><span>ffmpeg 成片</span><span>导演包</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 痛点 ================= -->
+  <section class="pain" id="pain">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">The hard part</span>
+        <h2 class="section-title">一个人做漫剧，<br>最难的不是画一张图。</h2>
+        <p class="section-sub">模型已经能画出惊艳的单帧。真正拖住创作者的是「把 40 个镜头讲成同一个故事」——人物、空间、节奏和交付物，任何一处断掉都要推倒重来。</p>
+      </div>
+      <div class="pain-grid">
+        <article class="pain-card reveal" data-n="01">
+          <h3>一本小说，塞不进一个 prompt</h3>
+          <p>章节、伏笔、人物关系在长上下文里被稀释。写到第 3 集，前面的人已经换了性格，伏笔也忘了收。</p>
+        </article>
+        <article class="pain-card reveal" data-n="02" data-delay="1">
+          <h3>角色一换镜就变脸</h3>
+          <p>没有定妆资产、没有视觉锚点，正反打像换了演员；同一场景的光线、服装与道具也无法跨镜头对齐。</p>
+        </article>
+        <article class="pain-card reveal" data-n="03" data-delay="2">
+          <h3>分镜、提示词、出图各在一处</h3>
+          <p>分镜文档在表格里，提示词在笔记里，图片在文件夹里。改一个镜头要同步三个地方，返工比创作更久。</p>
+        </article>
+        <article class="pain-card reveal" data-n="04" data-delay="3">
+          <h3>交付物散成十几个文件夹</h3>
+          <p>片段、封面、角色图、字幕、导演包各自为政。交接给后期或导演工作台时，只能靠人肉对齐命名与顺序。</p>
+        </article>
+      </div>
+      <div class="pain-turn reveal">
+        <span class="pt-ico">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h11M4 12h16M4 17h9"/><circle cx="18.5" cy="7" r="2.5"/></svg>
+        </span>
+        <p>灵犀漫剧不承诺「一键出神作」。它做的是把散落的环节接回同一条流水线：<b>一个项目、一张画布、一份可回溯的状态</b>。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 六步 ================= -->
+  <section class="section" id="pipeline">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">The pipeline</span>
+        <h2 class="section-title">从原著到成片，六步。</h2>
+        <p class="section-sub">每一步都对应一个可执行的智能体任务：产物写回画布节点，状态持久化，失败可重试。你不必一次跑完——改哪一步，就从哪一步重跑。</p>
+      </div>
+
+      <div class="pipeline">
+        <article class="step reveal">
+          <div class="step-top"><span class="step-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5v11A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5v-13Z"/><path d="M8 13h8M8 16.5h5"/></svg></span><span class="step-num">STEP 01</span></div>
+          <h3>准备故事</h3>
+          <p>上传一个或多个 txt / md，章节自动编号并对齐剧集；也可以给一句话构想，让 AI 先写大纲，再逐章生成全文。</p>
+          <div class="step-tags"><span class="tag">多文件合并</span><span class="tag">章节识别</span><span class="tag">AI 小说</span></div>
+          <div class="step-formula">式(1) 剧本 · 原著结构化</div>
+        </article>
+
+        <article class="step reveal" data-delay="1">
+          <div class="step-top"><span class="step-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="4" width="7" height="7" rx="1.4"/><rect x="13.5" y="4" width="7" height="7" rx="1.4"/><rect x="3.5" y="14" width="7" height="7" rx="1.4"/><rect x="13.5" y="14" width="7" height="7" rx="1.4"/></svg></span><span class="step-num">STEP 02</span></div>
+          <h3>分集拆解</h3>
+          <p>按章节、字数或场景段落三种策略拆分，控制每集字数与总集数；每集自动生成摘要与结尾钩子，支持分季与跨季移动。</p>
+          <div class="step-tags"><span class="tag">三种策略</span><span class="tag">钩子 / 摘要</span><span class="tag">一季多集</span></div>
+          <div class="step-formula">长文本 → 集 → 场 → 镜头</div>
+        </article>
+
+        <article class="step reveal" data-delay="2">
+          <div class="step-top"><span class="step-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 20l3.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="M12.5 6.5l3 3"/><path d="M4 20h16"/></svg></span><span class="step-num">STEP 03</span></div>
+          <h3>剧本创作</h3>
+          <p>把分集梗概写成统一格式剧本：内外景、地点、时间、时长、出场人物、目标、冲突、转折与可拍摄的正文行。</p>
+          <div class="step-tags"><span class="tag">剧本 v2</span><span class="tag">场次契约</span><span class="tag">台词归属</span></div>
+          <div class="step-formula">式(1) 统一剧本格式</div>
+        </article>
+
+        <article class="step reveal">
+          <div class="step-top"><span class="step-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c.8-3.7 3.4-5.6 7-5.6s6.2 1.9 7 5.6"/></svg></span><span class="step-num">STEP 04</span></div>
+          <h3>角色与上下文</h3>
+          <p>用 BM25 从原文召回角色，逐条给出原文证据；生成正面 / 3/4 侧 / 侧面定妆图，并把角色、动机与伏笔写回 RAG 上下文。</p>
+          <div class="step-tags"><span class="tag">证据抽取</span><span class="tag">三视图定妆</span><span class="tag">RAG</span></div>
+          <div class="step-formula">式(6) 全局上下文感知</div>
+        </article>
+
+        <article class="step reveal" data-delay="1">
+          <div class="step-top"><span class="step-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="5" width="17" height="14" rx="1.6"/><path d="M3.5 10h17M9 10v9M15 10v9"/></svg></span><span class="step-num">STEP 05</span></div>
+          <h3>分镜与画面</h3>
+          <p>六种版式的分镜板、每镜景别 / 机位 / 运镜 / 时长；关键帧 best-of-k 生成，VLM 按视觉保真与叙事一致择优，机位锚点跨镜传播。</p>
+          <div class="step-tags"><span class="tag hot">6 种版式</span><span class="tag">best-of-k</span><span class="tag">锚点传播</span></div>
+          <div class="step-formula">式(2)(3)(4)(7) 分镜 · 关键帧 · 择优 · 机位</div>
+        </article>
+
+        <article class="step reveal" data-delay="2">
+          <div class="step-top"><span class="step-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="6" width="17" height="12" rx="2"/><path d="M10 9.5l5 2.5-5 2.5v-5Z" fill="currentColor" stroke="none"/></svg></span><span class="step-num">STEP 06</span></div>
+          <h3>视频与交付</h3>
+          <p>画面定版后逐镜头提交 ComfyUI 出视频，ffmpeg 拼成片；或跳过渲染，直接导出可被导演工作台读取的 .mmxpack.zip。</p>
+          <div class="step-tags"><span class="tag">逐镜出片</span><span class="tag">ffmpeg</span><span class="tag hot">导演包</span></div>
+          <div class="step-formula">式(8) 转场 · 成片组装</div>
+        </article>
+      </div>
+
+      <div class="pipeline-note reveal">
+        <span class="pn-ico">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 12.5 10 17.5 19 7"/></svg>
+        </span>
+        <p><b>不是黑盒。</b>每个产物都落在画布节点上：剧本、分镜、候选图、片段、导演包都有明确字段与状态。关掉页面再打开，进度还在；ComfyUI 跑完的任务可以「检查已完成」直接取回，不用重烧。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 核心能力 ================= -->
+  <section class="section" id="features">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">Under the hood, on the surface</span>
+        <h2 class="section-title">该自动的地方自动，<br>该动手的地方随手可改。</h2>
+        <p class="section-sub">自动流程给你 70% 的起点，剩下 30% 的「导演判断」留给画布、提示词和重跑。以下都是已经在跑的模块，不是路线图。</p>
+      </div>
+
+      <div class="bento">
+        <!-- 无限画布 -->
+        <article class="card card-canvas span-7 reveal">
+          <span class="kicker">Infinite canvas</span>
+          <h3>画布就是编排图</h3>
+          <p>节点是任务，连线是数据与视觉依赖。拖动、连线、框选、撤销、自动布局；改一条连线，下游流程立刻跟着变。</p>
+          <div class="cc-shot"><img src="assets/canvas.webp" alt="无限画布：剧本、镜头、关键帧、择优与视频节点，右侧为节点检查器" loading="lazy"></div>
+          <div class="cc-caption"><span><b>210</b> 节点示例</span><span><b>367</b> 条连线</span><span><b>15</b> 类节点</span><span>flow / anchor / ref</span></div>
+        </article>
+
+        <!-- 角色 -->
+        <article class="card card-cast span-5 reveal" data-delay="1">
+          <span class="kicker">Character continuity</span>
+          <h3>先定妆，再开机</h3>
+          <p>角色资产在全片复用：定妆图、造型提示词、音色与参考图挂钩。镜头通过 <code>ref</code> 边引用同一份资产，而不是每次重新描述。</p>
+          <div class="cast-row">
+            <figure class="cast"><img src="assets/char-shenyan.webp" alt="角色沈砚定妆图" loading="lazy"><span>沈砚<i>主角</i></span></figure>
+            <figure class="cast"><img src="assets/char-linxia.webp" alt="角色林夏定妆图" loading="lazy"><span>林夏<i>女主</i></span></figure>
+            <figure class="cast"><img src="assets/char-laozhou.webp" alt="角色老周定妆图" loading="lazy"><span>老周<i>配角</i></span></figure>
+          </div>
+          <div class="chips"><span class="tag">三视图</span><span class="tag">参考图锚点</span><span class="tag">音色绑定</span></div>
+        </article>
+
+        <!-- 分镜板 -->
+        <article class="card card-board span-5 reveal">
+          <span class="kicker">Storyboard sheets</span>
+          <h3>分镜板不是九宫格一种答案</h3>
+          <p>九宫格 / 六宫格 / 四宫格 / 条漫四联 / 二十五宫格 / 单图。版式只改排版，不重跑模型；单格画幅恒等于成片画幅。</p>
+          <div class="board" aria-label="六宫格分镜板示例">
+            <figure><img src="assets/board-1.webp" alt="分镜 1：雨夜街区全景" loading="lazy"><figcaption>1</figcaption></figure>
+            <figure><img src="assets/board-2.webp" alt="分镜 2：霓虹倒影空镜" loading="lazy"><figcaption>2</figcaption></figure>
+            <figure><img src="assets/board-3.webp" alt="分镜 3：两人对峙" loading="lazy"><figcaption>3</figcaption></figure>
+            <figure><img src="assets/board-4.webp" alt="分镜 4：老周在霓虹下" loading="lazy"><figcaption>4</figcaption></figure>
+            <figure><img src="assets/board-5.webp" alt="分镜 5：背包男背影" loading="lazy"><figcaption>5</figcaption></figure>
+            <figure><img src="assets/board-6.webp" alt="分镜 6：抬头看雨" loading="lazy"><figcaption>6</figcaption></figure>
+          </div>
+          <div class="board-meta"><span>六宫格 3×2 · 6 格 · 9:16</span><span>真实关键帧合成</span></div>
+        </article>
+
+        <!-- 智能体 -->
+        <article class="card card-agents span-7 reveal" data-delay="1">
+          <span class="kicker">Agent orchestration</span>
+          <h3>16 个智能体，按依赖排队</h3>
+          <p>编剧、分解、RAG、角色、分镜、机位、关键帧、择优、视频、转场、成片、导演、分镜板……编排器只做拓扑分层与并发控制，业务全部在智能体里。</p>
+          <div class="agent-graph" aria-hidden="true">
+            <svg viewBox="0 0 520 178" preserveAspectRatio="xMidYMid meet">
+              <defs><linearGradient id="ag" x1="0" x2="1"><stop offset="0" stop-color="#ff8a4c"/><stop offset="1" stop-color="#8b9bff"/></linearGradient></defs>
+              <path class="ag-line" d="M78 40 H138 M78 40 C108 40 108 86 138 86 M78 86 H138 M78 86 C108 86 108 132 138 132"/>
+              <path class="ag-line hot pulse" d="M78 40 C108 40 108 86 138 86"/>
+              <path class="ag-line" d="M198 86 H258 M258 86 C288 86 288 40 318 40 M258 86 C288 86 288 86 318 86 M258 86 C288 86 288 132 318 132"/>
+              <path class="ag-line" d="M378 40 H438 M378 86 H438 M378 132 H438"/>
+              <rect class="ag-node hot" x="18" y="26" width="60" height="28" rx="7"/><text x="48" y="44" text-anchor="middle">idea</text>
+              <rect class="ag-node" x="138" y="18" width="60" height="28" rx="7"/><text x="168" y="36" text-anchor="middle">script</text>
+              <rect class="ag-node" x="138" y="72" width="60" height="28" rx="7"/><text x="168" y="90" text-anchor="middle">rag</text>
+              <rect class="ag-node" x="138" y="126" width="60" height="28" rx="7"/><text x="168" y="144" text-anchor="middle">cast</text>
+              <rect class="ag-node" x="258" y="72" width="60" height="28" rx="7"/><text x="288" y="90" text-anchor="middle">shots</text>
+              <rect class="ag-node" x="318" y="26" width="60" height="28" rx="7"/><text x="348" y="44" text-anchor="middle">keyframe</text>
+              <rect class="ag-node hot" x="318" y="72" width="60" height="28" rx="7"/><text x="348" y="90" text-anchor="middle">review</text>
+              <rect class="ag-node" x="318" y="118" width="60" height="28" rx="7"/><text x="348" y="136" text-anchor="middle">video</text>
+              <rect class="ag-node" x="438" y="72" width="64" height="28" rx="7"/><text x="470" y="90" text-anchor="middle">composer</text>
+              <rect class="ag-node" x="438" y="118" width="64" height="28" rx="7"/><text x="470" y="136" text-anchor="middle">mmxpack</text>
+              <circle cx="288" cy="86" r="3" fill="url(#ag)"/>
+            </svg>
+          </div>
+          <div class="chips"><span class="tag">同层并发</span><span class="tag">失败隔离</span><span class="tag">断点续跑</span><span class="tag">单节点重跑</span></div>
+        </article>
+
+        <!-- ComfyUI -->
+        <article class="card card-comfy span-4 reveal">
+          <span class="kicker">Local backend</span>
+          <h3>接你本机的 ComfyUI</h3>
+          <p>出图 / 视频 / 音频三类工作流独立成库，导入「导出(API)」即可用。提示词沿连线回溯到真正的文本源节点。</p>
+          <pre><i># 提交 → 轮询 → 取回</i>
+<b>POST</b> /prompt
+  <i>→ prompt_id</i>
+<b>GET</b>  /history/<i>{id}</i>
+<b>GET</b>  /view?filename=<em>…</em></pre>
+          <div class="chips"><span class="tag">图 / 视频 / 音频</span><span class="tag">注入自检</span></div>
+        </article>
+
+        <!-- 导演 -->
+        <article class="card span-4 reveal" data-delay="1">
+          <span class="kicker">Director agent</span>
+          <h3>把「风格」写成可执行的参数</h3>
+          <p>4 种制片流程策略 + 10 位导演美学。选主色调后，风格进入提示词、调色板、运镜与音频描述，而不只是换个滤镜。</p>
+          <div class="styles-list">
+            <span class="style-pill"><i style="background:#c8322b"></i>大风国色</span>
+            <span class="style-pill"><i style="background:#e0a13a"></i>花样年华</span>
+            <span class="style-pill"><i style="background:#5b6b8c"></i>藏锋</span>
+            <span class="style-pill"><i style="background:#7d8a6a"></i>静观</span>
+            <span class="style-pill"><i style="background:#3f4a5a"></i>御剑</span>
+            <span class="style-pill"><i style="background:#6f8f7a"></i>山水快意</span>
+            <span class="style-pill"><i style="background:#8a5a3c"></i>史诗寓言</span>
+            <span class="style-pill"><i style="background:#41556b"></i>风雨史诗</span>
+            <span class="style-pill"><i style="background:#8fa06a"></i>自然童话</span>
+            <span class="style-pill"><i style="background:#6d5a66"></i>静默暴烈</span>
+          </div>
+        </article>
+
+        <!-- 交付 -->
+        <article class="card card-deliver span-4 reveal" data-delay="2">
+          <div class="df-img"><img src="assets/film-frame.webp" alt="成片中的雨夜霓虹镜头" loading="lazy"></div>
+          <div>
+            <span class="kicker">Deliverables</span>
+            <h3 style="font-size:19px">一次生成，两种交付</h3>
+            <div class="df-list">
+              <span>成片 MP4（ffmpeg 拼接）</span>
+              <span>.mmxpack.zip 导演包</span>
+              <span>分镜板 / 角色资产</span>
+              <span>项目 JSON / 剧本 Markdown</span>
+            </div>
+          </div>
+        </article>
+
+        <!-- 对话 + 本地 -->
+        <article class="card card-wide span-12 reveal">
+          <div>
+            <span class="kicker">Conversational production</span>
+            <h3>也可以只说一句：「执行下一步」</h3>
+            <p>对话框不是另一个系统。它和按钮调用同一套业务函数，改了什么在数据层完全一致；每次执行都记录等价的 HTTP 请求与 curl，方便复刻与排障。</p>
+            <div class="chips"><span class="tag">17 类意图</span><span class="tag">每步独立会话</span><span class="tag">token 明细</span><span class="tag">导出复刻记录</span></div>
+          </div>
+          <div class="chat-mock">
+            <div class="bubble user">把第 5 步的关键帧重跑一下，只重出缺图的镜头</div>
+            <div class="bubble ai">已识别 28 个缺图镜头，按增量复位执行。<br><code>POST /api/projects/:id/step</code> · scope=storyboard · regen=false</div>
+            <div class="bubble ai" style="color:#7dd3a7">✓ 12 张已有图保留，28 张进入队列</div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 界面画廊 ================= -->
+  <section class="section" id="gallery">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">Real screens, not mockups</span>
+        <h2 class="section-title">它真的长这样。</h2>
+        <p class="section-sub">下面每一张都是本地实例的真实截图，数据来自演示项目「雨夜剑客」：210 个节点、367 条连线、40 个镜头。</p>
+      </div>
+
+      <div class="gallery-tabs reveal" role="tablist" aria-label="界面截图">
+        <button class="gallery-tab" role="tab" aria-selected="true" aria-controls="g-home" id="t-home" data-tab="home">项目列表</button>
+        <button class="gallery-tab" role="tab" aria-selected="false" aria-controls="g-canvas" id="t-canvas" data-tab="canvas">无限画布</button>
+        <button class="gallery-tab" role="tab" aria-selected="false" aria-controls="g-episode" id="t-episode" data-tab="episode">剧集详情</button>
+        <button class="gallery-tab" role="tab" aria-selected="false" aria-controls="g-manage" id="t-manage" data-tab="manage">项目管理</button>
+      </div>
+
+      <div class="gallery-stage reveal" data-delay="1">
+        <div class="gallery-panel active" id="g-home" role="tabpanel" aria-labelledby="t-home">
+          <img src="assets/hero-app.webp" alt="项目列表页：六步图文引导、模型状态条与项目卡片" loading="lazy" data-zoom>
+          <div class="gallery-cap">
+            <div><h3>项目列表 · 从这里开始</h3><p>七步路线图就在首屏，模型配置状态一目了然。项目卡片带封面、类型、进度与完成标记。</p></div>
+            <div class="gc-tags"><span class="tag">六步引导</span><span class="tag">搜索 / 筛选</span><span class="tag">导入导出</span></div>
+          </div>
+        </div>
+        <div class="gallery-panel" id="g-canvas" role="tabpanel" aria-labelledby="t-canvas">
+          <img src="assets/canvas.webp" alt="无限画布：节点、连线、小地图与右侧节点检查器" loading="lazy" data-zoom>
+          <div class="gallery-cap">
+            <div><h3>无限画布 · 节点级控制</h3><p>左侧是模板与节点库，右侧检查器查看产物与运行状态。点任意节点，剧本、提示词、候选图与耗时都在眼前。</p></div>
+            <div class="gc-tags"><span class="tag">15 类节点</span><span class="tag">自动布局</span><span class="tag">小地图</span></div>
+          </div>
+        </div>
+        <div class="gallery-panel" id="g-episode" role="tabpanel" aria-labelledby="t-episode">
+          <img src="assets/episode.webp" alt="剧集详情：原文拆分、章节映射与本集统计" loading="lazy" data-zoom>
+          <div class="gallery-cap">
+            <div><h3>剧集详情 · 一集一个工作台</h3><p>原文、剧本、出场角色、分镜板、资源画布、导出与生成六个标签页；每集独立产物，章节与剧集精确对应。</p></div>
+            <div class="gc-tags"><span class="tag">章节映射</span><span class="tag">剧本</span><span class="tag">分镜板</span></div>
+          </div>
+        </div>
+        <div class="gallery-panel" id="g-manage" role="tabpanel" aria-labelledby="t-manage">
+          <img src="assets/manage.webp" alt="项目管理面板：节点、连线、镜头、锚点统计与项目封面" loading="lazy" data-zoom>
+          <div class="gallery-cap">
+            <div><h3>项目管理 · 一屏看清家底</h3><p>节点、连线、镜头、视觉锚点、集数与六步进度；封面三来源、快照、运行记录与产物下载都在同一个面板。</p></div>
+            <div class="gc-tags"><span class="tag">210 节点</span><span class="tag">367 连线</span><span class="tag">76 锚点</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 技术底座 ================= -->
+  <section class="section" id="tech">
+    <div class="container">
+      <div class="tech-grid">
+        <div class="reveal">
+          <span class="eyebrow">Engineering, not magic</span>
+          <h2 class="section-title">工程师也会喜欢的<br>那部分。</h2>
+          <p class="section-sub">没有构建链，没有框架魔法。一个 Node 进程同时托管静态页面、REST 与 SSE；画布、SVG 分镜、ZIP、PNG 编码、BM25 都是手写的。</p>
+          <div class="tech-list">
+            <div class="tech-item"><span class="ti-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span><div><b>单进程，零运行时依赖</b><p>静态托管 + API + SSE 共用 45367 端口；端口占用自动顺延，深链直达项目与剧集。</p></div></div>
+            <div class="tech-item"><span class="ti-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 12.5 10 17.5 19 7"/></svg></span><div><b>可验证，而不是「感觉对」</b><p>600 项测试覆盖纯逻辑与 HTTP 闭环；论文式(1)–(8) 与代码、默认值一一对应，消融实验可复现。</p></div></div>
+            <div class="tech-item"><span class="ti-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v18M3 12h18"/></svg></span><div><b>可插拔，不绑厂商</b><p>任意 OpenAI 兼容 LLM；ComfyUI 工作流库管图 / 视频 / 音频；调用失败回退 Mock 并在日志标注。</p></div></div>
+            <div class="tech-item"><span class="ti-ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16v10H4z"/><path d="M8 11h8M8 14h5"/></svg></span><div><b>数据在 data/，不在云上</b><p>项目 JSON、资产、快照、音色库全部是本机文件；导出 JSON 即可迁移，删掉目录就彻底删除。</p></div></div>
+          </div>
+        </div>
+        <div class="reveal" data-delay="1">
+          <div class="terminal">
+            <div class="terminal-bar"><i></i><i></i><i></i><span>lingximanju — local</span></div>
+            <pre><span class="t-cmd">cd lingximanju</span>
+<span class="t-cmd">./start.sh</span>
+
+<span class="t-out">  lingximanju · 无限画布智能体影像工坊</span>
+<span class="t-ok">  ➜  本地访问   http://127.0.0.1:45367</span>
+<span class="t-out">  ➜  生成后端  本地 ComfyUI ｜ 未配置时回退 Mock</span>
+<span class="t-out">  ➜  最终产物  成片 MP4 ｜ 导演包 mmxpack.zip</span>
+
+<span class="t-cmd">npm run check</span>
+<span class="t-ok">check 通过：163 个文件</span>
+<span class="t-cmd">npm test</span>
+<span class="t-ok">ℹ tests 600   ℹ pass 600</span></pre>
+          </div>
+          <div class="tech-cards">
+            <div class="tech-card"><span class="tc-n">01 / DATA</span><b>本地优先</b><p>无账号、无云端；默认只监听 127.0.0.1。</p></div>
+            <div class="tech-card"><span class="tc-n">02 / MODEL</span><b>模型可换</b><p>LLM 端点、ComfyUI 工作流、图像接口都可替换。</p></div>
+            <div class="tech-card"><span class="tc-n">03 / SHIP</span><b>三端打包</b><p>Electron 打包 macOS / Windows / Linux。</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 对比 ================= -->
+  <section class="section" id="compare">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">An honest comparison</span>
+        <h2 class="section-title">不是「更强的模型」，<br>是「更完整的流程」。</h2>
+        <p class="section-sub">如果你只想要一条 15 秒的炫技视频，云端一键生成更省事。如果你想做完一整部、还能改，下面这张表才是重点。</p>
+      </div>
+      <div class="compare-wrap reveal">
+        <table class="compare">
+          <thead><tr><th>维度</th><th>手工流程</th><th>云端一键生成</th><th>灵犀漫剧</th></tr></thead>
+          <tbody>
+            <tr><td>长篇小说 → 分集</td><td>人肉切分、Excel 管理</td><td>通常不支持长文本</td><td><b>三种策略 + 章节映射 + 分季分集</b></td></tr>
+            <tr><td>角色一致性</td><td>靠记忆和参考图</td><td>单次生成内参考</td><td><b>定妆资产 + ref 引用 + 锚点传播</b></td></tr>
+            <tr><td>分镜可编辑</td><td>文档与表格</td><td>黑盒，改一处全重来</td><td><b>画布节点 + 6 种分镜版式</b></td></tr>
+            <tr><td>生成后端</td><td>无</td><td>厂商锁定</td><td><b>本地 ComfyUI + 任意 OpenAI 兼容 LLM</b></td></tr>
+            <tr><td>数据归属</td><td>本地</td><td>上传云端</td><td><b>data/ 目录，默认不出本机</b></td></tr>
+            <tr><td>交付物</td><td>人肉整理</td><td>单个视频文件</td><td><b>MP4 + 导演包 + 分镜板 + 资产</b></td></tr>
+            <tr><td>断点续跑</td><td>手工重做</td><td>整段重新生成</td><td><b>节点级重跑 / 增量复位 / 对账取回</b></td></tr>
+            <tr><td>成本可见性</td><td>工时</td><td>按次计费</td><td><b>本机 GPU + 每步 token 与耗时统计</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FAQ ================= -->
+  <section class="section" id="faq">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">FAQ</span>
+        <h2 class="section-title">在开始之前。</h2>
+        <p class="section-sub">关于模型、硬件、数据与边界，先把话说清楚。</p>
+      </div>
+      <div class="faq-list reveal">
+        <details class="faq" open>
+          <summary>需要 API Key 或显卡吗？</summary>
+          <div class="faq-body">不配置也能跑通完整流程：文本用内置模板，画面用自绘 SVG 与关键帧预览，用来验证编排与数据链路。真实出图 / 出视频需要本地 ComfyUI；真实剧本与角色抽取需要任意 OpenAI 兼容的文本模型。</div>
+        </details>
+        <details class="faq">
+          <summary>我的小说和素材会被上传吗？</summary>
+          <div class="faq-body">不会。服务默认只监听 <code>127.0.0.1</code>，项目、资产、快照与配置都在本机 <code>data/</code>。只有你主动设置 <code>HOST=0.0.0.0</code> 才会开放局域网访问。</div>
+        </details>
+        <details class="faq">
+          <summary>支持哪些模型和工作流？</summary>
+          <div class="faq-body">文本侧支持任意 OpenAI 兼容端点（Base URL + API Key + Model）。画面、视频与 TTS 走 ComfyUI 的「导出(API)」工作流，按出图 / 视频 / 音频三类独立管理，可批量导入、单条试跑。</div>
+        </details>
+        <details class="faq">
+          <summary>能导出什么？能接后期吗？</summary>
+          <div class="faq-body">成片 MP4、<code>*.mmxpack.zip</code> 导演包、每段分镜板、角色定妆图、剧本 Markdown、项目 JSON。导演包可被 MiniMax H3 Director 等 ComfyUI 导演工作台直接导入。</div>
+        </details>
+        <details class="faq">
+          <summary>为什么坚持零依赖？</summary>
+          <div class="faq-body">为了让「拿到就能跑」成立：没有 <code>npm install</code>、没有构建、没有版本地狱。代价是画布、SVG、ZIP、PNG 编码、BM25 都要自己写——但这部分正是可审计、可控的地方。</div>
+        </details>
+        <details class="faq">
+          <summary>它和「一键成片」是什么关系？</summary>
+          <div class="faq-body">不是替代。它假设你愿意做导演判断：选哪一版关键帧、哪个镜头要重跑、哪段节奏要改。模型负责画，流程负责让 40 个镜头仍然像同一个故事。</div>
+        </details>
+        <details class="faq">
+          <summary>适合谁？</summary>
+          <div class="faq-body">独立创作者、小型漫剧 / 短剧工作室、做 AI 影像研究的团队，以及想改流程而不是等功能的开发者。它不是给「完全不想动手」的人用的。</div>
+        </details>
+        <details class="faq">
+          <summary>桌面版怎么装？</summary>
+          <div class="faq-body">仓库内置 Electron 打包配置，可产出 macOS / Windows / Linux 安装包。未签名版本首次启动需要手动允许；正式分发需自备 Developer ID 证书。</div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CTA ================= -->
+  <section class="cta" id="start">
+    <div class="container cta-inner reveal">
+      <span class="eyebrow" style="justify-content:center">Start here</span>
+      <h2>把下一部小说，<br>放上画布。</h2>
+      <p>从项目列表开始，先跑一遍内置示例，再换成你的故事。</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary btn-lg" href="https://github.com/ssz1025/lingximanju" target="_blank" rel="noopener">获取 lingximanju</a>
+        <a class="btn btn-lg btn-ghost" href="https://github.com/ssz1025/lingximanju#readme" target="_blank" rel="noopener">阅读完整文档</a>
+      </div>
+      <div class="cmdbox" style="margin-inline:auto">
+        <span class="mono"><span class="muted">$</span> <span class="cb-text">cd lingximanju && ./start.sh</span></span>
+        <button id="copyCmd" data-copy="cd lingximanju && ./start.sh">复制命令</button>
+      </div>
+      <p class="muted" style="margin-top:16px;font-size:12px">Node.js ≥ 18 · 无需 npm install · 首次打开即可用内置示例</p>
+    </div>
+  </section>
+</main>
+
+<!-- ================= 页脚 ================= -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="logo" href="#top"><span class="logo-mark">◈</span><span class="logo-text"><strong>灵犀漫剧</strong><small>lingximanju</small></span></a>
+        <p>无限画布 × 智能体制片流水线。本地优先、零依赖、可审计的 AI 漫剧工作台。</p>
+      </div>
+      <div>
+        <h4>产品</h4>
+        <ul>
+          <li><a href="#pipeline">六步流程</a></li>
+          <li><a href="#features">核心能力</a></li>
+          <li><a href="#gallery">真实界面</a></li>
+          <li><a href="#compare">对比</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>文档</h4>
+        <ul>
+          <li><a href="https://github.com/ssz1025/lingximanju#readme" target="_blank" rel="noopener">README</a></li>
+          <li><a href="https://github.com/ssz1025/lingximanju/blob/main/docs/ARCHITECTURE.md" target="_blank" rel="noopener">架构设计</a></li>
+          <li><a href="https://github.com/ssz1025/lingximanju/blob/main/docs/AGENTS.md" target="_blank" rel="noopener">智能体编排</a></li>
+          <li><a href="https://github.com/ssz1025/lingximanju/blob/main/docs/COMFYUI.md" target="_blank" rel="noopener">ComfyUI 接入</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>项目</h4>
+        <ul>
+          <li><a href="https://github.com/ssz1025/lingximanju" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="https://github.com/ssz1025/lingximanju/issues" target="_blank" rel="noopener">反馈与建议</a></li>
+          <li><a href="#faq">常见问题</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© <span id="year">2026</span> lingximanju · 本地优先，数据留在你自己的机器上。</span>
+      <span class="fb-links"><a href="#top">回到顶部 ↑</a><a href="https://github.com/ssz1025/lingximanju" target="_blank" rel="noopener">GitHub ↗</a></span>
+    </div>
+  </div>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="截图预览">
+  <button id="lightboxClose" aria-label="关闭预览">✕</button>
+  <img id="lightboxImg" alt="">
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* 导航滚动态 + 进度条 */
+  const nav = $('#nav');
+  const progress = $('#progress');
+  const onScroll = () => {
+    const y = window.scrollY || 0;
+    nav.classList.toggle('scrolled', y > 12);
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    progress.style.width = `${max > 0 ? Math.min(100, (y / max) * 100) : 0}%`;
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  /* 移动端菜单 */
+  const toggle = $('#navToggle');
+  const links = $('#navLinks');
+  toggle?.addEventListener('click', () => {
+    const open = links.classList.toggle('open');
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
+  });
+  $$('#navLinks a').forEach((a) => a.addEventListener('click', () => {
+    links.classList.remove('open');
+    toggle?.setAttribute('aria-expanded', 'false');
+  }));
+
+  /* 进入视口动画 */
+  if (reduceMotion) {
+    $$('.reveal').forEach((el) => el.classList.add('in'));
+  } else if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('in');
+          io.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+    $$('.reveal').forEach((el) => io.observe(el));
+  } else {
+    $$('.reveal').forEach((el) => el.classList.add('in'));
+  }
+
+  /* 数字滚动 */
+  const counters = $$('[data-count]');
+  const animateCount = (el) => {
+    const target = Number(el.dataset.count);
+    if (!Number.isFinite(target)) return;
+    if (reduceMotion) { el.textContent = String(target); return; }
+    const start = performance.now();
+    const dur = 1100;
+    const tick = (now) => {
+      const p = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = String(Math.round(target * eased));
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+  if ('IntersectionObserver' in window) {
+    const co = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) { animateCount(entry.target); co.unobserve(entry.target); }
+      });
+    }, { threshold: 0.6 });
+    counters.forEach((el) => co.observe(el));
+  }
+
+  /* 画廊 Tab */
+  const tabs = $$('.gallery-tab');
+  const panels = $$('.gallery-panel');
+  const activate = (key) => {
+    tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === key)));
+    panels.forEach((p) => p.classList.toggle('active', p.id === `g-${key}`));
+  };
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => activate(tab.dataset.tab));
+    tab.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const i = tabs.indexOf(tab);
+      const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus(); activate(next.dataset.tab);
+    });
+  });
+
+  /* 灯箱 */
+  const lightbox = $('#lightbox');
+  const lightboxImg = $('#lightboxImg');
+  const openLightbox = (img) => {
+    lightboxImg.src = img.currentSrc || img.src;
+    lightboxImg.alt = img.alt || '';
+    lightbox.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    $('#lightboxClose').focus();
+  };
+  const closeLightbox = () => {
+    lightbox.classList.remove('open');
+    document.body.style.overflow = '';
+  };
+  $$('[data-zoom]').forEach((img) => {
+    img.addEventListener('click', () => openLightbox(img));
+    img.style.cursor = 'zoom-in';
+  });
+  $('#lightboxClose')?.addEventListener('click', closeLightbox);
+  lightbox?.addEventListener('click', (e) => { if (e.target === lightbox) closeLightbox(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && lightbox.classList.contains('open')) closeLightbox();
+  });
+
+  /* 复制命令 */
+  const copyBtn = $('#copyCmd');
+  copyBtn?.addEventListener('click', async () => {
+    const text = copyBtn.dataset.copy || '';
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+      }
+      copyBtn.textContent = '已复制 ✓';
+      copyBtn.style.color = '#7dd3a7';
+      setTimeout(() => { copyBtn.textContent = '复制命令'; copyBtn.style.color = ''; }, 1800);
+    } catch {
+      copyBtn.textContent = '请手动复制';
+      setTimeout(() => { copyBtn.textContent = '复制命令'; }, 1800);
+    }
+  });
+
+  /* 海报轻微视差 */
+  const visual = $('#heroVisual');
+  if (visual && !reduceMotion && window.matchMedia('(hover: hover)').matches) {
+    visual.addEventListener('pointermove', (e) => {
+      const r = visual.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width - 0.5;
+      const y = (e.clientY - r.top) / r.height - 0.5;
+      visual.style.setProperty('--mx', `${x * 10}px`);
+      visual.style.setProperty('--my', `${y * 8}px`);
+      const shot = visual.querySelector('.shot');
+      if (shot) shot.style.transform = `rotateY(${-7 + x * 4}deg) rotateX(${2.4 - y * 3}deg) translate(${x * 5}px, ${y * 4}px)`;
+    });
+    visual.addEventListener('pointerleave', () => {
+      const shot = visual.querySelector('.shot');
+      if (shot) shot.style.transform = '';
+    });
+  }
+
+  /* 年份 */
+  const year = $('#year');
+  if (year) year.textContent = String(new Date().getFullYear());
+})();
+</script>
+</body>
+</html>

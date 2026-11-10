@@ -6,7 +6,9 @@
  * 理论依据与消融数据见 docs/THEORY.md；论文原文见 docs/paper/。
  * ==========================================================================*/
 import { normalizeCharacter, MAX_CHARACTERS } from './characters.mjs';
+import { getVoice } from './voices.mjs';
 import { normalizeRuntimeSpec } from './runtime-spec.mjs';
+import { normalizeStoryboardSettings, resolveStoryboardSettings, describeStoryboardSettings } from './storyboard-settings.mjs';
 import { normalizeStyleId, getDirectorStyle, resolvePalette } from './director-styles.mjs';
 
 /** 四份流程策略 id（字面量镜像 core/director-skills.mjs 的 FLOW_SKILLS，避免循环依赖） */
@@ -74,25 +76,25 @@ export const STEPS = [
     },
   },
   {
-    id: 'storyboard', no: 5, title: '分镜 · 机位图 · 择优 · 片段', short: '视觉一致性的三根支柱',
-    icon: '⌗', auto: false, scope: ['keyframe', 'review', 'video', 'transition', 'camera'], nodeLabel: '分镜 / 择优 / 片段节点',
-    desc: '按镜头规格生成 k 张候选关键帧并 VLM 择优；机位依赖图按拓扑序传播视觉锚点，跨机位转场视频锁定三维空间关系；最后逐镜头生成视频片段。',
-    checklist: ['每镜头 best-of-2 择优并记录评分', 'anchor 边传播视觉锚点 + 转场空间锚点', '机位依赖图统计并行层与一致性'],
+    id: 'storyboard', no: 5, title: '分镜提示词 · 分镜图', short: '提示词 + 关键帧 + 分镜板（不出视频）',
+    icon: '⌗', auto: false, scope: ['keyframe', 'review', 'transition', 'camera'], nodeLabel: '分镜 / 关键帧 / 分镜板节点',
+    desc: '按镜头规格生成 k 张候选关键帧并 VLM 择优，机位依赖图按拓扑序传播视觉锚点；每个镜头的分镜提示词、选中的关键帧图与每段分镜板都在本步落盘。分镜板版式（九宫格 / 六宫格 / 四宫格 / 条漫 / 二十五宫格 / 单图）与画幅、格内信息由「分镜画面设置」决定。**视频片段不在本步生成**——等全部画面确认后到第 ⑥ 步统一出片，避免图还没定型就烧 GPU。',
+    checklist: ['每个镜头都有完整分镜提示词', '每镜头 best-of-2 择优并记录评分', '分镜画面设置已选（版式 / 画幅 / 格内信息）', '每段分镜板已生成（可点开查看）', '视频片段留到第 ⑥ 步统一生成'],
     theory: {
-      ref: '式(2)(3)(4)(7)(8)',
-      text: 'ShotPlanning 出分镜规格；GenConditioned(Sᵢ, Aᵢ) 让依赖机位继承前驱锚点；GenTransition / ExtractViews 用转场视频锁空间；C* = argmax VLM-Judge 做质量闸门（论文 RQ6：k=2 最优）。',
-      map: [['式(2)(7)', 'src/agents/narrative.mjs · storyboard / camera-graph'], ['式(3)', 'src/agents/visual.mjs · keyframe / video'], ['式(4)', 'src/agents/visual.mjs · review（k=2）'], ['式(8)', 'src/agents/visual.mjs · transition + anchor 边'], ['消融', '去全部跨镜头依赖 GC −8.7%；去 VLM 择优 −3.8%'], ['并行', 'src/core/orchestrator.mjs · topoLayers（405s / GC 0.5571）']],
+      ref: '式(2)(4)(7)(8)',
+      text: 'ShotPlanning 出分镜规格；GenConditioned(Sᵢ, Aᵢ) 让依赖机位继承前驱锚点；GenTransition / ExtractViews 先用端点视图锁定空间关系（视频留到交付步）；C* = argmax VLM-Judge 做质量闸门（论文 RQ6：k=2 最优）。',
+      map: [['式(2)(7)', 'src/agents/narrative.mjs · storyboard / camera-graph'], ['式(3) 图', 'src/agents/visual.mjs · keyframe（本步只出图）'], ['式(4)', 'src/agents/visual.mjs · review（k=2）'], ['式(8)', 'src/agents/visual.mjs · transition 端点帧 + anchor 边'], ['分镜板', 'src/core/grid-art.mjs · storyboardGridSVG（版式由 storyboard-settings 决定）'], ['设置', 'management.storyboard · 九宫格 / 六宫格 / 四宫格 / 条漫 / 二十五宫格 / 单图'], ['消融', '去全部跨镜头依赖 GC −8.7%；去 VLM 择优 −3.8%']],
     },
   },
   {
-    id: 'deliver', no: 6, title: '双产物交付', short: '成片视频 / 导演包',
-    icon: '✦', auto: false, scope: ['final'], nodeLabel: '成片时间线节点',
-    desc: '组装成片时间线与封面，按交付设置产出 ① 成片视频（本机 ComfyUI 真实片段经 ffmpeg 拼接）或 ② *.mmxpack.zip 导演包（可导入 ComfyUI MiniMax H3 Director）。',
-    checklist: ['时间线节点汇总所有片段并变绿 ✓', '导演包已生成且可下载', '成片视频按配置产出或明确标注降级原因'],
+    id: 'deliver', no: 6, title: '视频生成与成片交付', short: '画面全就绪后统一出片',
+    icon: '▶', auto: false, scope: ['video', 'transition', 'final'], nodeLabel: '视频片段 / 成片节点',
+    desc: '第 ⑤ 步的分镜提示词与关键帧全部确认后，本步才逐镜头把「选中关键帧 + 运动描述」送进本机 ComfyUI 图生视频，补齐转场视频，最后由 ffmpeg 拼成片并按设置导出 *.mmxpack.zip 导演包。',
+    checklist: ['全部镜头关键帧已定版（第 ⑤ 步完成）', '每个镜头都有视频片段（真实 ComfyUI 产物）', '时间线节点汇总所有片段并变绿 ✓', '导演包已生成且可下载', '成片视频按配置产出或明确标注降级原因', '成片时长规格逐项达标：片段数 / 单段时长 / 总时长 / 分辨率'],
     theory: {
       ref: '式(3) + 依赖图并行调度',
-      text: '生成阶段以「镜头规格 + 关键帧」为条件逐镜头出片，依赖图拓扑序保证同层可并行；成片与交接包是流水线末端的可交付状态（论文未展开交付格式，属本项目扩展）。',
-      map: [['式(3)', 'ImageGen → VideoGen（providers / comfyui）'], ['交付 A', 'src/core/film.mjs · stitchClips → MP4'], ['交付 B', 'src/core/director-pack.mjs · exportDirectorPack → mmxpack.zip'], ['RQ4', '完整依赖图 405s / GC 0.5571']],
+      text: '生成阶段以「镜头规格 + 关键帧」为条件逐镜头出片，依赖图拓扑序保证同层可并行；把视频集中到最后一步，是为了让画面定版与昂贵的图生视频解耦，改分镜不必重烧全部片段。',
+      map: [['式(3)', 'ImageGen → VideoGen（providers / comfyui）'], ['转场视频', 'src/agents/visual.mjs · transition（videoOnly 续跑）'], ['交付 A', 'src/core/film.mjs · stitchClips → MP4'], ['交付 B', 'src/core/director-pack.mjs · exportDirectorPack → mmxpack.zip']],
     },
   },
 ];
@@ -167,6 +169,9 @@ export function createManagement(opts = {}) {
     // filmPolicy='real' 是默认值：只认 ComfyUI 真实视频片段拼出的成片，
     // 关键帧预览成片必须显式切到 'preview' 才允许，且验收记为降级。
     runtime: { schema: 1, enabled: true, totalSeconds: 30, clipSeconds: 3, fps: 24, filmPolicy: 'real' },
+    // 分镜画面设置（第⑤步操作台）：版式 / 画幅 / 格内信息 / 构图参考 / 提示词公式。
+    // 默认九宫格 + 跟随项目画幅 + 真实分镜图优先；归一逻辑在 core/storyboard-settings.mjs。
+    storyboard: normalizeStoryboardSettings(),
     createdAt: now(), updatedAt: now(), version: 1,
     history: [{ id: uid(), at: now(), action: 'create', detail: kind === 'novel' ? (opts.skeleton ? '新建创作项目骨架（待上传小说）' : '新建创作项目（小说分集）') : '标准流水线项目' }],
   };
@@ -224,8 +229,17 @@ export function ensureManagement(project) {
   if (!project.management.director || project.management.director.schema !== 1) {
     project.management.director = { schema: 1, skillId: 'full', treatment: null, lastRun: null };
   }
-  // 短剧时长规格始终归一后写回：老项目补齐、新项目补出 clipCount 等推导字段
-  project.management.runtime = normalizeRuntimeSpec(project.management.runtime || {});
+  // 短剧时长规格始终归一后写回：老项目补齐、新项目补出 clipCount 等推导字段；
+  // 分辨率结合项目画幅归一（9:16 → 480×864 起步，16:9 → 864×480 起步）
+  project.management.runtime = normalizeRuntimeSpec({
+    ...(project.management.runtime || {}),
+    aspect: project.settings?.aspect,
+  });
+  // 分镜画面设置同样每次归一：老项目补齐默认九宫格，非法版式 / 画幅回落默认，
+  // cols / rows / cells 由版式推导后落盘，前端与宫格渲染读到的是同一份几何。
+  project.management.storyboard = normalizeStoryboardSettings({
+    ...(project.management.storyboard || {}),
+  });
   // 老项目惰性补角色库并逐项归一
   if (!Array.isArray(project.management.characters)) project.management.characters = [];
   else project.management.characters = project.management.characters.map((c) => normalizeCharacter(c));
@@ -276,6 +290,16 @@ export function stepProgress(m) {
 function logHistory(m, action, detail) {
   m.history = [{ id: uid(), at: now(), action, detail }, ...(m.history || [])].slice(0, 60);
   m.updatedAt = now();
+}
+
+/**
+ * 工作台第 ① 步「设置基础信息」的完成标记。
+ * 这一步在六步状态机之外（字段都落在 bible / settings / cover 上），没有「执行本步」按钮，
+ * 唯一的完成方式就是用户保存过基础信息里的任意一项；因此这里显式记一个确认时间，
+ * 前端 stepStatus('basic') 以它为准 —— 保证「提示已保存」与「步骤已完成」永远一致。
+ */
+function markBasicConfirmed(m) {
+  m.basicInfo = { schema: 1, confirmedAt: now() };
 }
 
 export function startStep(m, id, meta = {}) {
@@ -414,6 +438,7 @@ export function applyManageAction(project, action, value) {
       const name = String(value ?? '').trim().slice(0, 80);
       if (!name) return { ok: false, message: '名称不能为空' };
       project.name = name; m.title = name;
+      markBasicConfirmed(m);   // 项目名属于第 ① 步的基础信息
       logHistory(m, 'rename', `重命名为「${name}」`);
       return { ok: true, message: `已重命名为「${name}」` };
     }
@@ -446,7 +471,29 @@ export function applyManageAction(project, action, value) {
       project.settings = project.settings || {};
       project.settings.comfy = { ...(project.settings.comfy || {}), outputMode: mode };
       logHistory(m, 'deliverables', `交付物：${video ? '成片视频 ' : ''}${pack ? '导演包' : ''}（outputMode=${mode}）`);
+      markBasicConfirmed(m);   // 交付形式属于第 ① 步的基础信息
       return { ok: true, message: `交付设置已更新：${mode}`, outputMode: mode };
+    }
+    case 'storyboard': {
+      // 分镜画面设置：版式 / 画幅 / 格内信息 / 构图参考 / 提示词公式。
+      // 只改设置，不在这里重排分镜板——重排是「保存并重排」按钮与第⑤步收尾的职责。
+      const prev = m.storyboard || {};
+      const patch = value && typeof value === 'object' ? value : {};
+      const next = normalizeStoryboardSettings({
+        ...prev,
+        ...patch,
+        prompt: { ...(prev.prompt || {}), ...(patch.prompt || {}) },
+        updatedAt: Date.now(),
+      });
+      m.storyboard = next;
+      const resolved = resolveStoryboardSettings(project);
+      const text = describeStoryboardSettings(resolved);
+      logHistory(m, 'storyboard', `分镜画面设置：${text}`);
+      return {
+        ok: true,
+        message: `分镜画面设置已保存：${text}（点「重排分镜板」或重新执行第⑤步生效）`,
+        storyboard: next,
+      };
     }
     case 'split': {
       if (m.kind !== 'novel') return { ok: false, message: '标准项目没有分集参数' };
@@ -454,8 +501,9 @@ export function applyManageAction(project, action, value) {
         strategy: value?.strategy || m.split.strategy,
         targetChars: Number(value?.targetChars) || m.split.targetChars,
         maxEpisodes: Number(value?.maxEpisodes) || m.split.maxEpisodes,
+        seasonSize: Math.max(1, Number(value?.seasonSize) || m.split.seasonSize || 12),
       };
-      logHistory(m, 'split', `分集参数：${m.split.strategy} / ${m.split.targetChars} 字 / 最多 ${m.split.maxEpisodes} 集`);
+      logHistory(m, 'split', `分集参数：${m.split.strategy} / ${m.split.targetChars} 字 / 最多 ${m.split.maxEpisodes} 集 · 每季 ${m.split.seasonSize} 集`);
       return { ok: true, message: '分集参数已保存（重新执行第 ② 步生效）' };
     }
     case 'bible': {
@@ -470,12 +518,15 @@ export function applyManageAction(project, action, value) {
       b.worldview = s('worldview', 4000); b.characters = s('characters', 6000);
       b.stylePrompt = s('stylePrompt', 600); b.negativePrompt = s('negativePrompt', 600);
       if (value?.totalEpisodes !== undefined) {
-        b.totalEpisodes = Math.max(0, Math.min(64, Number(value.totalEpisodes) || 0));
+        b.totalEpisodes = Math.max(0, Math.min(600, Number(value.totalEpisodes) || 0));
       }
       // 总集数是分集目标的上位设定：同步分集参数，重新执行第 ② 步生效
       if (m.kind === 'novel' && b.totalEpisodes > 0 && m.split) {
-        m.split.maxEpisodes = Math.max(1, Math.min(12, b.totalEpisodes));
+        m.split.maxEpisodes = Math.max(1, Math.min(600, b.totalEpisodes));
       }
+      // 保存即确认：第 ① 步没有独立的执行按钮，用户点了保存就等于「基础信息设置完成」，
+      // 不能出现「提示已保存但步骤仍待执行」的错位（空提交也算确认，字段可随时再补）。
+      markBasicConfirmed(m);
       logHistory(m, 'bible', `更新创作设定${b.title ? ` ·《${b.title}》` : ''}${b.totalEpisodes ? ` · 总集数 ${b.totalEpisodes}` : ''}`);
       return { ok: true, message: '创作设定已保存', bible: b };
     }
@@ -484,8 +535,29 @@ export function applyManageAction(project, action, value) {
       const raw = { ...(value || {}) };
       const name = String(raw.name || '').trim();
       if (!name) return { ok: false, message: '角色姓名不能为空' };
+      // 音色绑定归一：给了 voiceId 就从全局音色库回填 voiceName（保持两者一致）；
+      // 音色不存在视为无效绑定清空，避免角色挂着幽灵 voiceId。
+      // 绑定变更时同步重置 voiceReason / voiceScore，不让旧理由挂在新音色上。
+      if ('voiceId' in raw) {
+        const voice = raw.voiceId ? getVoice(String(raw.voiceId)) : null;
+        if (voice) {
+          raw.voiceId = voice.id; raw.voiceName = voice.name;
+          raw.voiceReason = String(raw.voiceReason || '').slice(0, 200) || `手动指定：${voice.name}`;
+          raw.voiceScore = 0;
+        } else {
+          raw.voiceId = ''; raw.voiceName = ''; raw.voiceReason = ''; raw.voiceScore = 0;
+        }
+      }
       const idx = raw.id ? m.characters.findIndex((x) => x.id === raw.id) : -1;
       if (idx >= 0) {
+        // 唯一性硬约束：一个音色在本项目里只能绑定一个角色。
+        // 换绑 / 新绑到已被其它角色占用的音色时直接拒绝，并告知被谁占用。
+        if (raw.voiceId && raw.voiceId !== m.characters[idx].voiceId) {
+          const occupied = m.characters.find((c) => c.id !== raw.id && c.voiceId === raw.voiceId);
+          if (occupied) {
+            return { ok: false, message: `音色「${raw.voiceName}」已被角色「${occupied.name}」使用，不能重复绑定` };
+          }
+        }
         // 只在本 action 内合并更新；views 产物只由生成端点写入
         const prev = m.characters[idx];
         // 标记为「用户手改」：后续重新提取时不再覆盖这些字段
@@ -495,6 +567,12 @@ export function applyManageAction(project, action, value) {
         return { ok: true, message: `角色「${next.name}」已保存`, character: next };
       }
       if (m.characters.length >= MAX_CHARACTERS) return { ok: false, message: `角色最多 ${MAX_CHARACTERS} 个` };
+      if (raw.voiceId) {
+        const occupied = m.characters.find((c) => c.voiceId === raw.voiceId);
+        if (occupied) {
+          return { ok: false, message: `音色「${raw.voiceName}」已被角色「${occupied.name}」使用，不能重复绑定` };
+        }
+      }
       const created = normalizeCharacter({ ...raw, id: '', source: raw.source === 'llm' ? 'llm' : 'manual', updatedAt: now() });
       m.characters.push(created);
       logHistory(m, 'characters', `新增角色「${created.name}」`);
@@ -522,9 +600,16 @@ export function applyManageAction(project, action, value) {
       if (value?.aspect !== undefined) {
         const aspect = String(value.aspect).slice(0, 8);
         if (!['16:9', '9:16'].includes(aspect)) return { ok: false, message: '画幅只支持 16:9 / 9:16' };
+        const prev = project.settings.aspect;
         project.settings.aspect = aspect;
+        // 画幅换了，成片规格的分辨率跟着换挡：16:9 的「高清」切到 9:16 仍是高清档，
+        // 由 normalizeRuntimeSpec 的 pickResolution 按档位序号映射，不悄悄丢分辨率。
+        if (prev !== aspect && m.runtime) {
+          m.runtime = normalizeRuntimeSpec({ ...m.runtime, aspect });
+        }
       }
       logHistory(m, 'settings', `画面设置：风格 ${project.settings.style || '默认'} · 画幅 ${project.settings.aspect || '默认'}`);
+      markBasicConfirmed(m);   // 画面风格 / 画幅 属于第 ① 步的基础信息
       return { ok: true, message: '画面设置已保存' };
     }
     case 'director-skill': {
@@ -575,12 +660,14 @@ export function applyManageAction(project, action, value) {
     case 'runtime': {
       if (m.kind !== 'novel') return { ok: false, message: '标准流水线项目不参与短剧时长规格' };
       const patch = Object.fromEntries(Object.entries(value || {}).filter(([, v]) => v !== undefined));
-      const next = normalizeRuntimeSpec({ ...(m.runtime || {}), ...patch });
+      // 分辨率结合画幅归一：画幅来自项目画面设置（settings.aspect），
+      // width/height/resolution 任一给出都必须命中该画幅的档位，否则回落默认档。
+      const next = normalizeRuntimeSpec({ ...(m.runtime || {}), ...patch, aspect: project.settings?.aspect });
       m.runtime = next;
-      logHistory(m, 'runtime', `成片规格：${next.totalSeconds}s / ${next.clipSeconds}s × ${next.clipCount} 段 @ ${next.fps}fps · ${next.filmPolicy === 'real' ? '真实 AI 视频' : '关键帧预览'}`);
+      logHistory(m, 'runtime', `成片规格：${next.totalSeconds}s / ${next.clipSeconds}s × ${next.clipCount} 段 @ ${next.fps}fps · ${next.width}×${next.height} · ${next.filmPolicy === 'real' ? '真实 AI 视频' : '关键帧预览'}`);
       return {
         ok: true,
-        message: `成片规格已保存：${next.clipCount} 个片段 × ${next.clipSeconds}s = ${next.totalSeconds}s · ${next.filmPolicy === 'real' ? '真实 AI 视频模式（必须调用 ComfyUI）' : '关键帧预览模式（非 AI 视频，验收降级）'}${next.aligned ? '（总时长已按片段时长对齐）' : ''}`,
+        message: `成片规格已保存：${next.clipCount} 个片段 × ${next.clipSeconds}s = ${next.totalSeconds}s · ${next.resolutionLabel} · ${next.filmPolicy === 'real' ? '真实 AI 视频模式（必须调用 ComfyUI）' : '关键帧预览模式（非 AI 视频，验收降级）'}${next.aligned ? '（总时长已按片段时长对齐）' : ''}`,
         runtime: next,
       };
     }
@@ -588,7 +675,7 @@ export function applyManageAction(project, action, value) {
       resetAllSteps(m);
       return { ok: true, message: '六步任务状态已重置' };
     case 'cover': {
-      const source = ['upload', 'comfyui'].includes(value?.source) ? value.source : 'name';
+      const source = ['upload', 'comfyui', 'ai'].includes(value?.source) ? value.source : 'name';
       const url = source === 'name' ? '' : String(value?.url || '').slice(0, 300);
       if (source !== 'name' && !url) return { ok: false, message: '封面图片地址不能为空' };
       m.cover = {
@@ -598,9 +685,12 @@ export function applyManageAction(project, action, value) {
         updatedAt: Date.now(),
       };
       logHistory(m, 'cover', source === 'name' ? '恢复为项目名称封面'
-        : source === 'upload' ? '上传了项目封面图片' : '用 ComfyUI 生成了项目封面');
+        : source === 'upload' ? '上传了项目封面图片'
+        : source === 'ai' ? '用 AI 生成了项目封面' : '用 ComfyUI 生成了项目封面');
+      markBasicConfirmed(m);   // 封面属于第 ① 步的基础信息
       return { ok: true, message: source === 'name' ? '已恢复为项目名称封面'
-        : source === 'upload' ? '项目封面已上传' : '项目封面已生成', cover: m.cover };
+        : source === 'upload' ? '项目封面已上传'
+        : source === 'ai' ? 'AI 封面已生成' : '项目封面已生成', cover: m.cover };
     }
     default:
       return { ok: false, message: `未知管理动作：${action}` };

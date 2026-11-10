@@ -180,6 +180,35 @@ test('applyManageAction 重命名', () => {
   assert.equal(applyManageAction(p, 'rename', '   ').ok, false, '空名应被拒绝');
 });
 
+test('保存基础信息即打上第 ① 步完成标记', () => {
+  const p = makeProject();
+  assert.equal(p.management.basicInfo, undefined, '初始没有确认标记');
+  // 用户只改了简介
+  const r = applyManageAction(p, 'bible', { logline: '雨夜的一封信' });
+  assert.equal(r.ok, true);
+  assert.equal(r.bible.logline, '雨夜的一封信');
+  assert.ok(p.management.basicInfo?.confirmedAt > 0, '保存创作设定应记录 confirmedAt');
+
+  // 空提交也算「确认过基础信息」：不出现「提示已保存但步骤仍待执行」
+  const p2 = makeProject();
+  const empty = applyManageAction(p2, 'bible', {});
+  assert.equal(empty.ok, true);
+  assert.ok(p2.management.basicInfo?.confirmedAt > 0, '空提交同样确认第 ① 步');
+
+  // 项目名 / 画面风格 / 交付物 / 封面同属第 ① 步的基础信息
+  for (const [action, value] of [
+    ['rename', '新名字'],
+    ['settings', { aspect: '9:16' }],
+    ['deliverables', { video: true, pack: true }],
+    ['cover', { source: 'upload', url: '/assets/a.png' }],
+  ]) {
+    const px = makeProject();
+    const out = applyManageAction(px, action, value);
+    assert.equal(out.ok, true, `${action} 应成功`);
+    assert.ok(px.management.basicInfo?.confirmedAt > 0, `${action} 应确认第 ① 步`);
+  }
+});
+
 test('applyManageAction 收藏与归档可切换', () => {
   const p = makeProject();
   applyManageAction(p, 'favorite');

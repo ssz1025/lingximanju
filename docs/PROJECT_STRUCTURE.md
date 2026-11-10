@@ -32,8 +32,10 @@ lingximanju/
 │   │   ├── knowledge.mjs       # 式(6) 知识库的磁盘缓存层（data/knowledge/*.json）；算法部分转出 bm25.mjs
 │   │   ├── assets.mjs          # 资源索引（index.json 打标签/改名/类型）+ 跨项目角色优先匹配
 │   │   ├── project-steps.mjs   # 六步定义（含 scope 与论文依据）/ management / 状态机 / 管理动作；含 director-skill 与 director-palette 动作
-│   │   ├── director-skills.mjs # 导演技能单一事实来源：14 项技能（4 流程策略 + 10 导演风格）/ DIRECTOR_SKILL_GROUPS 分组 / 5 项能力 / planDirectorRun / verifyDirectorDeliverables
-│   │   ├── director-styles.mjs # 十位导演美学档案 + 消费函数：DIRECTOR_STYLES / 调色板 / resolveAesthetic / aestheticPrompt / aestheticShotSuffix / aestheticTreatment / resolveProjectAesthetic
+│   │   ├── director-skills.mjs # 导演技能单一事实来源：技能清单（4 流程策略 + 10 内置导演风格 + 自定义）/ rebuildDirectorSkills 动态重建 / DIRECTOR_SKILL_GROUPS 分组 / 5 项能力 / planDirectorRun / verifyDirectorDeliverables
+│   │   ├── director-styles.mjs # 十位导演美学档案 + 消费函数：DIRECTOR_STYLES / 调色板 / resolveAesthetic / aestheticPrompt / aestheticShotSuffix / aestheticTreatment / resolveProjectAesthetic / 自定义风格注册表（registerCustomStyles，纯内存无 IO）
+│   │   ├── director-style-store.mjs # 自定义导演风格持久化（data/director-styles.json）：normalizeCustomStyle 校验归一（与内置同构）/ save·delete upsert / 注册注入 + 技能索引重建
+│   │   ├── style-forge-chat.mjs # AI 导演风格设计师对话（无状态草稿回传协议）：styleForgeChat / draftToStyle，产出与 DIRECTOR_STYLES 同构的风格档案
 │   │   ├── graph.mjs           # DAG 拓扑分层 / 上下游 / 自动布局
 │   │   ├── agent.mjs           # Agent 注册表 + 执行上下文
 │   │   ├── orchestrator.mjs    # 分层并发调度、join 汇聚、取消、断点续跑
@@ -49,6 +51,7 @@ lingximanju/
 │   │   ├── film-policy.mjs     # 成片策略 real / preview：real 下缺真实 AI 片段判 missing，preview 下如实标 degraded
 │   │   ├── preview-film.mjs    # 零 Key 关键帧预览成片：本机 ffmpeg 把关键帧渲染成片段拼成 MP4，标 source: 'preview-frames'
 │   │   ├── runtime-spec.mjs    # 短剧成片规格单一事实来源：30s / 每片段 3s → 片段数推导、allocateShots 镜头预算、verifyRuntime 时长验收
+│   │   ├── episode-script.mjs  # 分集剧本纯函数层：buildScriptVars（上集结尾/钩子/场次预算）/ normalizeEpisodeScript（归一+stats+issues）/ mergeScriptEdit（人工编辑）/ Markdown 导出 / scriptsCoverage
 │   │   └── director-pack.mjs   # mmxpack / 通用 ComfyUI 导演包生成
 │   ├── agents/
 │   │   ├── narrative.mjs       # 编剧 / RAG / 分解 / 角色 / 分镜 / 机位图

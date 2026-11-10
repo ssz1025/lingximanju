@@ -34,6 +34,9 @@ test('全流程导演：从空项目一键跑到最终产物，验收清单逐�
   // 本机没有 ComfyUI，显式选择「关键帧预览」策略：这是唯一允许走通流程的模式。
   // 默认的 real 策略下零 Key 环境必须判缺失，那段行为由 film-policy.test.mjs 单测覆盖。
   project.management.runtime.filmPolicy = 'preview';
+  // 同 filmPolicy：零 Key 环境只能产出 mock 分镜图，测试夹具显式放行，
+  // 让「流程能否跑通」与「真实出图口径」两件事各自被独立验证。
+  project.testFlags = { allowMockArtifacts: true };
   saveProject(project);
   const r = await runDirector({
     project, skillId: 'full',

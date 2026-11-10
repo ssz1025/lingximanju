@@ -5,6 +5,7 @@ import { handleComfy } from './routes/comfy.mjs';
 import { handleManagement } from './routes/management.mjs';
 import { handleVoices } from './routes/voices.mjs';
 import { handleDirector } from './routes/director.mjs';
+import { handleDirectorStyles } from './routes/director-styles.mjs';
 import { handleRuntime } from './routes/runtime.mjs';
 import { handleProductionChat } from './routes/production-chat.mjs';
 import { handleMedia } from './routes/media.mjs';
@@ -41,6 +42,7 @@ export async function handleApi(req, res, url) {
   if (await handleManagement(req, res, url)) return true;
   if (await handleVoices(req, res, url)) return true;
   if (await handleDirector(req, res, url)) return true;
+  if (await handleDirectorStyles(req, res, url)) return true;
   if (await handleRuntime(req, res, url)) return true;
   if (await handleMedia(req, res, url)) return true;
   if (await handleEpisodes(req, res, url)) return true;

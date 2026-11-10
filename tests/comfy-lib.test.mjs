@@ -54,6 +54,12 @@ test('图片规格由画幅自动决定：resolveComfyConfig 覆盖遗留 width/
   // imageSpecFor 纯函数直验
   assert.deepEqual(imageSpecFor('9:16'), { width: 480, height: 864, steps: 25, cfg: 1.0 });
   assert.deepEqual(imageSpecFor(undefined), { width: 864, height: 480, steps: 25, cfg: 1.0 });
+  // 项目成片规格选定的分辨率档位优先于画幅默认档（规格显式给出分辨率）
+  assert.deepEqual(imageSpecFor('16:9', { width: 1280, height: 720 }), { width: 1280, height: 720, steps: 25, cfg: 1.0 });
+  assert.deepEqual(imageSpecFor('9:16', { width: 1080, height: 1920 }), { width: 1080, height: 1920, steps: 25, cfg: 1.0 });
+  // 规格缺省 / 非法宽高 → 回落画幅默认档
+  assert.deepEqual(imageSpecFor('9:16', null), { width: 480, height: 864, steps: 25, cfg: 1.0 });
+  assert.deepEqual(imageSpecFor('16:9', { width: 0, height: 0 }), { width: 864, height: 480, steps: 25, cfg: 1.0 });
 });
 
 test('normalize 防御清洗：库非数组清空、坏项丢弃、name/lastTest 兜底、非法 activeId 置 null', () => {

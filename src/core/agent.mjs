@@ -59,6 +59,19 @@ export function buildContext(runCtx) {
       touch();
       emit('node:data', { projectId, runId: runState.runId, nodeId: node.id, patch: obj });
     },
+    /**
+     * 写节点执行元信息（meta）：prompt_id / 提交时间 / 任务追踪号等。
+     * 与 data 分开是因为 meta 是「这条任务跑过什么」的运行痕迹，不参与产物渲染；
+     * 任务看板与对账逻辑读的就是它。
+     */
+    setMeta(obj = {}) {
+      node.meta = { ...(node.meta || {}), ...obj };
+      touch();
+      emit('node:status', {
+        projectId, runId: runState.runId, nodeId: node.id,
+        status: node.status, progress: node.progress, meta: obj,
+      });
+    },
     setTitle(title) {
       node.title = title;
       touch();

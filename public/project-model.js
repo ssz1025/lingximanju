@@ -64,6 +64,43 @@ export function seasonSummary(project) {
   };
 }
 
+/**
+ * 中文季 / 集标签：界面上不再使用 EP、S01、S01E02 这类英文缩略。
+ * 所有选集控件、制作队列、状态提示都走这三个函数，保证同一集在任何地方写法一致。
+ * 集号沿用全局唯一的 ep.no（季只是分组视图），因此「第 2 季 第 4 集」是正常写法。
+ */
+export function seasonLabel(season) {
+  const n = num(season, 0);
+  return `第 ${n > 0 ? Math.floor(n) : '?'} 季`;
+}
+
+/** 只写集号的短标签（季已在邻近标题里说明时用） */
+export function episodeNoLabel(no) {
+  const n = num(no, 0);
+  return `第 ${n > 0 ? n : '?'} 集`;
+}
+
+/** 完整的剧集选择标签：第 1 季 第 1 集 */
+export function episodeLabelFull(season, no) {
+  return `${seasonLabel(season)} ${episodeNoLabel(no)}`;
+}
+
+/**
+ * 导航条专用紧凑标签：第1季-1（无空格、连字符、集号沿用全局唯一编号）。
+ * 只用于中间制作步骤窄栏 / 收起态状态轨；其它位置仍用 episodeLabelFull 的完整中文标签。
+ * 异常值兜底「第?季-?」，绝不产出 undefined / NaN。
+ */
+export function episodeLabelShort(season, no) {
+  const s = num(season, 0);
+  const n = num(no, 0);
+  return `第${s > 0 ? Math.floor(s) : '?'}季-${n > 0 ? n : '?'}`;
+}
+
+/** 队列项 → 完整中文标签（episodeQueue / nextPendingEpisode 返回值可直接传） */
+export function queueItemLabel(item) {
+  return episodeLabelFull(item?.season, item?.no);
+}
+
 /** 集的短标签，兼容缺 title / 缺 no 的老数据 */
 export function episodeLabel(ep) {
   const no = num(ep?.no, 0);
@@ -76,11 +113,11 @@ export function episodeTitleHTML(project, ep) {
   return esc(`第 ${no || '?'} 集 · ${cut(ep?.title || '未命名', 22)}`);
 }
 
-/** 把某一集移动到指定季（返回新的 episodes 数组） */
+/** 把某一集移动到指定季（返回新的 episodes 数组）；手动移过的集不再是「自动归季」 */
 export function assignEpisodeSeason(episodes, no, season) {
   const target = Math.max(1, Math.floor(num(season, 1)));
   return (Array.isArray(episodes) ? episodes : []).map((ep) =>
-    num(ep?.no) === num(no) ? { ...ep, season: target } : ep);
+    num(ep?.no) === num(no) ? { ...ep, season: target, seasonAuto: false } : ep);
 }
 
 /** 新增/重命名季时规范化 seasons[]（返回新数组，绝不会写出重复季号） */
@@ -112,7 +149,7 @@ export function removeSeason(seasons, episodes, no) {
   const nextEpisodes = (Array.isArray(episodes) ? episodes : []).map((ep) => {
     if (seasonOf(ep) !== target) return ep;
     moved += 1;
-    return { ...ep, season: 1 };
+    return { ...ep, season: 1, seasonAuto: false };
   });
   return {
     seasons: (Array.isArray(seasons) ? seasons : []).filter((s) => num(s?.no) !== target),
@@ -200,8 +237,182 @@ export function localSourceView(project) {
   };
 }
 
-/** 画布范围键：overall（全部组合） / main（项目主画布） / ep:<no>（单集画布） */
-export function scopeKeyOf(kind, no = 0) {
+/* --------------------------------------------------------------------------
+ * 分季分集的「制作进度」与筛选：工作台卡片、统计条、剧本覆盖率共用。
+ * 全部为纯函数，不修改入参，可在 node --test 中直接断言。
+ * ------------------------------------------------------------------------*/
+
+/* --------------------------------------------------------------------------
+ * 顺序制作队列：分季分集之后，按「季升序 → 季内集号升序 → 定稿」串行推进。
+ * 集号仍是全局唯一，季只是分组视图；手动移过季的集由 seasonGroups 决定入队顺序。
+ * 定稿状态写在 ep.finalized = { at, season, no }；老项目没有这个字段 = 未定稿。
+ * ------------------------------------------------------------------------*/
+
+export const EPISODE_STAGE_KEYS = ['script', 'context', 'storyboard', 'deliver'];
+
+/** 单集某一段是否完成：前端流水线、区头、后端定稿判定共用这一份口径 */
+export function episodeStageDone(ep, key) {
+  if (key === 'script') return Boolean(ep?.script);
+  const st = ep?.steps?.[key]?.status;
+  if (st === 'done') return true;
+  if (st === 'running' || st === 'error') return false;
+  if (key === 'context') return Boolean(ep?.script) && (ep?.characterIds || []).length > 0;
+  if (key === 'storyboard') {
+    const segs = Array.isArray(ep?.segments) ? ep.segments : [];
+    return segs.length > 0 && segs.every((s) => Boolean(s?.gridUrl));
+  }
+  if (key === 'deliver') return Boolean(ep?.film?.file);
+  return false;
+}
+
+/** 四段是否全部完成：能不能定稿的硬门槛 */
+export function episodeStagesDone(ep) {
+  const stages = Object.fromEntries(EPISODE_STAGE_KEYS.map((k) => [k, episodeStageDone(ep, k)]));
+  return {
+    ...stages,
+    done: EPISODE_STAGE_KEYS.every((k) => stages[k]),
+    missing: EPISODE_STAGE_KEYS.filter((k) => !stages[k]),
+  };
+}
+
+export function isFinalized(ep) { return Boolean(ep?.finalized?.at); }
+
+/** 定稿 / 撤销定稿（返回新的 episodes 数组，不改入参） */
+export function markFinalized(episodes, no, on = true) {
+  return (Array.isArray(episodes) ? episodes : []).map((ep) => {
+    if (num(ep?.no) !== num(no)) return ep;
+    if (on) return { ...ep, finalized: { at: Date.now(), season: seasonOf(ep), no: num(ep.no) } };
+    const next = { ...ep };
+    delete next.finalized;
+    return next;
+  });
+}
+
+/** 顺序队列：季升序 + 季内集号升序，每项带季号 / 季内序号 / 定稿与四段状态 */
+export function episodeQueue(project) {
+  return seasonGroups(project).flatMap((g) => g.episodes.map((ep, i) => ({
+    season: g.no,
+    seasonTitle: g.title,
+    no: num(ep?.no),
+    ep,
+    indexInSeason: i + 1,
+    seasonSize: g.episodes.length,
+    finalized: isFinalized(ep),
+    stagesDone: episodeStagesDone(ep).done,
+  })));
+}
+
+/** 当前制作位：第一个未定稿的集（首次 = 第一季第一集；全部定稿 = 最后一集） */
+export function defaultEpisode(project) {
+  const q = episodeQueue(project);
+  if (!q.length) return null;
+  return q.find((x) => !x.finalized) || q[q.length - 1];
+}
+
+/** 定稿后的下一集：只往后找未定稿的，天然跨季；后面没有则返回 null */
+export function nextPendingEpisode(project, currentNo) {
+  const q = episodeQueue(project);
+  const i = q.findIndex((x) => num(x.no) === num(currentNo));
+  if (i < 0) return defaultEpisode(project);
+  return q.slice(i + 1).find((x) => !x.finalized) || null;
+}
+
+/** 队列里相邻的一集（上一集 / 下一集用，跨季也连续） */
+export function adjacentEpisode(project, currentNo, delta = 1) {
+  const q = episodeQueue(project);
+  const i = q.findIndex((x) => num(x.no) === num(currentNo));
+  if (i < 0) return null;
+  return q[i + delta] || null;
+}
+
+/** 每季定稿进度：第 1 季 3/12 集已定稿 */
+export function seasonFinalProgress(project) {
+  return seasonGroups(project).map((g) => {
+    const finalized = g.episodes.filter(isFinalized).length;
+    return {
+      no: g.no, title: g.title, total: g.episodes.length, finalized,
+      allDone: g.episodes.length > 0 && finalized === g.episodes.length,
+    };
+  });
+}
+
+/** 能否定稿本集：四段全完成且尚未定稿 */
+export function canFinalizeEpisode(ep) {
+  return !isFinalized(ep) && episodeStagesDone(ep).done;
+}
+
+/** 单集的制作阶段：剧本 → 分镜 → 视频，任一环节缺失即未完成 */
+export function episodeProduction(ep) {
+  const segs = Array.isArray(ep?.segments) ? ep.segments : [];
+  const script = ep?.script || null;
+  const grids = segs.filter((s) => Boolean(s?.gridUrl)).length;
+  const scenes = num(script?.stats?.sceneCount, Array.isArray(script?.scenes) ? script.scenes.length : 0);
+  const lines = num(script?.stats?.lineCount, 0);
+  const chars = num(script?.stats?.chars, 0);
+  const stages = [
+    { key: 'script', label: '剧本', done: Boolean(script) },
+    { key: 'grid', label: '分镜', done: segs.length > 0 && grids === segs.length, partial: grids > 0 && grids < segs.length },
+    { key: 'video', label: '视频', done: Boolean(ep?.video) },
+  ];
+  return {
+    script: Boolean(script), scenes, lines, chars,
+    source: script?.source || '',
+    grids, segments: segs.length,
+    video: Boolean(ep?.video), pack: Boolean(ep?.pack),
+    percent: Math.round(stages.filter((s) => s.done).length / stages.length * 100),
+    stages,
+  };
+}
+
+/** 剧本覆盖率：工作台 ④ 剧本创作与分季分集的统计条共用 */
+export function scriptCoverage(episodes = []) {
+  const list = Array.isArray(episodes) ? episodes : [];
+  const written = list.filter((e) => e?.script);
+  const scenes = written.reduce((n, e) => n + num(e.script?.stats?.sceneCount, (e.script?.scenes || []).length), 0);
+  const chars = written.reduce((n, e) => n + num(e.script?.stats?.chars, 0), 0);
+  const bySource = { llm: 0, mock: 0, manual: 0 };
+  for (const e of written) if (bySource[e.script?.source] !== undefined) bySource[e.script.source] += 1;
+  return {
+    total: list.length, written: written.length, missing: list.length - written.length,
+    percent: list.length ? Math.round(written.length / list.length * 100) : 0,
+    scenes, chars, bySource,
+    missingNos: list.filter((e) => !e?.script).map((e) => num(e?.no)),
+  };
+}
+
+export const EPISODE_FILTERS = [
+  { id: 'all', label: '全部' },
+  { id: 'script', label: '已写剧本' },
+  { id: 'noscript', label: '待写剧本' },
+  { id: 'grid', label: '已出分镜' },
+  { id: 'video', label: '已出视频' },
+];
+
+/** 按关键词 + 制作状态筛选按季分组（空季在筛选时隐藏，全量时保留以便移集） */
+export function filterSeasonGroups(groups = [], { query = '', status = 'all' } = {}) {
+  const q = String(query || '').trim().toLowerCase();
+  const hit = (ep) => {
+    const prod = episodeProduction(ep);
+    if (status === 'script' && !prod.script) return false;
+    if (status === 'noscript' && prod.script) return false;
+    if (status === 'grid' && !prod.grids) return false;
+    if (status === 'video' && !prod.video) return false;
+    if (!q) return true;
+    const hay = [
+      ep?.no, ep?.title, ep?.summary, ep?.hook,
+      ...(Array.isArray(ep?.chapters) ? ep.chapters.map((c) => c?.title) : []),
+      ...(Array.isArray(ep?.sourceTitles) ? ep.sourceTitles : []),
+    ].join(' ').toLowerCase();
+    return hay.includes(q);
+  };
+  const filtering = Boolean(q) || status !== 'all';
+  return (Array.isArray(groups) ? groups : []).map((g) => ({
+    ...g,
+    episodes: (g.episodes || []).filter(hit),
+  })).filter((g) => (filtering ? g.episodes.length > 0 : true));
+}
+
+/** 画布范围键：overall（全部组合） / main（项目主画布） / ep:<no>（单集画布） */export function scopeKeyOf(kind, no = 0) {
   if (kind === 'episode') return `ep:${num(no, 0)}`;
   return kind === 'main' ? 'main' : 'overall';
 }

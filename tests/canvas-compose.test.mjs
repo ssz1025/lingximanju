@@ -10,6 +10,8 @@ import {
   composeOverallCanvas,
   canvasScopeLabel,
   canvasScopeOptions,
+  syncEpisodeCanvasResources,
+  syncMainCanvasCharacterAssets,
 } from '../public/canvas-compose.js';
 import { scopeKeyOf, parseScopeKey } from '../public/project-model.js';
 
@@ -299,4 +301,110 @@ test('6. 纯函数不可变：调用全部函数前后 JSON.stringify(project) �
   const bigBefore = JSON.stringify(big);
   composeOverallCanvas(big);
   assert.equal(JSON.stringify(big), bigBefore);
+});
+
+/* ------------------------------------------------------------------------
+ * 7-9. syncEpisodeCanvasResources：新分镜板 / 角色定妆图同步进画布
+ * ----------------------------------------------------------------------*/
+
+function portraitProject() {
+  const project = makeProject();
+  const m = project.management;
+  m.characters = [
+    { id: 'c1', name: '林澈', role: '主角', aliases: ['阿澈'], views: { front: { url: '/assets/char_c1_front.png' } } },
+    { id: 'c2', name: '苏眉', role: '配角', aliases: [], views: { side: { url: '/assets/char_c2_side.png' } } },
+    { id: 'c9', name: '路人甲', role: '龙套', aliases: [], views: {} },
+  ];
+  return project;
+}
+
+test('7. syncEpisodeCanvasResources：播种画布自动补齐分镜板节点与连线，幂等且不写入 ep.canvas', () => {
+  const project = portraitProject();
+  const before = JSON.stringify(project);
+  const first = syncEpisodeCanvasResources(project, 2);
+  assert.equal(first.changed, true, '首次播种 / 同步 changed=true');
+
+  const { canvas } = first;
+  // ep2 的第 1 段有 gridUrl → 自动补 keyframe 节点 + 段→分镜板 flow 边
+  const grid = canvas.nodes.find((n) => n.id === 'ep_2_grid_1');
+  assert.ok(grid, '分镜板节点已补进画布');
+  assert.equal(grid.type, 'keyframe');
+  assert.equal(grid.data.url, '/assets/grid_2.png');
+  assert.equal(grid.status, 'done');
+  const gridEdge = canvas.edges.find((e) => e.id === 'ep_2_e_seggrid_1');
+  assert.ok(gridEdge && gridEdge.from === 'ep_2_seg_1' && gridEdge.to === 'ep_2_grid_1', '段 → 分镜板自动连线');
+  assert.ok(noDangling(canvas), '同步后无悬空边');
+  for (const n of canvas.nodes) {
+    assert.equal(n.meta.scope, 'episode');
+    assert.deepEqual(n.data.scopeRef, { kind: 'episode', no: 2 });
+  }
+
+  // 幂等：app.js 会把 synced.canvas 写回 ep.canvas 并落盘，之后再同步应无变化
+  assert.equal(JSON.stringify(project), before, '纯函数：首次同步不写回 project / ep.canvas');
+  project.management.episodes[1].canvas = first.canvas;   // 模拟调用方写回
+  const second = syncEpisodeCanvasResources(project, 2);
+  assert.equal(second.changed, false, '与已持久化画布一致时 changed=false');
+  assert.deepEqual(second.canvas, first.canvas, '两次结果 deepEqual');
+});
+
+test('8. 角色定妆图同步：characterIds 精确关联 → 角色节点 + ref 连线 + 资产节点缩略图；取消关联后清理', () => {
+  const project = portraitProject();
+  // ep2 用 seed 画布（带资产节点）：给 ep2 精确关联 c1/c2；c1 有正面定妆图，c2 只有侧面，c9 未关联不出现
+  project.management.episodes[1].characterIds = ['c1', 'c2'];
+  const { canvas } = syncEpisodeCanvasResources(project, 2);
+
+  const chr1 = canvas.nodes.find((n) => n.id === 'ep_2_chr_c1');
+  const chr2 = canvas.nodes.find((n) => n.id === 'ep_2_chr_c2');
+  assert.ok(chr1 && chr1.type === 'character' && chr1.data.url === '/assets/char_c1_front.png', 'c1 定妆图节点');
+  assert.ok(chr2 && chr2.data.url === '/assets/char_c2_side.png', 'c2 无正面图时回退任一视图');
+  assert.ok(!canvas.nodes.some((n) => String(n.id).startsWith('ep_2_chr_c9')), '未关联角色不生成节点');
+
+  const edge1 = canvas.edges.find((e) => e.id === 'ep_2_e_charasset_c1');
+  assert.ok(edge1 && edge1.kind === 'ref' && edge1.to === 'ep_2_chr_c1', '资产 → 角色 ref 连线');
+  assert.ok(noDangling(canvas), '无悬空边');
+
+  const asset = canvas.nodes.find((n) => n.id === 'ep_2_character');
+  assert.ok(asset, '角色资产节点存在');
+  assert.equal(asset.data.count, 2);
+  assert.deepEqual(asset.data.characters.map((c) => c.name), ['林澈', '苏眉']);
+  assert.equal(asset.data.characters[0].portraitUrl, '/assets/char_c1_front.png');
+  assert.equal(asset.status, 'done', '有定妆图后资产节点点亮');
+
+  // 取消关联后：chr 节点与连线被清理，无悬空边
+  project.management.episodes[1].characterIds = ['c2'];
+  const after = syncEpisodeCanvasResources(project, 2);
+  assert.ok(!after.canvas.nodes.some((n) => n.id === 'ep_2_chr_c1'), '取消关联的角色节点已清理');
+  assert.ok(!after.canvas.edges.some((e) => e.id === 'ep_2_e_charasset_c1'), '对应连线已清理');
+  assert.ok(noDangling(after.canvas));
+});
+
+test('9. 重切分段后清理多余节点；主画布角色资产节点同步缩略图；组合总览实时包含新资源', () => {
+  const project = portraitProject();
+  // ep1 手搭画布没有分段节点：首次同步补出 2 段 + 第 1 段的分镜板
+  const first = syncEpisodeCanvasResources(project, 1).canvas;
+  assert.ok(first.nodes.some((n) => n.id === 'ep_1_seg_2'), '同步补齐缺失的分段节点');
+  assert.ok(first.nodes.some((n) => n.id === 'ep_1_grid_1'), '同步补齐分镜板节点');
+  // 重切成 1 段且撤掉分镜图 → seg_2 / grid_1 应被清理
+  project.management.episodes[0].segments = [{ no: 1, title: '重切后唯一段', chars: 300, cells: 5 }];
+  const resync = syncEpisodeCanvasResources(project, 1);
+  assert.ok(!resync.canvas.nodes.some((n) => ['ep_1_seg_2', 'ep_1_grid_1'].includes(n.id)), '失效自动节点被清理');
+  assert.ok(noDangling(resync.canvas));
+
+  // 主画布：character 类型节点同步 data.characters（缩略图由 nodes.js 渲染）
+  project.nodes = [{
+    id: 'main_char', type: 'character', agent: 'character', title: '角色资产库',
+    x: 700, y: 400, w: 268, status: 'idle', progress: 0, error: '', data: {}, meta: {},
+  }];
+  assert.equal(syncMainCanvasCharacterAssets(project), true, '首次同步有变化');
+  const mainChar = project.nodes[0];
+  assert.equal(mainChar.data.count, 3);
+  assert.equal(mainChar.data.characters.length, 3);
+  assert.equal(mainChar.status, 'done');
+  assert.equal(syncMainCanvasCharacterAssets(project), false, '重复调用无变化');
+
+  // 组合总览：实时反映最新资源（重切后的 ep1 不再出现旧分镜板，角色定妆图节点在列）
+  const overall = composeOverallCanvas(project);
+  assert.ok(!overall.nodes.some((n) => n.id === 'cp_1_ep_1_grid_1'), '组合总览不含已失效的分镜板节点');
+  assert.ok(overall.nodes.some((n) => n.id === 'cp_1_ep_1_chr_c1'), '组合总览包含角色定妆图节点');
+  assert.ok(noDangling(overall));
 });

@@ -7,13 +7,18 @@
 import { createZip } from './zip.mjs';
 import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { storyboardGridSVG, gridShotList } from './grid-art.mjs';
+import { resolveStoryboardSettings, describeStoryboardSettings, cellsOf, layoutOf } from './storyboard-settings.mjs';
 import { readAsset, writeAsset, writeAssetBinary, uid } from './store.mjs';
 import { createProviders } from './providers.mjs';
 import { effectiveProjectSettings, resolveModelSettings } from './app-settings.mjs';
 import { resolveRuntimeSpec } from './runtime-spec.mjs';
 import { parseWorkflow } from './comfyui.mjs';
+import { hasWorkflowFor, resolveInterface } from './comfy-config.mjs';
 import { splitSegments, matchEpisodeCharacters, reconstructEpisodeText } from './episode-model.mjs';
 import { resolveCharacterRefs, refsManifest, describeRefs } from './character-refs.mjs';
+import { resolveFrameVisualPack, buildFramePrompts, blockingSVG } from './shot-visuals.mjs';
+import { buildScriptVars, normalizeEpisodeScript, mergeScriptEdit } from './episode-script.mjs';
+import { isRealImage, allowMockArtifacts } from './keyframe-status.mjs';
 
 const cut = (s, n) => { const t = String(s ?? '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const dateTag = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -31,16 +36,9 @@ export async function generateEpisodeScript(project, m, ep, opts = {}) {
   ensureEpisodeBody(project, ep);
   const log = opts.log || (() => {});
   const providers = createProviders(resolveModelSettings(project, opts.modelId), log);
-  const chars = (m.characters || []).filter((c) => (ep.characterIds || []).includes(c.id));
-  const vars = {
-    title: `${m.bible?.title || project.name} · 第 ${ep.no} 集`,
-    episodeNo: ep.no, episodeTitle: ep.title,
-    logline: ep.summary || m.bible?.logline || '',
-    hook: ep.hook || '', genre: m.bible?.genre || '', style: project.settings?.style || 'cinematic',
-    originalText: cut(ep.text, 4000),
-    characters: chars.map((c) => ({ name: c.name, role: c.role, appearance: c.appearance })),
-    chapters: (ep.chapters || []).map((c) => c.title),
-  };
+  // 上下文里带上一集结尾、本集钩子、下一集走向与时长预算：
+  // 单集独立生成最容易出现「每集都像第一集」，这些字段让编剧智能体知道自己在整部剧的哪一格。
+  const vars = buildScriptVars(project, m, ep, opts);
   let out;
   try {
     out = await providers.generate('screenplay', vars);
@@ -48,104 +46,271 @@ export async function generateEpisodeScript(project, m, ep, opts = {}) {
     throw new Error(`剧本生成失败：${err.message}`);
   }
   const source = providers.mode === 'openai' && !out?.__fallback ? 'llm' : 'mock';
-  const script = {
-    episodeNo: ep.no,
-    title: String(out?.title || vars.title).slice(0, 120),
-    genre: String(out?.genre || vars.genre || '剧情').slice(0, 60),
-    logline: String(out?.logline || vars.logline).slice(0, 300),
-    style: String(out?.style || vars.style),
-    characters: Array.isArray(out?.characters) ? out.characters.slice(0, 12) : chars.map((c) => ({ name: c.name, role: c.role, appearance: c.appearance })),
-    scenes: (Array.isArray(out?.scenes) ? out.scenes : []).slice(0, 20).map((s, i) => ({
-      id: s.id || `S${i + 1}`, location: s.location || '', time: s.time || '',
-      summary: s.summary || '', script: Array.isArray(s.script) ? s.script.map(String) : [],
-    })),
-    source, provider: providers.mode, generatedAt: Date.now(),
-  };
-  // Mock 兜底时补一场以本集原文为依据的开场，保证「剧本」与本集内容一致而非通用模板
-  if (source === 'mock' && !script.scenes.length) {
-    script.scenes = [{
-      id: 'S1', location: (ep.chapters || [])[0]?.title || '本集开场', time: '未指定',
-      summary: cut(ep.summary, 120), script: ep.text.split(/\n+/).filter(Boolean).slice(0, 8).map((t) => cut(t, 160)),
-    }];
-  }
+  const script = normalizeEpisodeScript(out, { project, m, ep, vars, source, provider: providers.mode });
+  ep.script = script;
+  ep.updatedAt = Date.now();
+  return script;
+}
+
+/** 人工编辑保存：只覆盖可编辑字段，来源标记 manual，统计与质量告警重算 */
+export function saveEpisodeScript(project, m, ep, patch = {}) {
+  const script = mergeScriptEdit(ep.script, patch, { ep, m });
   ep.script = script;
   ep.updatedAt = Date.now();
   return script;
 }
 
 /* ------------------------------ 每段宫格图 ------------------------------ */
+/** 把段落格子补齐 / 裁剪到当前版式的格子数：换版式不丢已有说明，只增删槽位 */
+function fitCells(seg, count) {
+  const prev = Array.isArray(seg.cells) ? seg.cells : [];
+  return Array.from({ length: count }, (_, i) => (prev[i]
+    ? { ...prev[i], no: i + 1 }
+    : { no: i + 1, caption: `格 ${i + 1}`, prompt: '', url: '' }));
+}
+
 /**
- * 为一段生成 3×3 宫格图。
- * opts.keyframes：可传入真实关键帧 URL 数组，按顺序填进 9 个格子。
- * opts.mode='comfy' 时尝试用 ComfyUI 出图填满 9 格（慢，按需单段调用）。
+ * 把真实分镜帧按段序填进格子：格子不只是「一张图」，还要带上这一镜的
+ * 景别 / 机位 / 运动 / 时长 / 动作，分镜板才读得懂（行业标注惯例）。
+ * offset 让每段从关键帧池的不同位置开始取样，避免每段宫格图都是同样前 N 镜。
+ */
+function applyFrames(cells, frames, offset) {
+  if (!Array.isArray(frames) || !frames.length) return cells;
+  cells.forEach((c, i) => {
+    const f = frames[(((offset + i) % frames.length) + frames.length) % frames.length];
+    if (!f) return;
+    c.url = f.url;
+    c.shotNo = f.shotNo ?? c.shotNo ?? null;
+    c.size = f.size || c.size || '';
+    c.angle = f.angle || c.angle || '';
+    c.movement = f.movement || c.movement || '';
+    c.spec = f.spec || [f.size, f.angle, f.movement].filter(Boolean).join(' · ');
+    c.action = f.action || c.caption || '';
+    c.duration = f.duration || c.duration || null;
+    c.prompt = f.prompt || c.prompt || '';
+    c.characters = f.characters || c.characters || [];
+  });
+  return cells;
+}
+
+/**
+ * 为每一格补齐「视觉物料包」：站位图（新生成）、角色参考清单（多视图 / 妆照 /
+ * 槽位用途）与精确提示词（首帧出图 + 图生视频）。宫格视图在分镜板 SVG 落盘后回填。
+ * 纯确定性 SVG + 参考图解析，不烧 GPU；重排分镜板时每格都会重算一次。
+ */
+function attachCellVisuals({ project, cells, settings, style, segmentLabel }) {
+  let blockings = 0;
+  let promptsReady = 0;
+  let refCount = 0;
+  for (const c of cells) {
+    const shot = {
+      shotNo: c.shotNo, sequence: c.shotNo ?? c.no, size: c.size || '',
+      angle: c.angle || '', movement: c.movement || '',
+      characters: c.characters || [], ffDesc: c.action || c.caption || '',
+      motionDesc: c.action || c.caption || '', duration: c.duration || null,
+    };
+    const visual = resolveFrameVisualPack(project, shot);
+    const prompts = buildFramePrompts({ shot, visual, settings, style, duration: shot.duration });
+    const svg = blockingSVG({
+      label: `第 ${c.no}/${cells.length} 格`, shot,
+      characters: visual.characters, aspect: settings.resolvedAspect, style,
+      seed: `${segmentLabel}-${c.no}`,
+    });
+    c.blockingFile = `${uid('blocking')}.svg`;
+    c.blockingUrl = writeAsset(c.blockingFile, svg);
+    c.imagePrompt = prompts.imagePrompt;
+    c.videoPrompt = prompts.videoPrompt;
+    c.visual = {
+      characters: visual.characters.map((ch) => ({
+        name: ch.name, role: ch.role, missing: ch.missing,
+        views: ch.refs.map((r) => ({ view: r.view, label: r.label, url: r.url })),
+        sheet: ch.sheet?.url || null,
+      })),
+      slots: prompts.refSlots.map((s) => ({ slot: s.slot, label: s.label, url: s.url, usage: s.usage })),
+      refNote: prompts.refNote,
+      notes: visual.notes || [],
+    };
+    blockings += 1;
+    if (c.videoPrompt) promptsReady += 1;
+    refCount += visual.stats.total;
+  }
+  return { blockings, promptsReady, refCount };
+}
+
+/**
+ * 为一段生成分镜板（版式由分镜画面设置决定，默认九宫格）。
+ * opts.frames：真实分镜帧 [{url, shotNo, size, angle, movement, action, prompt}]，按顺序填格。
+ * opts.keyframes：只给 URL 数组时的兼容入口。
+ * opts.offset：从帧池第几张开始取（多段时由 generateEpisodeGrids 顺移）。
+ * opts.mode='comfy' 时尝试用 ComfyUI 出图填满缺图的格子（慢，按需单段调用）。
  */
 export async function generateSegmentGrid(project, m, ep, segmentNo, opts = {}) {
   ensureEpisodeBody(project, ep);
   const seg = (ep.segments || []).find((s) => Number(s.no) === Number(segmentNo));
   if (!seg) throw new Error(`第 ${segmentNo} 段不存在`);
   const style = project.settings?.style || 'cinematic';
-  const cells = Array.from({ length: 9 }, (_, i) => ({ ...(seg.cells?.[i] || { no: i + 1, caption: `镜头 ${i + 1}` }) }));
-
-  if (Array.isArray(opts.keyframes) && opts.keyframes.length) {
-    const urls = opts.keyframes.filter(Boolean);
-    cells.forEach((c, i) => { if (urls[i % urls.length]) c.url = urls[i % urls.length]; });
-  } else if (opts.mode === 'comfy') {
+  const settings = opts.settings || resolveStoryboardSettings(project);
+  const layout = layoutOf(settings);
+  const count = cellsOf(settings);
+  const cells = fitCells(seg, count);
+  const frames = Array.isArray(opts.frames) && opts.frames.length
+    ? opts.frames
+    : (Array.isArray(opts.keyframes) ? opts.keyframes.filter(Boolean).map((url) => ({ url })) : []);
+  applyFrames(cells, frames, Number(opts.offset) || 0);
+  // 只画示意：不引用真实图（改版式时快速预览用）
+  if (settings.source === 'schematic') cells.forEach((c) => { c.url = ''; });
+  if (opts.mode === 'comfy') {
     const cfg = opts.cfg || {};
     const providers = createProviders({
       ...effectiveProjectSettings(project),
       comfy: { ...cfg, enabled: true, outputMode: 'both' },
     }, opts.log || (() => {}));
-    for (let i = 0; i < 9; i += 1) {
+    for (let i = 0; i < count; i += 1) {
+      if (cells[i].url) continue;                     // 已有真实图不重复烧 GPU
       try {
         const img = await providers.image({
           kind: 'keyframe', label: `${ep.title} · ${seg.title} · 格 ${i + 1}`,
+          interfaceId: String(cfg.requestInterfaceId || ''),
           prompt: cells[i].prompt || cells[i].caption,
           style, shotNo: i + 1, seed: `${project.id}-ep${ep.no}-seg${seg.no}-${i}`,
         });
         cells[i].url = img.url;
       } catch (err) {
-        // 单格失败不阻断整张宫格图：其余格子仍可用占位渲染
+        // 单格失败不阻断整张分镜板：其余格子仍可用占位渲染
         if (opts.log) opts.log('warn', `宫格 ${i + 1} 出图失败：${err.message}`);
       }
     }
   }
 
+  // 每格视觉物料：站位图（新生成）+ 角色参考清单（多视图 / 妆照）+ 精确提示词。
+  // 宫格视图（本段分镜板）在下方 SVG 落盘后回填到每格 cell.gridUrl。
+  const visuals = attachCellVisuals({ project, cells, settings, style, segmentLabel: `ep${ep.no}-seg${seg.no}` });
+
   const svg = storyboardGridSVG({
-    title: `第 ${ep.no} 集 · 第 ${seg.no} 段宫格图`,
+    title: `第 ${ep.no} 集 · 第 ${seg.no} 段分镜板`,
     subtitle: `${ep.title}｜${seg.chars} 字 · ${(ep.chapters || []).map((c) => c.title).join(' / ') || '原著拆分'}`,
     cells, style, seed: `${project.id}-ep${ep.no}-seg${seg.no}`,
+    settings,
+    aspect: settings.resolvedAspect || (settings.aspect !== 'inherit' ? settings.aspect : undefined),
   });
   const file = `${uid('grid')}.svg`;
   const url = writeAsset(file, svg);
+  // 宫格视图回填到每格：分镜画面的「图片证据」之一，下游（导演包 / 视频提示词）按格引用
+  cells.forEach((c) => { c.gridUrl = url; });
   seg.cells = cells;
   seg.gridUrl = url;
   seg.gridFile = file;
+  seg.gridLayout = settings.layout;
+  seg.gridCells = count;
   seg.status = 'done';
   seg.updatedAt = Date.now();
   ep.updatedAt = Date.now();
-  return { segment: seg, gridUrl: url, gridFile: file, realFrames: cells.filter((c) => c.url).length };
+  return {
+    segment: seg, gridUrl: url, gridFile: file,
+    realFrames: cells.filter((c) => c.url).length, cells: count, layout: layout.id,
+    visuals,
+  };
 }
 
-/** 一次生成本集所有段落的宫格图；从项目画布抽取已有关键帧按序复用 */
-export function collectProjectKeyframes(project) {
+/**
+ * 从画布抽取真实分镜帧（图片 + 镜头规格）。
+ * 宫格图是「画面已定版」的汇总物料：mock 自绘 SVG 占位不能混进去冒充成果
+ * （真实口径与第⑤步验收一致；离线测试夹具的项目例外，见 allowMockArtifacts）。
+ */
+export function collectProjectFrames(project) {
   const out = [];
+  const seen = new Map();      // url → index，review 与 keyframe 常常同图，后到的规格更全
+  const allowMock = allowMockArtifacts(project);
   for (const n of (project.nodes || [])) {
-    if (['review', 'keyframe', 'shot', 'transition'].includes(n.type)) {
-      const u = n.data?.keyframeUrl || n.data?.poster || n.data?.candidates?.[0]?.url || n.data?.transition?.url;
-      if (u) out.push(u);
+    if (!['review', 'keyframe', 'shot', 'transition'].includes(n.type)) continue;
+    const u = n.data?.keyframeUrl || n.data?.poster || n.data?.candidates?.[0]?.url || n.data?.transition?.url;
+    if (!u) continue;
+    const chosen = (n.data?.candidates || []).find((c) => c?.url === u) || n.data?.candidates?.[0] || null;
+    const provider = chosen?.provider || '';
+    if (!isRealImage({ url: u, provider }, { allowMock })) continue;
+    const shot = n.data?.shot || {};
+    const frame = {
+      url: u,
+      shotNo: shot.shotNo ?? null,
+      size: shot.size || '',
+      angle: shot.angle || '',
+      movement: shot.movement || '',
+      duration: shot.duration || null,
+      action: shot.ffDesc || n.data?.summary || '',
+      prompt: chosen?.prompt || shot.ffDesc || '',
+      characters: shot.characters || [],
+    };
+    if (seen.has(u)) {
+      const idx = seen.get(u);
+      out[idx] = { ...out[idx], ...frame, spec: [frame.size, frame.angle, frame.movement].filter(Boolean).join(' · ') };
+      continue;
     }
+    seen.set(u, out.length);
+    out.push({ ...frame, spec: [frame.size, frame.angle, frame.movement].filter(Boolean).join(' · ') });
   }
-  return out;
+  // 按镜头序号排序：宫格板要按剧情顺序读，而不是按节点创建顺序
+  return out.sort((a, b) => {
+    const sa = Number(a.shotNo);
+    const sb = Number(b.shotNo);
+    if (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb) return sa - sb;
+    return 0;
+  });
+}
+
+/** 只要 URL 的旧入口（导演包 / 兼容调用） */
+export function collectProjectKeyframes(project) {
+  return collectProjectFrames(project).map((f) => f.url);
 }
 
 export async function generateEpisodeGrids(project, m, ep, opts = {}) {
   ensureEpisodeBody(project, ep);
-  const keyframes = opts.keyframes || collectProjectKeyframes(project);
+  const settings = opts.settings || resolveStoryboardSettings(project);
+  const frames = opts.frames || collectProjectFrames(project);
+  const count = cellsOf(settings);
   const results = [];
-  for (const seg of ep.segments) {
-    results.push(await generateSegmentGrid(project, m, ep, seg.no, { keyframes, cfg: opts.cfg, log: opts.log }));
+  const visuals = { blockings: 0, promptsReady: 0, refCount: 0 };
+  // 每段 N 格：按段序在帧池里顺移取样，避免「每段宫格图都是同样前 N 镜」（N 由版式决定）
+  const segs = ep.segments || [];
+  for (let i = 0; i < segs.length; i += 1) {
+    const seg = segs[i];
+    const r = await generateSegmentGrid(project, m, ep, seg.no, {
+      frames, offset: i * count, settings, cfg: opts.cfg, log: opts.log,
+      mode: opts.mode,
+    });
+    for (const k of Object.keys(visuals)) visuals[k] += r.visuals?.[k] || 0;
+    results.push(r);
   }
-  return { segments: ep.segments, generated: results.length, keyframeCount: keyframes.length };
+  return {
+    segments: ep.segments, generated: results.length,
+    keyframeCount: frames.length, cells: count, layout: settings.layout,
+    visuals,
+  };
+}
+
+/**
+ * 全项目按当前画面设置重排分镜板（纯 SVG 合成，不动关键帧、不烧 GPU）。
+ * 保存版式 / 画幅 / 说明条设置后由业务智能体调用；步骤收尾也走这里。
+ */
+export async function regenerateProjectGrids(project, m, opts = {}) {
+  const settings = opts.settings || resolveStoryboardSettings(project);
+  const frames = opts.frames || collectProjectFrames(project);
+  const out = {
+    settings, frameCount: frames.length, grids: 0, episodes: 0, segments: 0,
+    cells: cellsOf(settings), layout: settings.layout, description: describeStoryboardSettings(settings),
+    visuals: { blockings: 0, promptsReady: 0, refCount: 0 },
+  };
+  for (const ep of (m?.episodes || [])) {
+    try {
+      const r = await generateEpisodeGrids(project, m, ep, { settings, frames, cfg: opts.cfg, log: opts.log });
+      out.grids += r.generated || 0;
+      out.segments += (ep.segments || []).length;
+      out.episodes += 1;
+      for (const k of Object.keys(out.visuals)) out.visuals[k] += r.visuals?.[k] || 0;
+    } catch (err) {
+      if (opts.log) opts.log('warn', `第 ${ep.no} 集分镜板生成失败：${err.message}`);
+    }
+  }
+  return out;
 }
 
 /* ------------------------------ 单集导演包 ------------------------------ */
@@ -183,23 +348,46 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
   const width = Number(cfg.width) || 864;
   const height = Number(cfg.height) || 480;
   const fps = Number(cfg.fps) || 24;
+  // 分镜板版式随包交接：下游按同一套格子数理解 shotCount 与 grids/*.svg
+  const sheet = resolveStoryboardSettings(project);
+  const cellsPerSeg = cellsOf(sheet);
+  const sheetLayout = layoutOf(sheet);
 
   const groups = (ep.segments || []).map((seg, i) => {
     const groupNo = String(i + 1).padStart(2, '0');
     const shots = gridShotList(seg, no);
     const firstUrl = seg.cells?.find((c) => c.url)?.url || null;
     put(`asset_groups/${groupNo}/start.png`, imageEntry(firstUrl, { style, shotNo: i + 1, kind: 'episode-start' }));
+    // 每格站位图入包：下游不用回源服务也能看到「谁站在哪、机位在哪」
+    const blockingFiles = [];
+    for (const c of (seg.cells || [])) {
+      if (!c.blockingFile) continue;
+      const buf = readAsset(c.blockingFile);
+      if (buf) {
+        const name = `blocking/segment_${groupNo}_cell_${String(c.no || blockingFiles.length + 1).padStart(2, '0')}.svg`;
+        put(name, buf);
+        blockingFiles.push({ cellNo: c.no || blockingFiles.length + 1, file: name });
+      }
+    }
+    // 组提示词优先用第⑤步生成的精确图生视频提示词；老项目退回段落摘要
+    const promptCell = (seg.cells || []).find((c) => c.videoPrompt);
     putJSON(`asset_groups/${groupNo}/group.json`, {
       group: i + 1, episodeNo: no, segmentNo: seg.no, title: seg.title,
       start_frame: 'start.png', shotCount: shots.length, shots,
-      prompt: `第 ${no} 集 · ${seg.title}｜${cut(seg.text, 120)}`,
+      storyboard: {
+        layout: sheetLayout.id, cols: sheetLayout.cols, rows: sheetLayout.rows,
+        cells: cellsPerSeg, aspect: sheet.resolvedAspect,
+      },
+      grid: seg.gridFile ? `grids/segment_${groupNo}.svg` : null,
+      blocking: blockingFiles,
+      prompt: promptCell?.videoPrompt || `第 ${no} 集 · ${seg.title}｜${cut(seg.text, 120)}`,
       negative_prompt: neg, width, height, fps,
     });
     if (seg.gridFile) {
       const buf = readAsset(seg.gridFile);
       if (buf) put(`grids/segment_${groupNo}.svg`, buf);
     }
-    return { group: i + 1, segmentNo: seg.no, title: seg.title, shotCount: shots.length };
+    return { group: i + 1, segmentNo: seg.no, title: seg.title, shotCount: shots.length, blockingCount: blockingFiles.length };
   });
 
   // 公共参考图：本集出场角色的多视图定妆（MiniMax H3 导演台 Picture1..3 槽位）
@@ -281,6 +469,11 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
     title: `${m.bible?.title || project.name} · 第 ${no} 集`,
     episodeNo: no, episodeTitle: ep.title,
     scope: 'episode', source: 'lingximanju',
+    storyboard: {
+      layout: sheetLayout.id, cols: sheetLayout.cols, rows: sheetLayout.rows,
+      cellsPerSegment: cellsPerSeg, aspect: sheet.resolvedAspect,
+      description: describeStoryboardSettings(sheet),
+    },
     createdAt: Date.now(), groups: groups.length,
   });
   // 单集导演包时间线与项目成片规格同源，不再写死 5s / start = i*5
@@ -306,15 +499,18 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
     })),
     characterRefs: shared.reduce((n, c) => n + (c.viewFiles?.length || 0), 0),
     segmentCount: (ep.segments || []).length, gridCount: (ep.segments || []).filter((s) => s.gridUrl).length,
+    storyboardLayout: sheetLayout.id, cellsPerSegment: cellsPerSeg,
     hasScript: Boolean(ep.script), hasVideo: Boolean(ep.video),
     note: '本包只包含第 ' + no + ' 集内容；整项目导演包请用顶栏「▤ 导演包」。',
     generatedAt: Date.now(),
   });
   put('extra/README.md', [
     `# 第 ${no} 集导演包`, '',
-    `- 项目：${project.name}`, `- 本集：${ep.title}`, `- 段落 / 宫格图：${(ep.segments || []).length} 组`,
+    `- 项目：${project.name}`, `- 本集：${ep.title}`, `- 段落 / 分镜板：${(ep.segments || []).length} 组`,
+    `- 分镜版式：${describeStoryboardSettings(sheet)}`,
+    `- 每格物料：站位图入 blocking/（每格一张）；shots 里带首帧提示词 imagePrompt 与图生视频提示词 videoPrompt`,
     `- 出场角色：${shared.map((c) => c.name).join('、') || '未关联'}`, '',
-    'asset_groups/NN/group.json 为每段 9 格分镜；grids/ 是可直接查看的 3×3 宫格图；',
+    `asset_groups/NN/group.json 为每段 ${cellsPerSeg} 格分镜；grids/ 是可直接查看的 ${sheetLayout.cols}×${sheetLayout.rows} 分镜板；`,
     'extra/episode.txt 是本集拆分的原始内容，extra/script.json 是本集剧本。',
     '在 ComfyUI 导演工作台用「Import pack」导入 pack.json 即可还原时间线。', '',
   ].join('\n'));
@@ -324,9 +520,10 @@ export function buildEpisodePack(project, m, ep, cfg = {}) {
   return {
     filename, buffer,
     meta: {
-      episodeNo: no, shotCount: (ep.segments || []).length * 9,
+      episodeNo: no, shotCount: (ep.segments || []).length * cellsPerSeg,
       fileCount: entries.length, groups, bytes: buffer.length,
       target: 'minimax-h3', scope: 'episode',
+      storyboard: { layout: sheetLayout.id, cellsPerSegment: cellsPerSeg, aspect: sheet.resolvedAspect },
     },
   };
 }
@@ -346,13 +543,18 @@ export function exportEpisodePack(project, m, ep, cfg = {}) {
 export async function generateEpisodeVideo(project, m, ep, cfg = {}, opts = {}) {
   ensureEpisodeBody(project, ep);
   if (!cfg.enabled) throw new Error('本地 ComfyUI 未启用：设置 → 本地 ComfyUI 勾选「启用」');
-  if (!cfg.videoWorkflow) throw new Error('尚未导入视频工作流：设置 → 本地 ComfyUI → 导入视频工作流 JSON（导出 API 格式）');
-  try { parseWorkflow(cfg.videoWorkflow, '视频工作流'); }
+  // 板块绑定优先：校验真正会被执行的那一份工作流，而不是只看全局镜像
+  const videoWf = resolveInterface(cfg, { kind: 'video', scope: 'video' }).workflow;
+  if (!hasWorkflowFor(cfg, 'video') || !videoWf) throw new Error('尚未导入视频工作流：设置 → 本地 ComfyUI → 导入视频工作流 JSON（导出 API 格式）');
+  try { parseWorkflow(videoWf, '视频工作流'); }
   catch (err) { throw new Error(`视频工作流无效：${err.message}`); }
 
   const first = (ep.segments || []).find((s) => s.gridUrl)?.gridUrl
     || (ep.segments || [])[0]?.cells?.[0]?.url || '';
-  const prompt = [
+  // 优先用第⑤步为每格生成的精确图生视频提示词（含首帧锚定 / 运镜 / 角色一致性 /
+  // 时长画幅 / 禁止项）；老项目没有这些字段时才退回集摘要的粗粒度提示词。
+  const promptCell = (ep.segments || []).flatMap((s) => s.cells || []).find((c) => c.videoPrompt);
+  const prompt = promptCell?.videoPrompt || [
     `第 ${ep.no} 集《${ep.title}》`,
     cut(ep.summary || ep.text, 160),
     `风格：${project.settings?.style || 'cinematic'}`,
@@ -366,6 +568,7 @@ export async function generateEpisodeVideo(project, m, ep, cfg = {}, opts = {}) 
   const duration = Math.max(3, Math.min(10, Number(opts.duration) || 5));
   const out = await providers.video({
     prompt, frames: [first], duration, shotNo: Number(ep.no) || 1,
+    interfaceId: String(opts.interfaceId || cfg?.requestInterfaceId || ''),
     style: project.settings?.style || 'cinematic',
   });
   if (out.provider !== 'comfyui' || !out.url) {

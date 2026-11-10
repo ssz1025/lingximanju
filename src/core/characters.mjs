@@ -7,9 +7,10 @@
  *   - character_extractor.py 的抽取方法论 → 见 EXTRACT_GUIDELINES
  *   - 式(6) 检索增强 → buildCharacterPassages 用 BM25 从全书记忆里召回原文片段
  * ==========================================================================*/
-import { extractCharacters } from './novel.mjs';
+import { extractCharacters, firstSentenceOf, mineFrequentNames } from './novel.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './bm25.mjs';
 import { characterStyleBits, DEFAULT_NEGATIVE, PORTRAIT_RULES } from './character-style.mjs';
+import { isLikelyPersonName } from './character-names.mjs';
 
 /**
  * 角色多视图定义：key 稳定用于 views 字段，angle 注入多视图提示词。
@@ -350,16 +351,27 @@ export function buildSheetPrompt(c = {}, opts = {}) {
   ].filter(Boolean).join('；') + '。';
 }
 
+/** 是否为真实出图（非 mock 自绘占位）：Mock SVG 只是零 Key 演示占位，不算「已生成」 */
+export function isRealShot(v) {
+  return Boolean(v?.url) && String(v?.provider || '') !== 'mock';
+}
+
 /**
  * 角色定妆完整度：给管理面板、验收清单与批量补全共用同一口径。
+ * 真实口径（realHave / realComplete / placeholders）：provider=mock 的占位图不计入「已生成」，
+ * 供「没有生成不能标记为已完成」的徽标与验收使用。
  * @returns {{views:object, have:string[], missing:string[], complete:boolean,
- *            coreComplete:boolean, allComplete:boolean, hasSheet:boolean, pct:number}}
+ *            coreComplete:boolean, allComplete:boolean, hasSheet:boolean, pct:number,
+ *            realHave:string[], placeholders:string[], realComplete:boolean, hasRealSheet:boolean}}
  */
 export function characterViewStatus(c = {}, opts = {}) {
   const scope = resolveViewKeys(opts.scope || 'core');
   const views = c.views || {};
   const have = scope.filter((k) => Boolean(views[k]?.url));
   const missing = scope.filter((k) => !views[k]?.url);
+  // 占位图：有 url 但 provider=mock —— 界面上要单独标注，不与真实出图混算
+  const placeholders = scope.filter((k) => views[k]?.url && !isRealShot(views[k]));
+  const realHave = scope.filter((k) => isRealShot(views[k]));
   const coreHave = CORE_VIEW_KEYS.filter((k) => Boolean(views[k]?.url));
   const allHave = ALL_VIEW_KEYS.filter((k) => Boolean(views[k]?.url));
   return {
@@ -367,10 +379,15 @@ export function characterViewStatus(c = {}, opts = {}) {
     scope,
     have,
     missing,
+    placeholders,
+    realHave,
     complete: missing.length === 0,
     coreComplete: coreHave.length === CORE_VIEW_KEYS.length,
     allComplete: allHave.length === ALL_VIEW_KEYS.length,
+    // 真实口径：全部视图真实出图才算「定妆齐全」
+    realComplete: realHave.length === scope.length,
     hasSheet: Boolean(c.sheet?.url),
+    hasRealSheet: isRealShot(c.sheet),
     pct: scope.length ? Math.round((have.length / scope.length) * 100) : 0,
     labels: scope.map((k) => ({ key: k, label: viewDef(k)?.label || k, done: Boolean(views[k]?.url) })),
   };
@@ -387,6 +404,8 @@ export function projectPortraitStatus(characters = [], opts = {}) {
   const items = list.map((c) => ({ id: c.id, name: c.name, ...characterViewStatus(c, { scope }) }));
   const totalViews = list.length * scope.length;
   const doneViews = items.reduce((a, it) => a + it.have.length, 0);
+  const realDoneViews = items.reduce((a, it) => a + it.realHave.length, 0);
+  const placeholderViews = items.reduce((a, it) => a + it.placeholders.length, 0);
   const completeCount = items.filter((it) => it.complete).length;
   const sheetCount = items.filter((it) => it.hasSheet).length;
   return {
@@ -395,6 +414,9 @@ export function projectPortraitStatus(characters = [], opts = {}) {
     totalViews,
     doneViews,
     missingViews: totalViews - doneViews,
+    realDoneViews,
+    placeholderViews,
+    realMissingViews: totalViews - realDoneViews,
     completeCount,
     incompleteCount: items.length - completeCount,
     sheetCount,
@@ -500,8 +522,11 @@ export function buildCharacterPassages(text, candidates = [], episodes = []) {
 /** LLM 提取输入组装：论文式(6) 检索召回的原文证据 + 分集梗概，总量 cap 12000 字 */
 export function buildExtractVars(project, m, limit = MAX_CHARACTERS) {
   const text = String(m?.source?.text || '');
+  // 给模型的候选池要比「最终角色数上限」更宽：过去 candidates 与 limit 同宽（12），
+  // 长篇里排第 13 位之后的主角 / 核心配角根本进不了提示词，模型也就无从提取。
+  const poolSize = Math.max(24, Math.min(40, (Number(limit) || MAX_CHARACTERS) * 2));
   // hint = 候选名首现原文句，给模型（以及零 Key 兜底）一条可回溯的定位线索
-  const candidates = extractCharacters(text, limit).map((c) => ({
+  const candidates = extractCharacters(text, poolSize).map((c) => ({
     name: c.name, hits: c.hits, hint: c.evidence?.[0]?.quote || '',
   }));
   const { fragments } = buildCharacterPassages(text, candidates, m?.episodes || []);
@@ -537,14 +562,99 @@ export function buildExtractVars(project, m, limit = MAX_CHARACTERS) {
   };
 }
 
+/**
+ * 主角兜底：模型（或启发式）漏掉的高频出场角色，用原文频次补回来。
+ *
+ * 为什么必须在提取之后再做一遍：提示词再怎么写「别漏主角」，模型仍会按自己的
+ * 理解删减；而「全书出现 800 次的角色」是客观事实，不该取决于模型心情。
+ * 这里只补「完全没被提到」的高频人名（按 name/aliases 任一称呼比对），
+ * 补进来的角色只有可溯源原文证据，人设字段留空由用户/后续 LLM 补全，
+ * 并标记 source=heuristic + auto=true，便于后续真实 LLM 结果覆盖。
+ *
+ * 名额满了也要保主角：模型常把 12 个名额全给配角。此时只对「出场 ≥20 次」的
+ * 强主线角色强制入列（最多 2 位），挤掉列表末尾的角色并在结果里如实列出，
+ * 避免「主角缺席、一堆龙套」这种更糟的结果。
+ *
+ * @param {Array} extracted 已提取角色
+ * @param {string} text 原著全文
+ * @param {object} opts { max, minHits, limit, forceHits }
+ * @returns {{characters:Array, added:string[], displaced:string[]}}
+ */
+export function supplementMainCharacters(extracted = [], text = '', opts = {}) {
+  const src = String(text || '');
+  const max = Math.max(1, Number(opts.max) || MAX_CHARACTERS);
+  const minHits = Math.max(3, Number(opts.minHits) || 8);
+  const forceHits = Math.max(minHits, Number(opts.forceHits) || 20);
+  const list = Array.isArray(extracted) ? extracted.slice() : [];
+  const empty = { characters: list, added: [], displaced: [] };
+  if (!src) return empty;
+
+  const keyOf = (s) => String(s || '').replace(/[\s《》「」『』"'·]/g, '').toLowerCase();
+  const known = new Set();
+  for (const c of list) {
+    if (c?.name) known.add(keyOf(c.name));
+    for (const a of Array.isArray(c?.aliases) ? c.aliases : []) known.add(keyOf(a));
+  }
+
+  const added = [];
+  const displaced = [];
+  const top = mineFrequentNames(src, { minHits, limit: 16 });
+  for (const cand of top) {
+    if (known.has(keyOf(cand.name))) continue;
+    const strong = cand.hits >= forceHits;
+    let out = null;
+    if (list.length >= max) {
+      // 名额已满：只有强主线角色才值得挤掉末尾，且最多挤 2 位
+      if (!strong || displaced.length >= 2) break;
+      out = list[list.length - 1];
+      if (!out?.name) break;
+      list.pop();
+      displaced.push(out.name);
+    }
+    const quote = firstSentenceOf(src, cand.name);
+    list.push({
+      name: cand.name,
+      aliases: [],
+      role: '主要角色（高频出场，自动补全）',
+      appearance: quote ? `原著依据：${quote}` : '',
+      evidence: quote ? [{ quote, kind: 'mention' }] : [],
+      hits: cand.hits,
+      source: 'heuristic',
+      auto: true,
+    });
+    known.add(keyOf(cand.name));
+    added.push(cand.name);
+  }
+  return { characters: list, added, displaced };
+}
+
 /** 提取结果按名合并进现有列表：命中同名/别名只补空字段，不覆盖手改；返回新增/合并计数 */
 export function mergeExtracted(existing = [], extracted = [], opts = {}) {
   const source = opts.source || 'llm';
-  const list = existing.map((c) => normalizeCharacter(c));
+  let list = existing.map((c) => normalizeCharacter(c));
+  // 自愈：旧版本启发式把「回头 / 刀光 / 冲他」当角色写进项目、或把「沈青崖不」这种
+  // 人名+下一句首字的粘连串建成了角色。重新提取时顺手清掉这些「没手改过的启发式脏数据」，
+  // 否则修好算法也救不回已经污染的角色表。手改过 / LLM / 手动新增的一律不动。
+  const removed = [];
+  list = list.filter((c) => {
+    if (c.source !== 'heuristic' || c.edited) return true;
+    if (!isLikelyPersonName(c.name)) { removed.push(c.name); return false; }
+    return true;
+  });
+  list = list.filter((c) => {
+    if (c.source !== 'heuristic' || c.edited) return true;
+    for (let len = 2; len < c.name.length; len += 1) {
+      const pre = c.name.slice(0, len);
+      if (list.some((o) => o !== c && o.name === pre)) { removed.push(c.name); return false; }
+    }
+    return true;
+  });
   let added = 0;
   let merged = 0;
   for (const raw of extracted) {
-    const inc = normalizeCharacter({ ...raw, source });
+    // 兜底补进来的角色自带 source=heuristic：即使本次是 LLM 抽取，也不该被标成
+    // 「LLM 人设」，否则后续真实 LLM 结果就无法覆盖这些占位字段
+    const inc = normalizeCharacter({ ...raw, source: raw?.source || source });
     if (!inc.name) continue;
     const key = charNameKey(inc.name);
     const hit = list.find((c) => charNameKey(c.name) === key
@@ -580,5 +690,5 @@ export function mergeExtracted(existing = [], extracted = [], opts = {}) {
     }
     if (list.length >= MAX_CHARACTERS) break;
   }
-  return { characters: list, added, merged };
+  return { characters: list, added, merged, removed };
 }

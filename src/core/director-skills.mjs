@@ -13,7 +13,7 @@
 import { STEPS, stepProgress } from './project-steps.mjs';
 import { resolveRuntimeSpec, verifyRuntime } from './runtime-spec.mjs';
 import { evaluateFilm, isRealClip, normalizeFilmPolicy } from './film-policy.mjs';
-import { DIRECTOR_STYLES, getDirectorStyle, normalizeStyleId, styleCard, resolveAesthetic } from './director-styles.mjs';
+import { allDirectorStyles, getDirectorStyle, normalizeStyleId, styleCard, resolveAesthetic } from './director-styles.mjs';
 
 /** 能力清单：每一项都对应一个真实存在的业务函数，见 director-agent.mjs */
 export const DIRECTOR_CAPABILITIES = [
@@ -28,8 +28,8 @@ export const CAP_BY_ID = Object.fromEntries(DIRECTOR_CAPABILITIES.map((c) => [c.
 
 /** 步骤范围：all = 六步全链路；core = 只跑智能体链（跳过已由服务端完成的 auto 步骤） */
 export const DIRECTOR_STEP_MODES = {
-  all: { label: '完整六步', desc: '逐项确认 ①上传 → ②分集 → ③剧本 → ④上下文 → ⑤分镜 → ⑥交付' },
-  core: { label: '智能体四步', desc: '专注 ③剧本 → ④上下文 → ⑤分镜 → ⑥交付，auto 步骤沿用现有结果' },
+  all: { label: '完整六步', desc: '逐项确认 ①上传 → ②分集 → ③剧本 → ④上下文 → ⑤分镜图 → ⑥视频与交付' },
+  core: { label: '智能体四步', desc: '专注 ③剧本 → ④上下文 → ⑤分镜图 → ⑥视频与交付，auto 步骤沿用现有结果' },
 };
 
 /**
@@ -78,23 +78,35 @@ const FLOW_SKILLS = [
 ].map((s) => ({ ...s, group: 'flow' }));
 
 /**
- * 十位导演风格技能：由美学档案生成，避免清单与档案两处手写漂移。
+ * 风格技能清单：由美学档案生成（内置 + 自定义注册表），避免清单与档案两处手写漂移。
  * 风格技能的 deliverables 一律为 null —— 只改画面，不动用户已选的交付组合。
+ * 自定义风格注册后需调用 rebuildDirectorSkills() 让新风格成为可选技能。
  */
-const STYLE_SKILLS = DIRECTOR_STYLES.map((style) => ({
-  id: style.id, icon: style.icon, label: style.label, tagline: style.tagline,
-  summary: style.summary,
-  capabilities: ['treatment', 'characters', 'portraits', 'voices'],
-  deliverables: null,
-  steps: 'all', repack: true, verify: true,
-  group: 'style',
-  styleId: style.id,
-  highlights: (style.highlights || []).slice(0, 4),
-}));
+function buildStyleSkills() {
+  return allDirectorStyles().map((style) => ({
+    id: style.id, icon: style.icon, label: style.label, tagline: style.tagline,
+    summary: style.summary,
+    capabilities: ['treatment', 'characters', 'portraits', 'voices'],
+    deliverables: null,
+    steps: 'all', repack: true, verify: true,
+    group: 'style',
+    styleId: style.id,
+    custom: !!style.custom,
+    highlights: (style.highlights || []).slice(0, 4),
+  }));
+}
 
-export const DIRECTOR_SKILLS = [...FLOW_SKILLS, ...STYLE_SKILLS];
+let STYLE_SKILLS = [];
+export let DIRECTOR_SKILLS = [];
+export let SKILL_BY_ID = {};
 
-export const SKILL_BY_ID = Object.fromEntries(DIRECTOR_SKILLS.map((s) => [s.id, s]));
+/** 自定义风格增删后由 director-style-store 调用：重建技能索引（同步、纯内存） */
+export function rebuildDirectorSkills() {
+  STYLE_SKILLS = buildStyleSkills();
+  DIRECTOR_SKILLS = [...FLOW_SKILLS, ...STYLE_SKILLS];
+  SKILL_BY_ID = Object.fromEntries(DIRECTOR_SKILLS.map((s) => [s.id, s]));
+}
+rebuildDirectorSkills();
 export const DEFAULT_DIRECTOR_SKILL = 'full';
 
 /**
@@ -136,6 +148,7 @@ export function directorSkillPublic(skill) {
     repack: !!skill.repack, verify: !!skill.verify,
     group: skill.group || 'flow',
     groupLabel: (DIRECTOR_SKILL_GROUPS[skill.group] || DIRECTOR_SKILL_GROUPS.flow).label,
+    custom: !!skill.custom,
     styleId: style?.id || null,
     // 风格卡要显示调色板色块、节奏说明与媒介，供用户选择前就看清差别
     style: style ? styleCard(style.id) : null,
@@ -249,12 +262,16 @@ export function verifyDirectorDeliverables(project, skillOrId = null) {
   const spec = resolveRuntimeSpec(project);
   const filmPolicy = normalizeFilmPolicy(spec.filmPolicy);
   const realClips = nodes.filter((n) => n.type === 'video' && isRealClip(n.data?.clip)).length;
+  // 分镜板是第⑤步的交付物之一（每段一张，格数由分镜画面设置决定），从剧集数据直接统计
+  const gridCount = (m.episodes || []).reduce((a, ep) => a + (ep.segments || []).filter((s) => s.gridUrl).length, 0);
   // 成片真实性：real 策略下预览成片 / 缺片段一律判缺失，绝不算「全流程已达成」。
   const reality = evaluateFilm({ project, film: filmInfo, policy: filmPolicy, clipCount: spec.clipCount });
   // 时长规格验收：片段数 / 每片段时长 / 时间线总长 / 导演包组数 / MP4 实测时长
   // / 成片是否来自真实 AI 视频。以前这一项完全缺席，12 片段 60s 也会被判成达标。
   const runtimeCheck = verifyRuntime(project, spec, {
     filmSeconds: filmInfo?.file && Number.isFinite(Number(filmInfo.duration)) ? Number(filmInfo.duration) : undefined,
+    filmWidth: filmInfo?.file ? filmInfo.width : undefined,
+    filmHeight: filmInfo?.file ? filmInfo.height : undefined,
     requireRealFilm: filmPolicy === 'real' && wanted.video,
     filmIsReal: reality.isRealVideo,
   });
@@ -276,9 +293,9 @@ export function verifyDirectorDeliverables(project, skillOrId = null) {
       detail: `${count(['rag', 'character', 'plan', 'event', 'scene'])} 个上下文节点 · ${(m.characters || []).length} 位角色`,
     },
     {
-      id: 'storyboard', label: '分镜 / 关键帧 / 片段', required: true,
-      level: count(['shot', 'keyframe', 'video']) > 0 ? 'ok' : 'missing',
-      detail: `${count(['shot'])} 镜头 · ${count(['keyframe'])} 关键帧 · ${count(['video'])} 片段`,
+      id: 'storyboard', label: '分镜提示词 / 关键帧 / 分镜板', required: true,
+      level: count(['shot', 'keyframe']) > 0 ? 'ok' : 'missing',
+      detail: `${count(['shot'])} 镜头 · ${count(['keyframe'])} 关键帧 · ${gridCount} 张分镜板`,
     },
     {
       id: 'steps', label: '制作步骤全部完成', required: true,

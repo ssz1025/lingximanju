@@ -6,6 +6,8 @@
  * 中间粒度，事件→场景→镜头每层才能只处理合适规模的上下文。
  * 理论映射见 docs/THEORY.md §4。
  * ==========================================================================*/
+import { isLikelyPersonName, SURNAMES } from './character-names.mjs';
+
 const clamp = (v, a, b) => Math.max(a, Math.min(b, Number(v) || a));
 const clean = (s) => String(s ?? '').replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim();
 const cut = (s, n) => { const t = clean(s); return t.length > n ? `${t.slice(0, n)}…` : t; };
@@ -81,7 +83,8 @@ function splitByChars(text, size) {
 export function splitEpisodes(novel, opts = {}) {
   const strategy = SPLIT_STRATEGIES.some((s) => s.id === opts.strategy) ? opts.strategy : 'chapter';
   const target = opts.targetChars ? clamp(opts.targetChars, 300, 8000) : 1200;
-  const max = opts.maxEpisodes ? clamp(opts.maxEpisodes, 1, 12) : 4;
+  // 超长小说（百万字 ≈ 8000 字/集 → 125 集）需要远大于旧上限 12 的集数预算
+  const max = opts.maxEpisodes ? clamp(opts.maxEpisodes, 1, 600) : 4;
   let units;
   if (strategy === 'fixed') {
     units = splitByChars(novel.text, target).map((t, i) => ({ title: `片段 ${i + 1}`, text: t }));
@@ -141,7 +144,7 @@ export function splitEpisodes(novel, opts = {}) {
 export function validateNovelInput(text, opts = {}) {
   const body = String(text ?? '').trim();
   if (body.length < 40) return { ok: false, message: '正文至少需要 40 字，请上传完整小说或粘贴更多内容' };
-  if (body.length > 2_000_000) return { ok: false, message: '正文超过 2,000,000 字，请先拆分成多个项目' };
+  if (body.length > 10_000_000) return { ok: false, message: '正文超过 10,000,000 字，请拆分成多个项目分批制作' };
   const novel = parseNovel(body, opts.filename || '');
   const episodes = splitEpisodes(novel, opts.split || {});
   return {
@@ -151,34 +154,35 @@ export function validateNovelInput(text, opts = {}) {
 }
 
 /* ---- 候选角色名启发式：说话/动作动词前的中文名 + 对话冒号前的中文名 ---- */
-// 说话动词 + 高频动作动词：只有对话的小说能靠「XX说」抽人，纯描写段（「林晚推门而入」）
-// 需要靠动作动词才能把首位角色抓出来。长动词排前面，配合惰性量词取到正确边界。
-const SPEECH_VERBS = '说道|笑道|喊道|叫道|低声|轻声|抬眼|看向|转身|拿出|递给|皱眉|笑了|沉默|点头|摇头|听见|想起|站在|坐下|走进|走出|握住|放下|接过|推开|推门|迈步|跨进|掀开|拂袖|抬手|低头|抬头|回身|起身|止步|驻足|打量|端详|说|道|问|答|望|盯|瞥|叹|把|将|回|应|推|拉|迈|跨|掀|抽|举|扬|俯|仰|退|蹲|倚|靠|抿|蹙|拂|瞧|瞅|扫|走|跑|看|站|坐';
-// 常见叙述词 / 非人名词（旧表扩充：方位、时间、指代、量词、动作补语）
-const NAME_STOP = new Set([
-  '他们', '我们', '自己', '忽然', '这时', '没有', '一个', '什么', '只是', '已经', '因为', '于是',
-  '然后', '如果', '虽然', '但是', '还是', '这个', '那个', '似乎', '仿佛', '声音', '窗外', '雨水',
-  '片刻', '终于', '其实', '当时', '随后', '接着', '突然', '所有', '一切', '对方', '两人', '众人',
-  '有人', '不知', '不觉', '缓缓', '轻轻', '慢慢', '微微', '依旧', '仍然', '立刻', '马上', '出来',
-  '进来', '过去', '现在', '以后', '之前', '这里', '那里', '心里', '眼中', '手里', '脸上', '身后',
-  '一阵', '一声', '一次', '一句', '一直', '一边', '一起', '这些', '那些', '如此', '这样', '那样',
-  '因为', '所以', '可是', '不过', '而且', '并且', '于是', '随即', '顿时', '忽地', '猛地', '只得',
-  '却见', '只见', '但见', '听得', '说罢', '话音', '半晌', '良久', '此时', '此刻', '当下', '次日',
-  '第二天', '门外', '门内', '屋外', '屋内', '桌上', '地上', '天上', '远处', '近处', '四周',
-]);
+// 只保留「无歧义的说话动词」：过去把「回 / 把 / 将 / 转 / 站 / 坐 / 走 / 看」这类
+// 单字动作也算作分界，于是「（沈砚没有）回头（。）」被切成「回头」、刀光/冲他/朝林外
+// 之类全被当成角色。说话动词本身语义就要求「发出者是人」，是最可靠的分界。
+//
+// 单字「说 / 道」另外加了约束（这是误提取最大的来源）：
+//   ① 后面必须紧跟标点或引号 —— 否则「（他在）说话」「（这条）道理」都会被算成说话句；
+//   ② 前面不能是「知 / 难 / 味 / 街 / 通 / 听 / 虽 / 小」—— 「但他知道」「难道」「味道」
+//      里的「道」不是「说道」，「听说」「虽说」「小说」里的「说」也不是。
+//      不加这两条时会把「但他知道」切成角色名「但他知」。
+const SPEECH_VERBS = '(?:说道|笑道|喊道|叫道|问道|答道|喝道|叹道|骂道|嚷道|低声道|沉声道|轻声道|冷声道|柔声道|开口道|回答道|补充道|反问道|解释道|嘟囔道|嘀咕道|喃喃道|冷哼一声|冷笑道|苦笑道|低声|轻声|沉声|冷声|柔声|回答|反问|追问|补充|解释|嘟囔|嘀咕|低语|喃喃|冷哼|冷笑|苦笑|喊|叫|吼|骂|嚷|念'
+  + '|(?<![知难味街通干听虽小解说])[说道问答](?=[：:，,。！？!?…」』”"\\s]|过|了))';
+// 常见姓氏：命中则更像真人名，加权排序；非姓氏的孤例需要更多证据才入选
+// （与 character-names.mjs 共用一份，避免两处姓氏表漂移）
+// 动作动词：只对「姓氏开头的 2–3 字候选」启用——「沈青崖走」可信，
+// 「回头看见」不可信。这样既保住纯描写段落里的主角，又不把动作当人。
+const ACTION_VERBS = '走进|走出|走入|推门|推开|转身|抬头|低头|回头|起身|坐下|站起|伸手|迈步|跨进|掀开|拂袖|打量|端详|望向|看向|抬眼|垂眸|走来|走去|跑来|跑去|冲出|拦住|扶住|握住|放下|接过|递给|拿出|掏出|收进|佩着|穿着|披着|站着|坐着|躺着|靠着|倚着|盯着|瞥了|扫了|笑了|哭了|沉默|开口|点头|摇头|皱眉|叹气|走|站|坐|推|拉|握|拿|递|看|望|盯|瞥|听|笑|哭|抬|低|转|回|冲|靠|倚|退|蹲|扑|抓|扯|劈|砍|挥|踢';
 // 名字前的身份/修饰前缀：剥掉后才是真正的人名（「少年阿杰说」→「阿杰」）
 const NAME_PREFIX = /^(?:少年|少女|年轻|年迈|年老|老|小|那位|那|这位|这|一位|一个|身穿|穿着|白衣|黑衣|年|忽然|这时|随后|接着|突然|于是|然后|片刻|终于|其实|当时|依旧|仍然|立刻|马上|缓缓|轻轻|慢慢|微微|只见|却见|但见)+/;
-// 常见姓氏：命中则更像真人名，加权排序；非姓氏的孤例需要更多证据才入选
-const SURNAMES = '王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤';
-// 虚词 / 指代 / 地点组织后缀：含这些的「名字」基本是句子碎片，不是人名
-const BAD_NAME_RE = /[的地得了着过们是很最这那每某所有\s\dA-Za-z]/;
-const PLACE_SUFFIX = /(?:城|镇|村|府|局|校|店|宫|寺|山|河|街|路|院|楼|站|国|军|队|帮|客栈|酒楼|茶馆|花园|广场|码头|车站|大街|小巷)$/;
-// 说话/动作动词的尾字：对话冒号前的「林晚笑道」「阿杰说」不是人名，必须剔除
-const VERB_TAIL_RE = /(?:说|道|问|答|笑|喊|叫|望|盯|瞥|叹|把|将|回|应|摇|看|听|想|站|坐|走|握|放|接|推|点|转|拿|递|进|出|声|低|轻|抬|忽|然|后|着)$/;
-const IN_NAME_VERB_RE = /[说问答喊叫]/;
+/** 名字尾部被粘进来的时间/语气副词（「老周曾经说过」→ 先剥掉「曾经」再当人名） */
+const NAME_TRAILING = /(?:曾经|已经|终于|忽然|突然|立刻|马上|随即|依然|仍旧|始终|渐渐|连忙|赶紧|急忙|不由|不禁|似乎|仿佛|好像|一直|从来|向来|顿时|当下)+$/;
 
 function cleanCandidateName(raw) {
   let name = String(raw || '').trim();
+  // 先剥尾部副词：「老周曾经」直接当名字剥前缀会变成「周曾经」，真名反而丢了
+  for (let i = 0; i < 3; i += 1) {
+    const trimmed = name.replace(NAME_TRAILING, '');
+    if (!trimmed || trimmed === name || trimmed.length < 2) break;
+    name = trimmed;
+  }
   // 反复剥前缀（可能叠加，如「那位少年阿杰」）
   for (let i = 0; i < 3; i += 1) {
     const stripped = name.replace(NAME_PREFIX, '');
@@ -189,7 +193,107 @@ function cleanCandidateName(raw) {
   return name;
 }
 
-function firstSentenceOf(src, name) {
+/** 某个字符串在原文里出现多少次（用于「出场频次」排序，主角永远排在最前） */
+function countOccurrences(src, name) {
+  if (!name) return 0;
+  let n = 0;
+  let i = 0;
+  while ((i = src.indexOf(name, i)) >= 0) {
+    n += 1;
+    i += name.length;
+  }
+  return n;
+}
+
+/** 常见称谓后缀：用来判断「刘左同（志）」里的最后一个字是不是被多切进来的一刀 */
+const HONORIFICS = ['同志', '先生', '小姐', '大人', '姑娘', '少爷', '公子', '师父', '师傅', '老师',
+  '前辈', '长老', '掌门', '陛下', '殿下', '将军', '队长', '老板', '夫人', '太太'];
+
+/**
+ * 候选名末尾是不是「称谓被切掉一半」：
+ *   「刘左同」+ 原文紧随的「志」→「同志」，说明真正的名字是「刘左」。
+ * 只用于「短名与长名出现次数相同」的歧义场景，避免把「刘左」这种真名当词干丢掉。
+ */
+function looksLikeHonorificTail(src, name) {
+  if (!name) return false;
+  const at = src.indexOf(name);
+  if (at < 0) return false;
+  const after = src.slice(at + name.length, at + name.length + 2);
+  const last = name.slice(-1);
+  return HONORIFICS.some((h) => (last + after).startsWith(h));
+}
+
+/**
+ * 高频人名挖掘：不依赖「名字后面必须紧跟说话动词」这一条线索。
+ *
+ * 为什么需要：主角在长篇里大量以「刘左同志」「刘左的」「刘左家」等形式出现，
+ * 未必紧跟「说/道」。只靠动词邻接，全书出场 800 次的主角会整条漏掉 ——
+ * 这正是「主角被漏掉」最主要的技术原因。
+ *
+ * 做法：姓氏（或老/小/阿/大这类称呼前缀）锚定在词边界上取 2–3 字 n-gram，
+ * 过一遍人名可信度判定，再按全书出现次数排序；最后用「前缀消解」去掉
+ * 「刘左同（志）」「沈青（崖）」这类被多切一刀的碎片：
+ *   - 短名独立出现次数 > 长名 → 长名是「短名 + 尾字」碎片，丢弃
+ *   - 短名与长名同频 → 短名只出现在长名内部，丢弃短名
+ *
+ * @param {string} text 原著全文
+ * @param {object} opts { minHits=3, limit=40 }
+ * @returns {Array<{name:string, hits:number}>} 按出场次数降序
+ */
+export function mineFrequentNames(text, opts = {}) {
+  const s = String(text || '');
+  const minHits = Math.max(1, Number(opts.minHits) || 3);
+  const limit = Math.max(1, Number(opts.limit) || 40);
+  if (!s) return [];
+
+  const isHan = (ch) => Boolean(ch) && /[\u4e00-\u9fa5]/.test(ch);
+  const seeds = new Set();
+  for (let i = 0; i < s.length - 1; i += 1) {
+    const ch = s[i];
+    // 姓氏/称呼前缀必须落在词边界（前一个字符不是汉字），否则「朝林外」会被切成「林外」
+    if (i > 0 && isHan(s[i - 1])) continue;
+    const surname = SURNAMES.includes(ch);
+    const callPrefix = '老小阿大'.includes(ch);
+    if (!surname && !callPrefix) continue;
+    for (let len = 2; len <= 3; len += 1) {
+      const cand = s.slice(i, i + len);
+      if (cand.length < len || !/^[\u4e00-\u9fa5]+$/.test(cand)) break;
+      if (!isLikelyPersonName(cand)) continue;
+      seeds.add(cand);
+    }
+  }
+
+  const scored = [...seeds]
+    .map((name) => ({ name, hits: countOccurrences(s, name) }))
+    .filter((v) => v.hits >= minHits);
+  if (!scored.length) return [];
+
+  const hitsOf = new Map(scored.map((v) => [v.name, v.hits]));
+  // ① 短名独立出现更多 → 长名只是碎片
+  const noFragments = scored.filter((v) => {
+    for (let len = 2; len < v.name.length; len += 1) {
+      if ((hitsOf.get(v.name.slice(0, len)) || 0) > v.hits) return false;
+    }
+    return true;
+  });
+  // ② 短名与长名同频 → 需要分清谁是碎片：
+  //    「沈青 / 沈青崖」→ 沈青只是被截断的词干，丢短名；
+  //    「刘左 / 刘左同（志）」→ 长名末尾是称谓残字，丢长名。
+  const noStems = noFragments.filter((v) => !noFragments.some((k) => (
+    k.name.length > v.name.length && k.name.startsWith(v.name) && k.hits === v.hits
+    && !looksLikeHonorificTail(s, k.name)
+  )));
+  const withoutHonorificFragments = noStems.filter((v) => !(
+    looksLikeHonorificTail(s, v.name) && noStems.some((k) => v.name.startsWith(k.name) && k.name.length < v.name.length)
+  ));
+
+  return withoutHonorificFragments
+    .sort((a, b) => b.hits - a.hits || a.name.localeCompare(b.name, 'zh'))
+    .slice(0, limit);
+}
+
+
+export function firstSentenceOf(src, name) {
   const at = src.indexOf(name);
   if (at < 0) return '';
   let start = at;
@@ -211,6 +315,8 @@ function firstSentenceOf(src, name) {
  *  - 名字放宽到 2–4 字并剥离身份修饰前缀，修正「少年阿杰说」被截成「年阿杰」的边界误捕
  *  - 名字前是标点/行首的「严格边界」命中加权更高；常见姓氏加权；虚词/地点后缀过滤
  *  - 每位候选附首现原文句子作为 evidence（可溯源），供零 Key 兜底与证据校验复用
+ *  - 只把「说话动词」当强分界，动作动词只用于姓氏开头的候选；非人名（回头/刀光/冲他）
+ *    与「人名+下一句首字」的粘连扩展名（沈青崖不）都会被剔除
  *
  * 抽不到时返回空数组，由 Provider 用主题角色兜底。返回字段向后兼容：
  * name / role / hits / appearance 不变，新增 evidence / firstAt / strict。
@@ -218,43 +324,81 @@ function firstSentenceOf(src, name) {
 export function extractCharacters(text, limit = 4) {
   const s = String(text ?? '');
   if (!s) return [];
-  const freq = new Map();      // name → { hits, strict }
-  const add = (raw, strict) => {
+  const freq = new Map();      // name → { strict, speech, action, mined }
+  const add = (raw, kind) => {
     const name = cleanCandidateName(raw);
-    if (!name || NAME_STOP.has(name) || BAD_NAME_RE.test(name) || PLACE_SUFFIX.test(name)) return;
-    if (VERB_TAIL_RE.test(name) || IN_NAME_VERB_RE.test(name)) return;
-    if (/^[第这那每某所有]/.test(name)) return;
-    const cur = freq.get(name) || { hits: 0, strict: 0 };
-    cur.hits += 1;
-    if (strict) cur.strict += 1;
+    if (!name) return;
+    // 统一的人名可信度判定（与 LLM 结果清洗同一套规则）
+    if (!isLikelyPersonName(name)) return;
+    const cur = freq.get(name) || { strict: 0, speech: 0, action: 0, mined: false };
+    if (kind !== 'surname-action') cur.strict += 1;
+    if (kind === 'speech' || kind === 'dialogue') cur.speech += 1;
+    if (kind === 'surname-action') cur.action += 1;
+    if (kind === 'frequency') cur.mined = true;
     freq.set(name, cur);
   };
 
   const HAN = '[\\u4e00-\\u9fa5]';
-  // 量词用惰性 {2,4}?：先按最短人名匹配，避免「林晚笑道」被贪婪截成「林晚笑」+「道」
-  // ① 边界模式用 lookbehind（不消耗前一个字符），避免匹配跳跃把后面真正的人名吞掉
-  const boundaryRe = new RegExp(`(?<![\\u4e00-\\u9fa5])(${HAN}{2,4}?)(?=(?:${SPEECH_VERBS}))`, 'g');
-  // ② 对话冒号：「林晚：“……”」，冒号天然是边界
-  const dialogueRe = new RegExp(`(${HAN}{2,4}?)\\s*[：:]\\s*[「“"']`, 'g');
-  // ③ 姓氏锚定：长文本连写（名字前无标点）时从常见姓氏起匹配，补回「顾长风说」这类
-  // 总长限 2–3 字（姓 + 1~2 字），避免「老王把钥匙递给…」被截成「王把钥匙」
-  const surnameRe = new RegExp(`([${SURNAMES}]${HAN}{1,2}?)(?=(?:${SPEECH_VERBS}))`, 'g');
+  const surnameClass = `[${SURNAMES}]`;
+  // ① 说话动词前的名字：叙述里最常见、最可靠的「这个人是说话者」信号
+  const boundaryRe = new RegExp(`(?<![\\u4e00-\\u9fa5])(${HAN}{2,4}?)(?=${SPEECH_VERBS})`, 'g');
+  // ② 对话冒号：「林晚：“……”」，冒号天然是边界（同样要求名字落在词边界上，
+  //    否则「沈砚终于开口：」会把冒号前两个字「开口」当成角色）
+  const dialogueRe = new RegExp(`(?<![\\u4e00-\\u9fa5])(${HAN}{2,4}?)\\s*[：:]\\s*[「“"']`, 'g');
+  // ③ 姓氏锚定 + 动作动词：补回「沈青崖推门而入」这类没有台词的段落，
+  //    总长限 2–3 字（姓 + 1~2 字），且必须位于词边界（前一个字符不是汉字）。
+  //    没有边界约束时「朝林外跑去」「林夏已经站在」会被切成「林外」「夏已经」。
+  const surnameActionRe = new RegExp(`(?<![\\u4e00-\\u9fa5])(${surnameClass}${HAN}{1,2}?)(?=(?:${ACTION_VERBS}))`, 'g');
 
-  for (const [re, strict] of [[boundaryRe, true], [dialogueRe, true], [surnameRe, false]]) {
+  for (const [re, kind] of [[boundaryRe, 'speech'], [dialogueRe, 'dialogue'], [surnameActionRe, 'surname-action']]) {
     let m;
-    while ((m = re.exec(s))) add(m[1], strict);
+    while ((m = re.exec(s))) add(m[1], kind);
+  }
+  // ④ 高频人名补扫：主角未必紧跟「说/道」（「刘左同志」「刘左的」），
+  //    漏掉动词邻接线索就会整条漏人，这里按全书出场频次兜住。
+  //    挖掘结果已经过人名可信度判定，不再走 cleanCandidateName 的前缀剥离——
+  //    否则「老周曾」会被剥成「周曾」，反而造出新的碎片。
+  for (const m of mineFrequentNames(s, { minHits: 3, limit: 80 })) {
+    const cur = freq.get(m.name) || { strict: 0, speech: 0, action: 0, mined: false };
+    cur.mined = true;
+    freq.set(m.name, cur);
   }
   if (!freq.size) return [];
 
-  const ranked = [...freq.entries()]
+  const scored = [...freq.entries()]
     .map(([name, v]) => {
       const surname = SURNAMES.includes(name[0]);
-      const score = v.hits + v.strict * 2 + (surname ? 2 : 0);
-      return { name, ...v, surname, score };
+      // hits 用「全书出现次数」而不是「匹配到几次」：主角高频出场自然排前面，
+      // 也让「沈砚 vs 沈砚终于」这类长短候选的取舍有可比的量化依据
+      const hits = countOccurrences(s, name);
+      const score = hits + v.speech * 4 + v.strict * 2 + (surname ? 2 : 0);
+      return { name, hits, strict: v.strict, speech: v.speech, surname, mined: v.mined, score };
     })
-    // 非姓氏、只出现一次且无严格边界命中的孤例视为噪声（但保证至少留下得分最高者）
-    .filter((v) => v.hits >= 2 || v.strict > 0 || v.surname)
-    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.name.localeCompare(b.name, 'zh'))
+    // 非姓氏候选必须在「说话/对话」语境里出现过，或作为高频称呼被挖掘到
+    // （屁哥 / 阿杰 这类绰号靠出场频次自证）；纯动作碎片（刀光/朝林外）不入选
+    .filter((v) => v.surname || v.speech > 0 || (v.mined && v.hits >= 3))
+    .filter((v) => v.hits > 0)
+    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.name.localeCompare(b.name, 'zh'));
+
+  // 长短候选消歧（比旧的 dropExtendedNames 更准：旧规则只要短名存在就丢长名，
+  // 会把「沈青崖」这种三字真名错杀成「沈青」）：
+  //   短名出现次数 > 长名 → 长名是「短名 + 尾字」碎片（刘左同 → 刘左 + 同）
+  //   短名与长名同频   → 短名从不独立出现，丢掉短名（沈青 → 沈青崖）
+  const hitsOf = new Map(scored.map((v) => [v.name, v.hits]));
+  const noFragments = scored.filter((v) => {
+    for (let len = 2; len < v.name.length; len += 1) {
+      if ((hitsOf.get(v.name.slice(0, len)) || 0) > v.hits) return false;
+    }
+    return true;
+  });
+  const ranked = noFragments
+    .filter((v) => !noFragments.some((k) => (
+      k.name.length > v.name.length && k.name.startsWith(v.name) && k.hits === v.hits
+      && !looksLikeHonorificTail(s, k.name)
+    )))
+    .filter((v) => !(looksLikeHonorificTail(s, v.name)
+      && noFragments.some((k) => v.name.startsWith(k.name) && k.name.length < v.name.length)))
+    .filter((v) => isLikelyPersonName(v.name))
     .slice(0, Math.max(1, limit));
 
   return ranked.map(({ name, hits, strict }) => {
@@ -281,7 +425,8 @@ export function mergeNovelFiles(files = []) {
     .map((f) => ({ name: clean(f?.name) || '未命名文件.txt', text: String(f?.text ?? '') }))
     .filter((f) => f.text.trim());
   if (!list.length) return { ok: false, message: '没有可导入的文件内容', text: '', filename: '', sources: [], chapterSources: [] };
-  if (list.length > 12) return { ok: false, message: '一次最多导入 12 个文件，请分批上传', text: '', filename: '', sources: [], chapterSources: [] };
+  // 超长小说常按卷 / 章拆成上百个 txt；200 个文件足够覆盖，同时防滥用
+  if (list.length > 200) return { ok: false, message: '一次最多导入 200 个文件，请合并小文件后再上传', text: '', filename: '', sources: [], chapterSources: [] };
 
   const stem = (name) => cut(name.replace(/\.(txt|md|markdown|json)$/i, ''), 12) || '文件';
   const sources = [];

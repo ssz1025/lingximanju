@@ -15,7 +15,7 @@ const GUIDE = [
   { id: 'episodes', no: '02', name: '分集拆解', desc: '按章节 / 字数 / 场景段落自动划分剧集，系统把每一章关联到对应剧集。', icon: 'M8 14h14v10H8z M26 14h14v10H26z M8 30h14v10H8z M26 30h14v10H26z' },
   { id: 'script', no: '03', name: '剧本创作', desc: '逐集生成统一格式剧本：场景、人物、对白与情绪节拍，随时可重生成。', icon: 'M10 10h28v28H10z M15 18h18 M15 24h18 M15 30h12' },
   { id: 'context', no: '04', name: '角色与上下文', desc: '大模型自动提取角色；可手动修改人设，并一键生成全部角色定妆图。', icon: 'M24 23a7 7 0 100-14 7 7 0 000 14z M10 40c0-8 6-12 14-12s14 4 14 12' },
-  { id: 'storyboard', no: '05', name: '分镜与画面', desc: '每一段生成一张 3×3 宫格分镜图，并在无限画布里查看资源链接关系。', icon: 'M8 8h32v32H8z M8 19h32 M8 30h32 M19 8v32 M30 8v32' },
+  { id: 'storyboard', no: '05', name: '分镜与画面', desc: '按分镜画面设置（九宫格 / 六宫格 / 四宫格 / 条漫 / 二十五宫格 / 单图）为每段生成分镜板，并在无限画布里查看资源链接关系。', icon: 'M8 8h32v32H8z M8 19h32 M8 30h32 M19 8v32 M30 8v32' },
   { id: 'deliver', no: '06', name: '导出与生成', desc: '每集单独导出导演包，或直接调用本地 ComfyUI 生成这一集的视频片段。', icon: 'M24 8v22 M16 22l8 8 8-8 M10 38h28' },
 ];
 
@@ -138,7 +138,7 @@ export function renderHomeView(host, ctx = {}) {
       <div class="hv-hero-main">
         <span class="hv-eyebrow">◈ 无限画布 · 智能体制片流水线</span>
         <h1>把一部小说，做成一整部漫剧</h1>
-        <p>导入原著 → 自动分集 → 提取角色 → 生成剧本与宫格分镜 → 每集导出导演包或调用本地 ComfyUI 生成视频。</p>
+        <p>导入原著 → 自动分集 → 提取角色 → 生成剧本与分镜板 → 每集导出导演包或调用本地 ComfyUI 生成视频。</p>
         <div class="hv-hero-acts">
           <button class="btn primary" data-act="create">＋ 新建漫剧项目</button>
           ${recent ? `<button class="btn" data-act="resume" data-id="${esc(recent.id)}">↩ 继续「${esc(cut(recent.name, 12))}」</button>` : ''}

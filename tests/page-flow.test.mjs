@@ -24,13 +24,13 @@ const LOWER = `第二章 真相
 两个人对视了很久，谁都没有先开口。`;
 
 /* ------------------------------------------------------------ 多文件合并 */
-test('mergeNovelFiles：空输入 / 超过 12 个文件都给出可读错误', () => {
+test('mergeNovelFiles：空输入 / 超过 200 个文件都给出可读错误', () => {
   assert.equal(mergeNovelFiles([]).ok, false);
   assert.equal(mergeNovelFiles([{ name: 'a.txt', text: '   ' }]).ok, false);
-  const many = Array.from({ length: 13 }, (_, i) => ({ name: `f${i}.txt`, text: '内容' }));
+  const many = Array.from({ length: 201 }, (_, i) => ({ name: `f${i}.txt`, text: '内容' }));
   const out = mergeNovelFiles(many);
   assert.equal(out.ok, false);
-  assert.match(out.message, /12/);
+  assert.match(out.message, /200/);
 });
 
 test('mergeNovelFiles：单文件保留原文件名，章节出处与解析结果一一对应', () => {
@@ -161,11 +161,18 @@ test('storyboardGridSVG：恒为 9 格且转义用户输入，传入 URL 时铺�
   assert.equal(storyboardGridSVG({ seed: 'x' }), storyboardGridSVG({ seed: 'x' }), '同种子必须确定性输出');
 });
 
-test('gridShotList：把一段的 9 格映射成带集号 / 段号的分镜表', () => {
-  const seg = { no: 2, cells: [{ no: 1, caption: '推门', prompt: 'P', url: '/assets/a.png' }] };
-  assert.deepEqual(gridShotList(seg, 4), [{
-    shotNo: 1, caption: '推门', prompt: 'P', url: '/assets/a.png', segmentNo: 2, episodeNo: 4,
-  }]);
+test('gridShotList：把一段的格子映射成带集号 / 段号 / 镜头规格的分镜表', () => {
+  const seg = { no: 2, cells: [{ no: 1, shotNo: 7, caption: '推门', spec: '中景 · 平视', action: '推门而入', prompt: 'P', url: '/assets/a.png' }] };
+  const [row] = gridShotList(seg, 4);
+  assert.equal(row.shotNo, 7);
+  assert.equal(row.panelNo, 1);
+  assert.equal(row.spec, '中景 · 平视');
+  assert.equal(row.action, '推门而入');
+  assert.equal(row.caption, '推门');
+  assert.equal(row.prompt, 'P');
+  assert.equal(row.url, '/assets/a.png');
+  assert.equal(row.segmentNo, 2);
+  assert.equal(row.episodeNo, 4);
 });
 
 /* ------------------------------------------------------------ 全局模型配置 */

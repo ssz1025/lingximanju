@@ -119,3 +119,95 @@ test('POST /characters/views 非法视图 → 502（生成失败）', async () =
   const { status } = await run('POST', `/api/projects/${id}/characters/views`, { characterId: cid, view: 'left' });
   assert.equal(status, 502);
 });
+
+test('POST /characters/views/all 默认异步：立即返回 jobId，任务进度可查询', async () => {
+  const id = 'prj_char_job';
+  makeProject(id);
+  // 先有一个角色（Mock 提取即可）
+  const ex = await run('POST', `/api/projects/${id}/characters/extract`, { mode: 'heuristic' });
+  assert.equal(ex.status, 200);
+  assert.ok(ex.body.characters.length > 0);
+  const { status, body } = await run('POST', `/api/projects/${id}/characters/views/all`, {
+    scope: 'core', includeSheet: false,
+  });
+  assert.equal(status, 202, '长批量必须异步返回，不能挂住请求');
+  assert.ok(body.async);
+  assert.ok(body.jobId);
+  // 轮询到结束（Mock 出图很快）
+  let job = null;
+  for (let i = 0; i < 60; i += 1) {
+    const r = await run('GET', `/api/projects/${id}/characters/jobs/${body.jobId}`);
+    if (r.status === 200 && r.body.job) {
+      job = r.body.job;
+      if (job.status !== 'running') break;
+    }
+    await new Promise((res) => setTimeout(res, 80));
+  }
+  assert.ok(job, '任务必须可以查询到');
+  assert.notEqual(job.status, 'running', '任务应在超时前结束');
+  assert.ok(job.total > 0);
+  assert.equal(job.done, job.total);
+  // 项目级任务查询同样可恢复页面状态
+  const list = await run('GET', `/api/projects/${id}/characters/jobs`);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.job.id, body.jobId);
+});
+
+/* ---------------- 角色定妆任务：内存任务表丢失后回落到项目里落盘的快照 ----------------
+ * 第⑤步「角色与上下文」的任务进度条依赖 GET /characters/jobs；
+ * 服务重启后内存任务表为空，必须从项目 meta 的 portraitJob 恢复，
+ * 否则页面就是「任务进度和任务状态都没有」。
+ */
+function jobSnapshot(id, status) {
+  return {
+    id, projectId: 'prj_job_fallback', status, ok: status === 'done',
+    total: 10, done: status === 'done' ? 10 : 4, generated: 4, skipped: 0, sheets: 1,
+    failed: [], failedCount: 0, characters: 2, scope: 'core', sheet: true,
+    current: status === 'running' ? { characterId: 'c1', name: '林晚', view: 'side', label: '侧面' } : null,
+    byChar: {
+      c1: {
+        id: 'c1', name: '林晚', status: status === 'running' ? 'running' : 'done', total: 5,
+        views: { front: { status: 'done', provider: 'comfyui', url: '/assets/f.png', error: '' },
+          side: { status: status === 'running' ? 'running' : 'done', provider: '', url: '', error: '' } },
+      },
+    },
+    message: status === 'done' ? '全部完成' : '任务已开始', error: '',
+    startedAt: 1000, finishedAt: status === 'done' ? 2000 : null,
+  };
+}
+
+function makeProjectWithJob(id, status) {
+  const project = makeProject(id);
+  project.management.portraitJob = jobSnapshot(`pj_${id}`, status);
+  saveProject(project);
+  return project;
+}
+
+test('GET /characters/jobs：内存里没有任务时回落落盘快照，running 识别为中断', async () => {
+  const id = 'prj_job_fallback';
+  makeProjectWithJob(id, 'running');
+  const { status, body } = await run('GET', `/api/projects/${id}/characters/jobs`);
+  assert.equal(status, 200);
+  assert.equal(body.persisted, true, '来源标记为落盘快照');
+  assert.equal(body.job.status, 'interrupted', '重启后不能永远显示 running');
+  assert.match(body.job.message, /4\/10/, '已完成张数要保留，用户才知道跑到哪了');
+  assert.equal(body.job.byChar.c1.views.side.status, 'pending');
+});
+
+test('GET /characters/jobs/:jobId：按 id 也能取回落盘快照；不匹配的 id 仍是 404', async () => {
+  const id = 'prj_job_fallback';
+  const { status, body } = await run('GET', `/api/projects/${id}/characters/jobs/pj_${id}`);
+  assert.equal(status, 200);
+  assert.equal(body.job.id, `pj_${id}`);
+  const miss = await run('GET', `/api/projects/${id}/characters/jobs/pj_other`);
+  assert.equal(miss.status, 404);
+});
+
+test('GET /characters/jobs：终态快照原样返回（完成的任务不会被改写成中断）', async () => {
+  const id2 = 'prj_job_done_snap';
+  makeProjectWithJob(id2, 'done');
+  const { status, body } = await run('GET', `/api/projects/${id2}/characters/jobs`);
+  assert.equal(status, 200);
+  assert.equal(body.job.status, 'done');
+  assert.equal(body.job.done, 10);
+});

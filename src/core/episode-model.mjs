@@ -70,6 +70,11 @@ export function buildEpisodeRecords(episodes, novel, chapterSources = [], previo
       no: Number(ep.no), title: ep.title, chars: Number(ep.chars) || 0,
       summary: ep.summary || '', hook: ep.hook || '',
       sourceTitles: Array.isArray(ep.sourceTitles) ? ep.sourceTitles : [],
+      // 分季归属跟随集号保留：用户手动调过的季不因重算分集而丢失；
+      // 没有归属的集（新拆出来的）由 materializeEpisodes 的自动分季补齐。
+      // seasonAuto 标记「上次是自动归季」：换了每季集数后允许重排，手动移过的集不动
+      season: Number(prev?.season) || undefined,
+      seasonAuto: prev?.seasonAuto === true || undefined,
       text, excerpt: ep.excerpt || '', strategy: ep.strategy || '',
       chapters: byEpisode[ep.no] || [],
       characterIds: sameText && Array.isArray(prev.characterIds) ? prev.characterIds : [],
@@ -173,10 +178,10 @@ export function buildEpisodeGraph(project, m, ep) {
 
   const segments = Array.isArray(ep?.segments) ? ep.segments : [];
   segments.forEach((s, i) => {
-    const id = add({ id: `seg_${i}`, kind: 'segment', label: s.title, sub: `${s.chars} 字 · 9 格`, x: 720, y: 40 + i * 150, state: s.gridUrl ? 'done' : 'idle' });
+    const id = add({ id: `seg_${i}`, kind: 'segment', label: s.title, sub: `${s.chars} 字 · ${(s.cells||[]).length || 9} 格`, x: 720, y: 40 + i * 150, state: s.gridUrl ? 'done' : 'idle' });
     link(epId, id, 'flow', `第 ${i + 1} 段`);
     if (s.gridUrl) {
-      const gid = add({ id: `grid_${i}`, kind: 'grid', label: `宫格图 ${i + 1}`, sub: '3 × 3 分镜', url: s.gridUrl, x: 1060, y: 40 + i * 150, state: 'done' });
+      const gid = add({ id: `grid_${i}`, kind: 'grid', label: `分镜板 ${i + 1}`, sub: `${s.gridCells || (s.cells||[]).length || 9} 格分镜`, url: s.gridUrl, x: 1060, y: 40 + i * 150, state: 'done' });
       link(id, gid, 'ref', '对应图');
     }
   });
@@ -195,7 +200,8 @@ export function buildEpisodeGraph(project, m, ep) {
   const extras = [
     ['script', '剧本', ep?.script ? `${(ep.script.scenes || []).length} 场` : '未生成', Boolean(ep?.script)],
     ['pack', '导演包', ep?.pack ? '已导出' : '未导出', Boolean(ep?.pack)],
-    ['video', '视频', ep?.video ? 'ComfyUI 已生成' : '未生成', Boolean(ep?.video)],
+    ['film', '成片', ep?.film ? `${Number(ep.film.duration).toFixed(1)}s · ${ep.film.clips} 段` : '未拼接', Boolean(ep?.film)],
+    ['video', '预览片段', ep?.video ? 'ComfyUI 已生成' : '未生成', Boolean(ep?.video)],
   ];
   extras.forEach(([key, label, sub, done], i) => {
     const id = add({ id: key, kind: key, label, sub, url: key === 'pack' ? ep?.pack?.url : ep?.video?.url, x: 1400, y: 60 + i * 160, state: done ? 'done' : 'idle' });

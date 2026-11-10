@@ -12,6 +12,9 @@ import { placeholderFrame, characterViewFrame } from './raster.mjs';
 import { readAsset, writeAssetBinary, uid } from './store.mjs';
 import { resolveRuntimeSpec } from './runtime-spec.mjs';
 import { resolveCharacterRefs, refsManifest, describeRefs } from './character-refs.mjs';
+import { resolveFrameVisualPack, buildFramePrompts } from './shot-visuals.mjs';
+import { resolveStoryboardSettings } from './storyboard-settings.mjs';
+import { resolveInterface, MEDIA_SCOPES } from './comfy-config.mjs';
 
 const PACK_FORMAT = 'minimax-h3-director-pack';
 const PACK_VERSION = 1;
@@ -60,6 +63,7 @@ function incomingNode(project, nodeId, predicate) {
 /** 收集每个镜头组的完整制作信息 */
 export function collectShotPackages(project) {
   const runtime = resolveRuntimeSpec(project);
+  const style = project.settings?.style || 'cinematic';
   const videos = project.nodes.filter((n) => n.type === 'video' && n.data?.clip);
   const seq = (n) => Number(n.data?.sequence ?? n.data?.shot?.sequence ?? n.data?.shot?.shotNo ?? 0);
   videos.sort((a, b) => seq(a) - seq(b));
@@ -71,18 +75,26 @@ export function collectShotPackages(project) {
     const shotNo = Number(shot.shotNo) || i + 1;
     const keyframeUrl = review?.data?.keyframeUrl || n.data?.poster || clip.poster || (n.data?.frames || [])[0] || null;
     const endUrl = transitions[i]?.data?.transition?.url || null;
+    const duration = Number(n.data?.duration || clip.duration || shot.duration) || runtime.clipSeconds;
+    // 精确提示词：分镜画面在第⑤步已为每格生成 videoPrompt；画布镜头没有现成字段时
+    // 按同一公式现场构建 —— 多参考图槽位（定妆多视图 / 妆照）+ 首帧 + 站位图 +
+    // 运镜与角色一致性约束，导演台拿到的是可直接投喂的完整提示词。
+    const sheet = resolveStoryboardSettings(project);
+    const visual = resolveFrameVisualPack(project, shot);
+    const built = buildFramePrompts({
+      shot: { ...shot, shotNo, duration }, visual, settings: sheet, style,
+      duration, fps: runtime.fps,
+    });
     const prompt = [
       `镜头 ${shotNo}｜${shot.size || '中景'}｜${shot.angle || '平视'}｜${shot.movement || '固定'}`,
-      shot.ffDesc || '',
-      shot.motionDesc ? `动作与运镜：${shot.motionDesc}` : '',
-      shot.audioDesc ? `声音设计：${shot.audioDesc}` : '',
-      i > 0 ? '承接上一镜头的运动与光线，保持角色外观与空间关系连续' : '建立本场戏的空间与人物关系',
+      built.videoPrompt,
     ].filter(Boolean).join('。');
     return {
       index: i + 1, shotNo, nodeId: n.id,
       title: n.title || `镜头 ${shotNo}`,
       prompt, shot, clip, keyframeUrl, endUrl,
-      duration: Number(n.data?.duration || clip.duration || shot.duration) || runtime.clipSeconds,
+      refPlan: built.refPlan, refNote: built.refNote,
+      duration,
       realVideo: Boolean(clip.file && clip.provider === 'comfyui'),
     };
   });
@@ -237,6 +249,9 @@ function buildMiniMaxEntries(project, cfg, ctx) {
     const group = {
       id: `shot_${s.shotNo}`,
       prompt: s.prompt, negativePrompt: negative,
+      // 多参考图计划：逐张写明「哪张锁身份 / 哪张锁转身 / 哪张是妆照兜底」，
+      // 导演台据此把 shared_params 角色图与组内首帧按用途接进参考槽位
+      refPlan: s.refPlan || [], refNote: s.refNote || '',
       durationSec: s.duration, frameCount, length: frameCount, start: cursor,
       taskType: '', refs: groupRefs, refAudios: [], refVideos: [],
       continuityFromPrev: s.index > 1, refImageSize: 'match',
@@ -297,6 +312,35 @@ function buildMiniMaxEntries(project, cfg, ctx) {
   return { entries, groupSummaries, sharedRefs, output, taskType, totalFrames: cursor, commonPrompt };
 }
 
+/**
+ * 导演包里附带的 API 工作流清单。
+ * 两个通用入口的文件名保持历史不变（下游 Import pack 依赖），内容改为按板块绑定解析出的
+ * 「实际会执行的接口档案」；另外为每个显式绑定的板块追加一份带 scope 名的文件，便于在
+ * ComfyUI 里分辨封面 / 定妆 / 关键帧 / 视频各用的是哪份工作流与参数。
+ */
+function interfaceExports(cfg, pathFor) {
+  const files = [];
+  const add = (label, scope, resolved) => {
+    let wf = resolved?.workflow;
+    if (!wf) return;
+    if (typeof wf === 'string') { try { wf = JSON.parse(wf); } catch { return; } }
+    if (!wf || typeof wf !== 'object' || Array.isArray(wf)) return;
+    files.push({
+      name: pathFor(label), data: JSON.stringify(wf, null, 2) + '\n',
+      scope, id: resolved.interfaceId || null,
+      interfaceName: resolved.interfaceName || '', via: resolved.via,
+    });
+  };
+  add('image', 'keyframe', resolveInterface(cfg, { kind: 'image', scope: 'keyframe' }));
+  add('video', 'video', resolveInterface(cfg, { kind: 'video', scope: 'video' }));
+  for (const scope of MEDIA_SCOPES) {
+    const bound = cfg?.scopeBindings?.[scope];
+    if (!bound) continue;
+    add(`scope_${scope}`, scope, resolveInterface(cfg, { scope, interfaceId: bound }));
+  }
+  return files;
+}
+
 function buildGenericEntries(project, cfg, ctx) {
   const { shots, characters, style } = ctx;
   const entries = [];
@@ -318,13 +362,13 @@ function buildGenericEntries(project, cfg, ctx) {
     characters, shots: shots.map((s, i) => ({
       no: s.shotNo, title: s.title, duration: s.duration,
       prompt: s.prompt, shot: s.shot,
+      refPlan: s.refPlan || [], refNote: s.refNote || '',
       startImage: `images/shot-${String(i + 1).padStart(2, '0')}-start.png`,
       clip: s.clip?.file || null,
     })),
   });
-  for (const [key, label] of [['imageWorkflow', 'image'], ['videoWorkflow', 'video']]) {
-    if (cfg[key]) putJSON(`workflows/${label}_api.json`, typeof cfg[key] === 'string' ? JSON.parse(cfg[key]) : cfg[key]);
-  }
+  // 导出实际生效的接口档案（板块绑定优先），而不是只写全局镜像
+  for (const f of interfaceExports(cfg, (label) => `workflows/${label}_api.json`)) put(f.name, f.data);
   return { entries, groupSummaries: shots.map((s, i) => ({ no: s.shotNo, title: s.title, duration: s.duration, startFrame: `images/shot-${String(i + 1).padStart(2, '0')}-start.png`, realVideo: s.realVideo })) };
 }
 
@@ -354,6 +398,9 @@ export function buildDirectorPack(project, cfg = {}) {
     : `lingximanju-${slug}-${stamp}.mmxpack.zip`;
 
   const script = project.nodes.find((n) => n.type === 'script')?.data?.script || null;
+  const exportedInterfaces = interfaceExports(cfg, target === 'generic'
+    ? (label) => `workflows/${label}_api.json`
+    : (label) => `extra/comfyui_${label}_workflow_api.json`);
   const manifest = {
     generator: 'lingximanju', format: target === 'generic' ? 'lingximanju-comfyui-pack' : PACK_FORMAT,
     formatVersion: PACK_VERSION, target, generatedAt: new Date().toISOString(),
@@ -372,6 +419,11 @@ export function buildDirectorPack(project, cfg = {}) {
     })),
     styleLock: ctx.characters.find((c) => c.styleLock)?.styleLock || '',
     realVideoClips: ctx.shots.filter((s) => s.realVideo).length,
+    // 各板块实际使用的 ComfyUI 接口档案与导出文件名，便于核对包里的工作流来源
+    interfaces: exportedInterfaces.map((f) => ({
+      file: f.name, scope: f.scope, interfaceId: f.id,
+      name: f.interfaceName, via: f.via,
+    })),
     groups: extra.groupSummaries,
     note: ctx.shots.some((s) => s.realVideo)
       ? '关键帧与视频片段来自本地 ComfyUI 实际输出。'
@@ -422,6 +474,7 @@ export function buildDirectorPack(project, cfg = {}) {
         no: s.shotNo, title: s.title, duration: s.duration,
         prompt: s.prompt, shot: s.shot,
         keyframeUrl: s.keyframeUrl, endUrl: s.endUrl,
+        refPlan: s.refPlan || [], refNote: s.refNote || '',
         clipFile: s.clip?.file || null, realVideo: s.realVideo,
       })),
       characters: refsManifest(ctx.characters).map((c, i) => ({
@@ -434,13 +487,7 @@ export function buildDirectorPack(project, cfg = {}) {
       styleLock: manifest.styleLock,
       script,
     }, null, 2) + '\n' });
-    for (const [key, label] of [['imageWorkflow', 'image'], ['videoWorkflow', 'video']]) {
-      if (!cfg[key]) continue;
-      try {
-        const wf = typeof cfg[key] === 'string' ? JSON.parse(cfg[key]) : cfg[key];
-        entries.push({ name: `extra/comfyui_${label}_workflow_api.json`, data: JSON.stringify(wf, null, 2) + '\n' });
-      } catch { /* 忽略无效工作流 */ }
-    }
+    for (const f of exportedInterfaces) entries.push({ name: f.name, data: f.data });
     const poster = media(project.nodes.find((n) => n.type === 'final')?.data?.poster, { style, kind: 'poster' });
     entries.push({ name: 'extra/poster.png', data: poster.ext === '.png' ? poster.data : placeholderFrame({ style, kind: 'poster' }) });
   } else {

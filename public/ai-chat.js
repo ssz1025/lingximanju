@@ -7,6 +7,7 @@
 
 /** 模型选择器（可选）：库里有模型时在输入栏前插入下拉，本次对话用哪个模型由用户临时决定 */
 import { ensureModelPicker } from './model-picker.js';
+import { ensureInterfacePicker } from './interface-picker.js';
 import { openPage } from './page.js';
 import { esc as $esc } from './utils.js';
 
@@ -33,6 +34,7 @@ export function openAIChat(o = {}) {
     actions = {},
     onClose = null,
     modelEntry = null,   // 模型库入口 key：设置后输入栏左侧出现模型下拉（如 'cover'）
+    interfaceEntry = null, // 媒体生成板块 key：设置后输入栏出现「本次接口」下拉（如 'cover'）
   } = o;
 
   const history = [];               // [{role:'user'|'assistant', content}] 文本对话上下文
@@ -76,6 +78,7 @@ export function openAIChat(o = {}) {
   const input = backdrop.querySelector('[data-aichat="input"]');
   const sendBtn = backdrop.querySelector('[data-aichat="send"]');
   if (modelEntry) ensureModelPicker(modelEntry, backdrop.querySelector('.aichat-inputbar'), input);
+  if (interfaceEntry) ensureInterfacePicker(interfaceEntry, backdrop.querySelector('.aichat-inputbar'), input);
 
   /** 气泡内图片点击放大：组件内自建 lightbox，保持零依赖（不引入 panels 的预览弹窗） */
   function openImgPreview(src) {

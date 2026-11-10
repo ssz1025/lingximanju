@@ -6,29 +6,41 @@ import { registerAsset } from '../../core/assets.mjs';
 import { emit } from '../../core/events.mjs';
 import { ensureManagement, applyManageAction, projectStats, stepProgress, STEPS } from '../../core/project-steps.mjs';
 import { attachSource } from '../../pipelines/novel-project.mjs';
-import { isRunning } from '../../core/orchestrator.mjs';
+import { isRunning, runProject } from '../../core/orchestrator.mjs';
+import { reconcileProjectComfy, watchComfyJobs } from '../../core/comfy-reconcile.mjs';
+import { isRealKeyframe, keyframeImage } from '../../core/keyframe-status.mjs';
 import { resolveComfyConfig } from '../../core/comfy-config.mjs';
 import { parseWorkflow, runWorkflow } from '../../core/comfyui.mjs';
 import { executeSteps, broadcastMeta } from '../../core/step-runner.mjs';
 import { createProviders } from '../../core/providers.mjs';
 import { mergeExtracted } from '../../core/characters.mjs';
+// 音色分配智能体：提取角色后自动为每个角色绑定互不重复的音色
+import { assignVoices } from '../../agents/voice-agent.mjs';
 // 角色定妆业务层：路由只是薄壳，路由 / 智能体 / 导演能力共用同一口径
 import {
   generateCharacterView, generateCharacterSheet, ensureCharacterPortraits,
   characterReadyForVideo, emitPortraitProgress,
 } from '../../core/character-portrait.mjs';
+// 角色定妆后台任务：长批量不再挂在一个 HTTP 请求上，逐张落盘 + SSE 进度 + 可查询/可暂停
+import {
+  startPortraitJob, getPortraitJob, getProjectPortraitJob, cancelPortraitJob, stalePortraitJob,
+} from '../../core/portrait-jobs.mjs';
 // 角色提取 / 封面智能体（agents 统一目录）：业务 Agent 与路由解耦，画布节点复用同一函数
 import { extractProjectCharacters } from '../../agents/character-agent.mjs';
 import { designCoverPrompt, MAX_COVER_REFS, parseImagePayload, resolveChatRefs, coverChat } from '../../agents/cover-agent.mjs';
 import { resolveModelSettings } from '../../core/app-settings.mjs';
+// 分镜板业务 Agent：分镜画面设置 + 按版式重排每段分镜板（业务口径不散落在路由里）
+import { planStoryboardSheets, composeStoryboardSheets } from '../../agents/storyboard-agent.mjs';
 
 /**
  * 单视图生成的内联实现已抽到 core/character-portrait.mjs。
  * 保留此薄封装只为兼容旧调用点，逻辑与业务层完全一致（不维护第二套口径）。
  */
-async function generateView(project, m, character, viewKey, modelId = '') {
+async function generateView(project, m, character, viewKey, modelId = '', opts = {}) {
   const out = await generateCharacterView({
     project, m, character, viewKey, modelId,
+    requireReal: opts.requireReal === true,
+    interfaceId: String(opts.interfaceId || '').slice(0, 60),
     log: (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }),
   });
   return out;
@@ -108,12 +120,13 @@ export async function handleManagement(req, res, url) {
     }
   }
 
-  // ---------- 项目封面：上传 / ComfyUI 生成 / AI 对话式创作 / 恢复名称封面 ----------
+  // ---------- 项目封面：上传 / ComfyUI 生成 / AI 对话式创作 / AI 一键生成 / 恢复名称封面 ----------
   const coverMatch = pathname.match(MATCH.cover);
   const coverGenMatch = pathname.match(MATCH.coverGenerate);
   const coverChatMatch = pathname.match(MATCH.coverChat);
-  if (coverMatch || coverGenMatch || coverChatMatch) {
-    const id = (coverMatch || coverGenMatch || coverChatMatch)[1];
+  const coverAiMatch = pathname.match(MATCH.coverAi);
+  if (coverMatch || coverGenMatch || coverChatMatch || coverAiMatch) {
+    const id = (coverMatch || coverGenMatch || coverChatMatch || coverAiMatch)[1];
     const project = loadProject(id);
     if (!project) return json(res, { error: '项目不存在' }, 404), true;
     const m = ensureManagement(project);
@@ -149,13 +162,61 @@ export async function handleManagement(req, res, url) {
       }
     }
 
+    // AI 一键生成封面：提示词 agent 设计画面 → 有 ComfyUI 工作流 / 图像接口时真实出图，
+    // 都没有时用内置海报绘制兜底，保证「点一下总有封面」，并直接落定为项目封面
+    if (coverAiMatch && method === 'POST') {
+      const body = await readBody(req);
+      const log = (level, msg) => emit('log', { projectId: id, level, message: `AI 封面 · ${msg}` });
+      try {
+        const providers = createProviders(resolveModelSettings(project, body.modelId), log);
+        const designed = await designCoverPrompt({
+          project, m, providers, modelId: body.modelId,
+          requirement: String(body.requirement || m.bible?.logline || '').trim(),
+          log,
+        });
+        const img = await providers.image({
+          kind: 'poster', interfaceId: String(body.interfaceId || '').slice(0, 60),
+          prompt: designed.prompt,
+          negative: designed.negative,
+          label: String(m.bible?.title || project.name),
+          style: project.settings?.style,
+          shotCount: (m.episodes || []).length,
+        });
+        const url = String(img?.url || '');
+        if (!url) throw new Error('图像生成未返回可用图片');
+        const file = url.startsWith('/assets/') ? url.slice(8) : '';
+        if (file) {
+          registerAsset({ file, kind: 'cover', name: `${project.name} 封面`, sourceProjectId: id, sourceProjectName: project.name });
+        }
+        const out = applyManageAction(project, 'cover', {
+          url, source: img.provider === 'comfyui' ? 'comfyui' : 'ai', prompt: designed.prompt,
+        });
+        if (!out.ok) return json(res, out, 400), true;
+        saveProject(project);
+        broadcastMeta(project);
+        emit('state', { projectId: id, project, reason: 'cover' });
+        return json(res, {
+          ok: true, cover: m.cover, prompt: designed.prompt, generated: { file, url },
+          provider: img.provider || 'mock', promptSource: designed.source,
+          message: img.provider === 'comfyui' ? 'AI 已按项目设定生成封面（ComfyUI）'
+            : img.provider === 'remote' ? 'AI 已按项目设定生成封面（图像接口）'
+            : 'AI 已生成封面草图（未配置出图工作流，使用内置海报绘制）',
+        }), true;
+      } catch (err) {
+        return json(res, { error: `AI 生成封面失败：${err.message}` }, 502), true;
+      }
+    }
+
     // ComfyUI 出图生成封面（约 1–2 分钟，需已配置 imageWorkflow）；支持多参考图（资源库图片 / 本地上传）
     if (coverGenMatch && method === 'POST') {
-      const config = resolveComfyConfig(project);
+      const body = await readBody(req);
+      // 封面板块：默认走全局选中的出图接口，可绑定其它接口，也可由本次请求临时指定
+      const config = resolveComfyConfig(project, undefined, {
+        scope: 'cover', interfaceId: String(body.interfaceId || '').slice(0, 60),
+      });
       if (!config.enabled || !config.imageWorkflow) {
         return json(res, { error: '尚未配置 ComfyUI 出图工作流，请先在设置中导入「导出(API)」工作流' }, 400), true;
       }
-      const body = await readBody(req);
       const wf = parseWorkflow(config.imageWorkflow, '出图工作流');
       // 文本框内容即完整提示词（AI 生成或用户精调）原样使用；为空时交由独立提示词 agent 按项目资料设计（模板兜底）
       const rawPrompt = String(body.prompt || '').trim().slice(0, 2000);
@@ -225,6 +286,8 @@ export async function handleManagement(req, res, url) {
         const file = String(url || '').startsWith('/assets/') ? String(url).slice(8) : '';
         recordCall({
           ok: Boolean(file),
+          interfaceId: config.resolvedInterface?.id || null,
+          interfaceName: config.resolvedInterface?.name || '',
           promptId: result.promptId, durationMs: result.durationMs,
           promptInjection: result.promptInjection || null,
           applied: (result.applied || []).map((a) => ({ node: a.node, input: a.input, by: a.by })),
@@ -306,13 +369,197 @@ export async function handleManagement(req, res, url) {
     if (!out.ok) return json(res, out, 400), true;
     saveProject(project);
     broadcastMeta(project);
+    // 提取即配声：给还没有音色的角色自动分配「互不重复」的音色（音色分配 Agent，
+    // LLM 优先 / 启发式兜底；手动指定过的绑定原样保留）。失败不阻断提取主流程。
+    let voiceResult = null;
+    try {
+      voiceResult = await assignVoices({
+        project, m, onlyMissing: true, modelId: body.modelId,
+        log: (level, msg) => emit('log', { projectId: id, level, message: `音色分配 · ${msg}` }),
+      });
+      if (voiceResult.applied) {
+        saveProject(project);
+        broadcastMeta(project);
+      }
+    } catch (err) {
+      emit('log', { projectId: id, level: 'warn', message: `提取后自动分配音色失败（不影响角色）：${err.message}` });
+    }
     emit('state', { projectId: id, project, reason: 'characters' });
     return json(res, {
       ok: true, characters: m.characters,
-      added: merged.added, merged: merged.merged,
+      added: merged.added, merged: merged.merged, removed: merged.removed || [],
       fellBack: result.fellBack, message: result.message,
       source: result.source, stats: result.stats,
+      voice: voiceResult ? { applied: voiceResult.applied, skipped: voiceResult.skipped, message: voiceResult.message } : null,
     }), true;
+  }
+
+  /**
+   * 单镜头重出分镜图：第⑤步面板上「↻ 重出本镜」的后端。
+   * 只把这一镜的关键帧 / 择优复位（清掉上一轮候选，含占位图），
+   * 其它镜头已出的真实图不受影响——40 镜全量重出要几十分钟 GPU，不能为一张图全烧。
+   */
+  const shotRegenMatch = pathname.match(MATCH.shotRegen);
+  if (shotRegenMatch) {
+    if (method !== 'POST') return json(res, { error: '需要 POST' }, 405), true;
+    const id = decodeURIComponent(shotRegenMatch[1]);
+    const shotKey = decodeURIComponent(shotRegenMatch[2]);
+    const project = loadProject(id);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    if (isRunning(id)) return json(res, { error: '项目正在运行，等当前任务结束再重出这一镜' }, 409), true;
+    const shotNode = (project.nodes || []).find((n) => n.type === 'shot'
+      && (n.id === shotKey
+        || String(n.data?.shot?.shotNo) === shotKey
+        || String(n.data?.shot?.sequence) === shotKey));
+    if (!shotNode) return json(res, { error: '镜头不存在' }, 404), true;
+    const edges = project.edges || [];
+    const keyframeNode = (project.nodes || []).find((n) => n.type === 'keyframe'
+      && edges.some((e) => e.from === shotNode.id && e.to === n.id));
+    if (!keyframeNode) return json(res, { error: '这个镜头还没有关键帧节点：请先执行第④步展开镜头链' }, 400), true;
+    keyframeNode.status = 'idle'; keyframeNode.progress = 0; keyframeNode.error = '';
+    keyframeNode.data = { ...(keyframeNode.data || {}), candidates: [] };
+    const reviewNode = (project.nodes || []).find((n) => n.type === 'review'
+      && edges.some((e) => e.from === keyframeNode.id && e.to === n.id));
+    if (reviewNode) {
+      reviewNode.status = 'idle'; reviewNode.progress = 0; reviewNode.error = '';
+      reviewNode.data = { ...(reviewNode.data || {}), keyframeUrl: '', candidates: [], selected: 0, scores: [] };
+    }
+    saveProject(project);
+    broadcastMeta(project);
+    emit('log', { projectId: id, level: 'info', message: `↻ 重出镜头 ${shotNode.data?.shot?.shotNo ?? '?'}：只复位这一镜的关键帧与择优` });
+    try {
+      const summary = await runProject(id, { project, scope: ['keyframe', 'review'], videoStage: false });
+      saveProject(project);
+      broadcastMeta(project);
+      emit('state', { projectId: id, project, reason: 'storyboard-shot' });
+      const image = keyframeImage(keyframeNode);
+      const real = isRealKeyframe(keyframeNode);
+      const err = keyframeNode.error || '';
+      return json(res, {
+        ok: real,
+        shotNo: shotNode.data?.shot?.shotNo ?? null,
+        nodeId: keyframeNode.id,
+        image: image ? { url: image.url, provider: image.provider, prompt: image.prompt } : null,
+        status: keyframeNode.status,
+        error: err,
+        message: real ? `镜头 ${shotNode.data?.shot?.shotNo ?? ''} 已重出真实分镜图`
+          : `镜头 ${shotNode.data?.shot?.shotNo ?? ''} 仍未拿到真实图：${err || 'ComfyUI 未返回图片'}`,
+        run: { nodes: summary.nodeCount, failed: summary.failed },
+      }), true;
+    } catch (runErr) {
+      return json(res, { error: `重出本镜失败：${runErr.message}` }, 502), true;
+    }
+  }
+
+  /**
+   * ComfyUI 任务对账（第⑥步任务看板「⟲ 检查已完成」）。
+   * 为什么需要它：ComfyUI 是独立进程，服务重启 / 请求中断后它的队列和历史还在，
+   * 但画布节点会停在「已发送 · 排队中」。这条路由把已完成的任务直接取回，
+   * 正在跑 / 排队的保留状态，只有 ComfyUI 侧也查不到的才复位；
+   * body.resubmit=true 时把复位掉的重新发一遍（找不到才重发，绝不无脑重烧）。
+   */
+  const recMatch = pathname.match(MATCH.comfyReconcile);
+  if (recMatch) {
+    if (method !== 'POST') return json(res, { error: '需要 POST' }, 405), true;
+    const id = decodeURIComponent(recMatch[1]);
+    const project = loadProject(id);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    const body = await readBody(req).catch(() => ({}));
+    const cfg = resolveComfyConfig(project);
+    // 项目正在跑时不复位任何节点（否则会和当前调度打架）：只做「取回已完成」
+    const runningNow = isRunning(id);
+    // auto=true 是页面打开第⑥步时的静默自检：正在跑的项目直接跳过，绝不去动实时调度
+    if (body?.auto === true && runningNow) {
+      return json(res, { ok: true, skipped: 'running', message: '项目正在运行，跳过自检' }), true;
+    }
+    const report = await reconcileProjectComfy(project, {
+      config: cfg, resetMissing: !runningNow,
+      log: (level, message) => emit('log', { projectId: id, level, message }),
+    });
+    if (!report.ok) return json(res, { ok: false, ...report }, 200), true;
+
+    // 复位（查无结果 → 待发送）同样要落盘：否则刷新页面这些节点又变回「排队中」，
+    // 用户看到的假象就永远修不掉。
+    if (report.adopted.length || report.reset.length || report.running.length || report.queued.length) {
+      saveProject(project);
+      broadcastMeta(project);
+      emit('state', { projectId: id, project, reason: 'comfy-reconcile' });
+    }
+
+    let resubmit = null;
+    if (body?.resubmit === true && report.lost.length) {
+      if (runningNow) {
+        resubmit = { started: false, message: '项目正在运行，等当前任务结束后再重发' };
+      } else {
+        const types = [...new Set(report.lost.map((n) => n.type))].filter((t) => t !== 'review');
+        emit('log', { projectId: id, level: 'info',
+          message: `↻ 重新发送 ${report.lost.length} 条在 ComfyUI 查无结果的任务（${types.join(' / ')}）` });
+        try {
+          const summary = await runProject(id, {
+            project, scope: types,
+            videoStage: types.includes('video') || types.includes('transition'),
+          });
+          saveProject(project);
+          broadcastMeta(project);
+          emit('state', { projectId: id, project, reason: 'comfy-resubmit' });
+          resubmit = {
+            started: true, count: report.lost.length,
+            run: { status: summary.status, nodes: summary.nodeCount, failed: summary.failed },
+          };
+        } catch (err) {
+          resubmit = { started: false, message: `重发失败：${err.message}` };
+        }
+      }
+    }
+
+    if (report.running.length || report.queued.length) watchComfyJobs(id, cfg);
+    return json(res, {
+      ok: true, ...report, resubmit,
+      message: resubmit?.started
+        ? `${report.message}；已重新发送 ${report.lost.length} 条`
+        : report.message,
+    }), true;
+  }
+
+  /**
+   * 分镜画面设置 + 分镜板重排（第⑤步操作台）。
+   * GET  ：读设置 / 版式清单 / 统计（几张板、几格、几张真实分镜图、几张板与当前版式不一致）
+   * POST ：保存设置（可选）→ 按版式重排所有段的分镜板（纯 SVG 合成，不动关键帧、不烧 GPU）
+   * 面板上的「保存并重排分镜图」就是走这条路由；「只保存」走 manage 的 storyboard 动作。
+   */
+  const sheetsMatch = pathname.match(MATCH.storyboardSheets);
+  if (sheetsMatch) {
+    const id = decodeURIComponent(sheetsMatch[1]);
+    const project = loadProject(id);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    const m = ensureManagement(project);
+    if (method === 'GET') {
+      return json(res, { ok: true, ...planStoryboardSheets(project, m) }), true;
+    }
+    if (method !== 'POST') return json(res, { error: '需要 GET / POST' }, 405), true;
+    const body = await readBody(req);
+    const patch = body?.settings && typeof body.settings === 'object' ? body.settings : body;
+    try {
+      const out = await composeStoryboardSheets({
+        project, m,
+        patch: patch && typeof patch === 'object' ? patch : {},
+        log: (level, message) => emit('log', { projectId: id, level, message }),
+      });
+      if (!out.ok) return json(res, out, 400), true;
+      saveProject(project);
+      broadcastMeta(project);
+      emit('state', { projectId: id, project, reason: 'storyboard-sheets' });
+      emit('log', {
+        projectId: id, level: 'info',
+        message: `分镜板已重排：${out.description || ''} · ${out.grids} 张`,
+      });
+      return json(res, {
+        ok: true, ...out,
+        management: m, stats: projectStats(project), progress: stepProgress(m),
+      }), true;
+    } catch (err) {
+      return json(res, { error: `分镜板重排失败：${err.message}` }, 502), true;
+    }
   }
 
   const charViewsMatch = pathname.match(MATCH.charViews);
@@ -331,6 +578,8 @@ export async function handleManagement(req, res, url) {
         const out = await generateCharacterSheet({
           project, m, character, modelId: body.modelId,
           views: Array.isArray(body.views) && body.views.length ? body.views : null,
+          requireReal: body.requireReal === true,
+          interfaceId: String(body.interfaceId || '').slice(0, 60),
           log: (level, msg) => emit('log', { projectId: id, level, message: `角色定妆板 · ${msg}` }),
         });
         saveProject(project);
@@ -341,7 +590,8 @@ export async function handleManagement(req, res, url) {
           characters: m.characters,
         }), true;
       }
-      const out = await generateView(project, m, character, String(body.view || ''), body.modelId);
+      const out = await generateView(project, m, character, String(body.view || ''), body.modelId,
+        { requireReal: body.requireReal === true, interfaceId: body.interfaceId });
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'characters' });
@@ -357,6 +607,10 @@ export async function handleManagement(req, res, url) {
   /**
    * 批量补全定妆：scope=core（正面/3-4 侧/侧面/背面）或 all（含面部特写）；
    * includeSheet=true 时同时生成定妆板。逐张落盘 + SSE 进度，可断点续跑。
+   *
+   * 默认异步：立即返回 jobId，生成在后台继续跑（12 位角色 × 6 张 ≈ 40 分钟，
+   * 挂在一个同步请求上会导致前端「一直待生成」、刷新即失联）。
+   * 传 sync:true 可退回同步语义（脚本/测试用）。
    */
   const charViewsAllMatch = pathname.match(MATCH.charViewsAll);
   if (charViewsAllMatch) {
@@ -373,11 +627,50 @@ export async function handleManagement(req, res, url) {
     const scope = String(body.scope || (body.allViews === true ? 'core' : 'core'));
     const onlyMissing = body.onlyMissing !== false;
     const includeSheet = body.includeSheet === true || body.sheet === true;
+    const jobOpts = {
+      scope, onlyMissing, sheet: includeSheet,
+      characterIds: Array.isArray(body.characterIds) ? body.characterIds : null,
+      regenerateMock: body.regenerateMock === true,
+      requireReal: body.requireReal === true,
+      concurrency: Number(body.concurrency) || 2,
+      modelId: body.modelId,
+      interfaceId: String(body.interfaceId || '').slice(0, 60),
+    };
+
+    if (body.sync !== true) {
+      const job = startPortraitJob({
+        project, m, opts: jobOpts,
+        hooks: {
+          save: () => saveProject(project),
+          // 任务快照写进项目：服务重启 / 进程退出后第⑤步仍能看到进度与「最近一次」状态
+          persist: (snapshot) => {
+            m.portraitJob = snapshot;
+            try { saveProject(project); } catch { /* 落盘失败不影响任务继续跑 */ }
+          },
+          onFinish: () => {
+            broadcastMeta(project);
+            emit('state', { projectId: id, project, reason: 'characters' });
+          },
+        },
+      });
+      const pending = job.total - job.done;
+      return json(res, {
+        ok: true, async: true, jobId: job.id, total: job.total,
+        message: job.status === 'running'
+          ? `已开始生成：${job.characters} 位角色 · 待出 ${pending} 张（后台任务，关闭页面也会继续）`
+          : job.message,
+        job,
+      }, 202), true;
+    }
+
     try {
       const out = await ensureCharacterPortraits({
         project, m,
         scope, onlyMissing, sheet: includeSheet,
         characterIds: Array.isArray(body.characterIds) ? body.characterIds : null,
+        regenerateMock: body.regenerateMock === true,
+        requireReal: body.requireReal === true,
+        interfaceId: String(body.interfaceId || '').slice(0, 60),
         modelId: body.modelId,
         save: () => saveProject(project),
         log: (level, msg) => emit('log', { projectId: id, level, message: `角色定妆 · ${msg}` }),
@@ -409,6 +702,38 @@ export async function handleManagement(req, res, url) {
       return json(res, { error: `批量定妆失败：${err.message}` }, 502), true;
     }
   }
+
+  // ---------- 角色定妆任务：查询进度 / 恢复页面状态 / 暂停 ----------
+  const charJobMatch = pathname.match(MATCH.charJob);
+  if (charJobMatch) {
+    const id = decodeURIComponent(charJobMatch[1]);
+    const jobId = charJobMatch[2];
+    const project = loadProject(id);
+    if (!project) return json(res, { error: '项目不存在' }, 404), true;
+    if (method === 'POST') {
+      const body = await readBody(req);
+      if (body.action === 'cancel') {
+        const job = cancelPortraitJob(jobId);
+        return json(res, { ok: true, job }, job ? 200 : 404), true;
+      }
+    }
+    // 内存任务表里没有（重启 / 已过保留期）时回落到项目里落盘的快照
+    const saved = ensureManagement(project).portraitJob;
+    const job = getPortraitJob(jobId)
+      || (saved && String(saved.id) === String(jobId) ? stalePortraitJob(saved) : null);
+    if (!job || job.projectId !== id) return json(res, { error: '任务不存在或已过期' }, 404), true;
+    return json(res, { ok: true, job }), true;
+  }
+  const charJobsMatch = pathname.match(MATCH.charJobs);
+  if (charJobsMatch) {
+    const id = decodeURIComponent(charJobsMatch[1]);
+    const live = getProjectPortraitJob(id);
+    if (live) return json(res, { ok: true, job: live, persisted: false }), true;
+    const project = loadProject(id);
+    const saved = project ? ensureManagement(project).portraitJob : null;
+    return json(res, { ok: true, job: stalePortraitJob(saved), persisted: true }), true;
+  }
+
 
   // ---------- AI 生成小说：大纲预览 / 整本生成并注入（等价于上传小说，完成 ①② 步） ----------
   const novelAiMatch = pathname.match(MATCH.novelAi);
@@ -512,34 +837,68 @@ export async function handleManagement(req, res, url) {
     if (!project) return json(res, { error: '项目不存在' }, 404), true;
     const m = ensureManagement(project);
     const body = await readBody(req);
-    const idea = String(body.idea || '').trim().slice(0, 600);
-    if (!idea) return json(res, { error: '请先输入一句话故事构想，AI 才能据此补全项目信息' }, 400), true;
+    // 一键生成不强制用户先写构想：没有构想时用项目名 / 原著标题作为题材依据
+    const idea = String(body.idea || m.bible?.logline || m.source?.title || project.name || '').trim().slice(0, 600);
+    if (!idea) return json(res, { error: '请先输入一句话故事构想或给项目命名，AI 才能据此补全项目信息' }, 400), true;
     const providers = createProviders(resolveModelSettings(project, body.modelId),
       (level, msg) => emit('log', { projectId: id, level, message: `AI 项目信息 · ${msg}` }));
     try {
-      const out = await providers.generate('storyIdea', { idea, title: project.name, style: project.settings?.style });
+      // 显式点「AI 一键生成」时允许整组重写（否则只补空字段，已有名称/设定永远改不动）
+      const overwrite = body.regenerate === true && providers.mode === 'openai';
+      const out = await providers.generate('storyIdea', {
+        idea, title: overwrite ? undefined : project.name, style: project.settings?.style,
+      });
       const fromMock = providers.mode !== 'openai' || Boolean(out.__fallback) || (out.__mockKeys || []).includes('logline');
-      // 只补空字段：用户已填的信息不被 AI 覆盖
+      // 真实模型调用失败时不再拿内置模板冒充 AI 结果写进项目（旧行为会让用户以为生成成功）
+      if (providers.mode === 'openai' && out.__fallback) {
+        return json(res, {
+          ok: true, bible: m.bible, filled: 0, name: project.name, source: 'fallback',
+          message: 'AI 调用失败（模型未返回有效内容，详见运行日志），已保留现有项目信息',
+        }), true;
+      }
+      // 只有真实模型产出才允许整组重写；内置模板只在字段为空时补位，绝不覆盖用户内容
+      const canRewrite = overwrite && !fromMock;
+      const templateKeys = new Set(out.__mockKeys || []);
       const b = m.bible || {};
       const patch = {};
       const fields = ['title', 'genre', 'audience', 'logline', 'tone', 'artStyle', 'firstEpisodeTheme', 'worldview'];
       for (const f of fields) {
         const v = String(out?.[f] || '').trim();
-        if (v && !String(b[f] || '').trim()) patch[f] = v;
+        if (!v) continue;
+        if (canRewrite) {
+          // 整组重写时也只采纳模型自己产出的字段，模板补位值不写回
+          if (!templateKeys.has(f)) patch[f] = v;
+        } else if (!String(b[f] || '').trim()) {
+          patch[f] = v;
+        }
       }
       if (!Object.keys(patch).length) {
-        return json(res, { ok: true, bible: m.bible, filled: 0, source: fromMock ? 'mock' : 'llm', message: '项目信息已完整，无需补全（清空字段后可重新生成）' }), true;
+        const failed = providers.mode === 'openai' && fromMock;
+        return json(res, {
+          ok: true, bible: m.bible, filled: 0, name: project.name,
+          source: fromMock ? (providers.mode === 'openai' ? 'fallback' : 'mock') : 'llm',
+          message: failed ? 'AI 调用未返回有效内容，已保留现有项目信息，请稍后重试'
+            : '项目信息已完整，无需补全（清空字段后可重新生成）',
+        }), true;
       }
       const applied = applyManageAction(project, 'bible', patch);
       if (!applied.ok) return json(res, applied, 400), true;
+      // 项目名：占位名必改；一键生成（overwrite）时以 AI 剧名为准，让「项目名称」确实被生成
+      const placeholder = /^(未命名项目|新建项目|未命名)?$/.test(String(project.name || '').trim());
+      const aiTitle = String(patch.title || m.bible.title || '').trim();
+      let renamedTo = '';
+      if (aiTitle && aiTitle !== project.name && (placeholder || canRewrite)) {
+        applyManageAction(project, 'rename', aiTitle);
+        renamedTo = project.name;
+      }
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'bible' });
       return json(res, {
-        ok: true, bible: m.bible, filled: Object.keys(patch).length,
+        ok: true, bible: m.bible, filled: Object.keys(patch).length, renamedTo, name: project.name,
         source: fromMock ? (providers.mode === 'openai' ? 'fallback' : 'mock') : 'llm',
         message: providers.mode === 'openai'
-          ? (fromMock ? `LLM 未返回有效内容，已用内置模板补全 ${Object.keys(patch).length} 项` : `AI 已补全 ${Object.keys(patch).length} 项项目信息`)
+          ? (fromMock ? `LLM 未返回有效内容，已用内置模板补全 ${Object.keys(patch).length} 项` : `AI 已补全 ${Object.keys(patch).length} 项项目信息${renamedTo ? `，并命名为「${renamedTo}」` : ''}`)
           : `未配置大模型，已用内置模板补全 ${Object.keys(patch).length} 项；配置后可由 AI 按构想生成`,
       }), true;
     } catch (err) {

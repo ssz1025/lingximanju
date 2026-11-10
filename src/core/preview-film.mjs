@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { writeAssetBinary, uid } from './store.mjs';
 import { placeholderFrame } from './raster.mjs';
-import { hasFfmpeg, probeDuration } from './film.mjs';
+import { hasFfmpeg, probeDuration, probeVideoInfo } from './film.mjs';
 import { resolveRuntimeSpec } from './runtime-spec.mjs';
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -56,7 +56,7 @@ export function renderPreviewFilm(project, specOrNull = null) {
         '-loop', '1', '-framerate', String(spec.fps), '-i', pngPath,
         '-t', String(spec.clipSeconds),
         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', String(spec.fps),
-        '-vf', 'scale=640:360', '-an', out,
+        '-vf', `scale=${spec.width}:${spec.height}`, '-an', out,
       ], { encoding: 'utf8', timeout: 120000 });
       if (r.status !== 0 || !fs.existsSync(out)) return null;
       clipFiles.push(out);
@@ -71,7 +71,7 @@ export function renderPreviewFilm(project, specOrNull = null) {
     ], { encoding: 'utf8', timeout: 300000 });
     if (concat.status !== 0 || !fs.existsSync(finalPath)) return null;
 
-    const measured = probeDuration(finalPath);
+    const info = probeVideoInfo(finalPath);
     const declaredDuration = round2(clipFiles.length * spec.clipSeconds);
     const buf = fs.readFileSync(finalPath);
     const name = `${uid('film')}.mp4`;
@@ -80,9 +80,11 @@ export function renderPreviewFilm(project, specOrNull = null) {
       url, file: name,
       method: 'preview-reencode',
       clips: clipFiles.length,
-      duration: measured ?? declaredDuration,
+      duration: info.duration ?? declaredDuration,
       declaredDuration,
-      measured: measured !== null,
+      measured: info.duration !== null,
+      width: info.width ?? spec.width,
+      height: info.height ?? spec.height,
       bytes: buf.length,
       source: 'preview-frames',
       isRealVideo: false,

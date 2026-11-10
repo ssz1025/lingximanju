@@ -34,7 +34,7 @@ import { generateEpisodeScript } from './episode-service.mjs';
 
 const CONV_DIR = path.join(DATA_DIR, 'conversations');
 /** 单步会话消息上限：足够长期回溯，同时防止异常刷屏把项目 JSON 撑爆 */
-const MAX_MESSAGES_PER_STEP = 1000;
+export const MAX_MESSAGES_PER_STEP = 1000;
 const MAX_TEXT = 8000;
 
 const zeroTokens = () => ({ prompt: 0, completion: 0, total: 0, calls: 0 });
@@ -128,6 +128,11 @@ export function stepChatOf(project, stepId) {
   const chat = all[stepId];
   if (!Array.isArray(chat.messages)) chat.messages = [];
   if (!chat.tokens) chat.tokens = zeroTokens();
+  // counter = 累计写入条数：seq 用它而不是 messages.length，
+  // 否则裁剪旧消息后新消息的 seq 会从 1 重新开始，导出与引用都会错位。
+  if (!Number.isFinite(chat.counter) || chat.counter < chat.messages.length) {
+    chat.counter = chat.messages.length;
+  }
   chat.label = stepChatLabel(stepId);
   return chat;
 }
@@ -154,7 +159,7 @@ export function appendStepMessage(project, stepId, msg = {}) {
     calls: Number(msg.tokens.calls) || 0,
   } : zeroTokens();
   const rec = {
-    seq: chat.messages.length + 1,
+    seq: chat.counter + 1,
     at: Date.now(),
     role: msg.role === 'user' ? 'user' : 'assistant',
     text: String(msg.text || '').slice(0, MAX_TEXT),
@@ -171,6 +176,7 @@ export function appendStepMessage(project, stepId, msg = {}) {
     reran: msg.reran || null,
   };
   chat.messages.push(rec);
+  chat.counter = rec.seq;
   if (chat.messages.length > MAX_MESSAGES_PER_STEP) {
     chat.messages.splice(0, chat.messages.length - MAX_MESSAGES_PER_STEP);
   }
@@ -310,7 +316,7 @@ export function classifyStepMessage(stepId, message) {
   }
 
   // 重跑本步（明确的重跑词）
-  const rerunWord = /重跑|重新(?:生成|执行|跑|做|来)|再来一遍|重做|刷新一下|再跑/.test(t);
+  const rerunWord = /重跑|重新(?:生成|执行|跑|做|来|拆|分|写)|再来一遍|再跑|重做|重拆|再拆|重新来|刷新一下/.test(t);
 
   if (stepId === 'upload') {
     if (/分集|拆集|每集|一集/.test(t) && /(\d+\s*字|\d+\s*集)/.test(t)) {
@@ -449,6 +455,10 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
   let changed = false;
   let reran = null;
   let changedStep = null;
+  // ok 显式表达「这条指令是否真的办成了」：参数缺失、目标不存在都算没办成，
+  // 不能靠 reply 是否以 ✗ 开头来猜（追问式回复也带提示语，容易误判成成功）。
+  let ok = true;
+  const fail = (msg) => { ok = false; reply.push(`✗ ${msg}`); };
   const call = (name, http, fn) => {
     calls.push({ name, ...http });
     return fn();
@@ -499,11 +509,11 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       break;
     }
     case 'bible': {
-      if (!Object.keys(params || {}).length) { reply.push('没听出要改哪一项。可以说：把片名改成《X》、类型悬疑、画风用冷调水墨。'); break; }
+      if (!Object.keys(params || {}).length) { fail('没听出要改哪一项。可以说：把片名改成《X》、类型悬疑、画风用冷调水墨。'); break; }
       const out = call('保存创作设定', replayOfStepChat(stepId, 'bible', params, project.id),
         () => applyManageAction(project, 'bible', params));
       calls[calls.length - 1].ok = out.ok;
-      if (!out.ok) { reply.push(`✗ ${out.message}`); break; }
+      if (!out.ok) { fail(out.message); break; }
       changed = true; changedStep = stepId;
       const b = m.bible;
       reply.push(`✓ 创作设定已更新：${[
@@ -517,11 +527,11 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       break;
     }
     case 'split': {
-      if (!Object.keys(params || {}).length) { reply.push('没听出分集参数。可以说：按 1200 字一集，最多 4 集。'); break; }
+      if (!Object.keys(params || {}).length) { fail('没听出分集参数。可以说：按 1200 字一集，最多 4 集。'); break; }
       const out = call('保存分集参数', replayOfStepChat(stepId, 'split', params, project.id),
         () => applyManageAction(project, 'split', params));
       calls[calls.length - 1].ok = out.ok;
-      if (!out.ok) { reply.push(`✗ ${out.message}`); break; }
+      if (!out.ok) { fail(out.message); break; }
       changed = true;
       reply.push(`✓ ${out.message}`);
       const r = await rerunStep('episodes', text);
@@ -531,7 +541,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
     }
     case 'total-episodes': {
       const n = Number(params?.totalEpisodes) || 0;
-      if (!n) { reply.push('请说明总集数，例如「整部剧做成 8 集」。'); break; }
+      if (!n) { fail('请说明总集数，例如「整部剧做成 8 集」。'); break; }
       const out = call('设定总集数', replayOfStepChat(stepId, 'total-episodes', { totalEpisodes: n }, project.id),
         () => applyManageAction(project, 'bible', { totalEpisodes: n }));
       calls[calls.length - 1].ok = out.ok;
@@ -547,8 +557,8 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       const no = Number(params?.no) || 0;
       const title = String(params?.title || '').trim();
       const ep = (m.episodes || []).find((e) => Number(e.no) === no);
-      if (!ep) { reply.push(`第 ${no} 集不存在（当前 ${(m.episodes || []).length} 集）。`); break; }
-      if (!title) { reply.push('请给出新标题，例如「把第 2 集改名为『雨夜的来信』」。'); break; }
+      if (!ep) { fail(`第 ${no} 集不存在（当前 ${(m.episodes || []).length} 集）。`); break; }
+      if (!title) { fail('请给出新标题，例如「把第 2 集改名为『雨夜的来信』」。'); break; }
       calls.push({ name: `第 ${no} 集改标题`, method: 'POST', path: `/api/projects/${project.id}/episodes/${no}`, body: { title } });
       const before = ep.title;
       ep.title = title.slice(0, 60);
@@ -559,7 +569,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
     }
     case 'source': {
       const body = String(params?.text || text || '').trim();
-      if (body.length < 120) { reply.push(`原著正文至少要 120 字（当前 ${body.length} 字）。直接粘贴整段正文即可。`); break; }
+      if (body.length < 120) { fail(`原著正文至少要 120 字（当前 ${body.length} 字）。直接粘贴整段正文即可。`); break; }
       const r = call('解析新原著', replayOfStepChat(stepId, 'source', {}, project.id),
         () => attachSource(project, { text: body, filename: '对话粘贴原著.txt', split: m.split }));
       calls[calls.length - 1].ok = true;
@@ -577,7 +587,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       const out = call('保存成片规格', replayOfStepChat(stepId, 'runtime', params, project.id),
         () => applyManageAction(project, 'runtime', params));
       calls[calls.length - 1].ok = out.ok;
-      if (!out.ok) { reply.push(`✗ ${out.message}`); break; }
+      if (!out.ok) { fail(out.message); break; }
       changed = true; changedStep = 'storyboard';
       reply.push(`✓ ${out.message}`);
       reply.push(`时间线：${clipTimeline(resolveRuntimeSpec(project)).map((x) => `${x.start}~${x.end}s`).join(' / ')}`);
@@ -589,11 +599,11 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       break;
     }
     case 'deliverables': {
-      if (!Object.keys(params || {}).length) { reply.push('请说明交付物，例如「只要导演包，不要成片视频」。'); break; }
+      if (!Object.keys(params || {}).length) { fail('请说明交付物，例如「只要导演包，不要成片视频」。'); break; }
       const out = call('更新交付物', replayOfStepChat(stepId, 'deliverables', params, project.id),
         () => applyManageAction(project, 'deliverables', params));
       calls[calls.length - 1].ok = out.ok;
-      if (!out.ok) { reply.push(`✗ ${out.message}`); break; }
+      if (!out.ok) { fail(out.message); break; }
       changed = true; changedStep = 'deliver';
       reply.push(`✓ ${out.message}`);
       break;
@@ -602,7 +612,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       const r = await call('角色提取', replayOfStepChat(stepId, 'characters', {}, project.id),
         () => extractProjectCharacters({ project, m, mode: 'llm', modelId, log: (lv, msg) => log(lv, msg) }));
       calls[calls.length - 1].ok = r?.ok !== false;
-      if (!r.ok) { reply.push(`✗ ${r.error}`); break; }
+      if (!r.ok) { fail(r.error); break; }
       const merged = mergeExtracted(m.characters || [], r.extracted, { source: r.source });
       applyManageAction(project, 'characters', merged.characters);
       changed = true; changedStep = 'context';
@@ -617,7 +627,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       if (!name && (m.characters || []).length === 1) name = m.characters[0].name;
       if (!name) {
         const names = (m.characters || []).map((c) => c.name).slice(0, 8);
-        reply.push(names.length
+        fail(names.length
           ? `请指明要改哪位角色：${names.join('、')}。例如「把${names[0]}改成：月白长裙、清冷眉眼」。`
           : '角色库还是空的：先让我「从原著提取角色」，或说「新增角色 林晚」。');
         break;
@@ -636,7 +646,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
         : { name, appearance: detail, costume, staticFeatures: statics, role: '' };
       const out = applyManageAction(project, 'char-upsert', raw);
       calls[calls.length - 1].ok = out.ok;
-      if (!out.ok) { reply.push(`✗ ${out.message}`); break; }
+      if (!out.ok) { fail(out.message); break; }
       changed = true; changedStep = 'context';
       reply.push(`✓ ${out.message}：${detail ? `外观「${detail}」` : '已保存'}`);
       reply.push('属性变化只影响后续生成的定妆与关键帧；已生成的定妆图要重新生成才会跟上（角色管理里可一键补全）。');
@@ -653,7 +663,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
     case 'episode-script': {
       const no = Number(params?.no) || 0;
       const ep = (m.episodes || []).find((e) => Number(e.no) === no);
-      if (!ep) { reply.push(`第 ${no} 集不存在（当前 ${(m.episodes || []).length} 集）。`); break; }
+      if (!ep) { fail(`第 ${no} 集不存在（当前 ${(m.episodes || []).length} 集）。`); break; }
       const r = await call(`重写第 ${no} 集剧本`, replayOfStepChat(stepId, 'episode-script', params, project.id),
         () => generateEpisodeScript(project, m, ep, { log: (lv, msg) => log(lv, msg), modelId }));
       calls[calls.length - 1].ok = true;
@@ -681,7 +691,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
     case 'pack': {
       const pack = call('重新导出导演包', replayOfStepChat(stepId, 'pack', {}, project.id),
         () => ensureDirectorPack(project, { force: true }));
-      if (!pack) { reply.push('✗ 画布还没有最终节点，先把第 ⑥ 步跑通再打包。'); calls[calls.length - 1].ok = false; break; }
+      if (!pack) { fail('画布还没有最终节点，先把第 ⑥ 步跑通再打包。'); calls[calls.length - 1].ok = false; break; }
       calls[calls.length - 1].ok = true;
       changed = true; changedStep = 'deliver';
       reply.push(`✓ 导演包已重新生成：${pack.filename} · ${pack.shotCount} 组镜头 / ${pack.fileCount} 个文件`);
@@ -692,7 +702,7 @@ async function runAction({ project, stepId, action, params, text, modelId, log }
       reply.push('这一步暂时没有这个动作。可以说「能做什么」看可用指令。');
   }
 
-  return { reply: reply.filter((x) => x !== '').join('\n'), calls, artifacts, changed, reran, changedStep };
+  return { ok, reply: reply.filter((x) => x !== '').join('\n'), calls, artifacts, changed, reran, changedStep };
 }
 
 function describeRerun(r, stepId) {
@@ -756,7 +766,7 @@ export async function runStepChat({ project, stepId, message, modelId = '', log 
     calls: out.calls, artifacts: out.artifacts,
     suggestions: suggestionsFor(stepId, action),
     tokens: chatUsage, changed: out.changed, reran: out.reran,
-    durationMs: Date.now() - t0, ok: !/^✗/.test(out.reply),
+    durationMs: Date.now() - t0, ok: out.ok !== false && !/^✗/.test(out.reply),
   });
 
   saveProject(project);
@@ -766,7 +776,7 @@ export async function runStepChat({ project, stepId, message, modelId = '', log 
   emit('step:chat', { projectId: project.id, stepId, seq: rec.seq, action });
 
   return {
-    ok: !/^✗/.test(out.reply), stepId, action, seq: rec.seq,
+    ok: out.ok !== false, stepId, action, seq: rec.seq,
     reply: out.reply, calls: out.calls, artifacts: out.artifacts,
     suggestions: rec.suggestions, changed: out.changed, reran: out.reran,
     durationMs: rec.durationMs,
@@ -778,6 +788,14 @@ export async function runStepChat({ project, stepId, message, modelId = '', log 
 /* -------------------------------------------------------------------------- *
  * 导出：Markdown（人读 + 复刻命令）/ JSON（结构化重放）
  * -------------------------------------------------------------------------- */
+/** 等价复刻命令：把一次真实调用还原成可照抄的 curl（端口用占位，正文压缩到一行） */
+function curlOf(call, base = 'http://127.0.0.1:4599') {
+  const url = `${base.replace(/\/+$/, '')}${call.path}`;
+  const head = `curl -s -X ${call.method || 'GET'} '${url}' -H 'Content-Type: application/json'`;
+  if (call.body === undefined || call.body === null) return head;
+  return `${head} -d '${JSON.stringify(call.body).replace(/'/g, "'\\''")}'`;
+}
+
 export function exportStepChat(project, stepId, format = 'md') {
   const chat = stepChatOf(project, stepId);
   const ctx = stepChatContext(project, stepId);
@@ -791,7 +809,9 @@ export function exportStepChat(project, stepId, format = 'md') {
       body: JSON.stringify({
         projectId: project.id, projectName: project.name, stepId, label: stepChatLabel(stepId),
         exportedAt: new Date().toISOString(),
-        tokens: own || tokens.total,
+        // tokens 只放三本账（执行 / 对话 / 合计），完整的步骤行对象另放 step
+        tokens: own ? { exec: own.exec, chat: own.chat, sum: own.sum } : tokens.total,
+        step: own ? { no: own.no, title: own.title, runs: own.runs, runLog: own.runLog } : null,
         messages: chat.messages,
       }, null, 2),
     };
@@ -828,11 +848,31 @@ export function exportStepChat(project, stepId, format = 'md') {
     if (real.length) {
       lines.push('', '实际调用：');
       for (const c of real) lines.push(`- \`${c.method} ${c.path}\` — ${c.name}${c.ok === false ? '（失败）' : ''}`);
+      // 复刻命令：用户消息给出可直接照抄的 curl，其他用户拿到 Markdown 就能重放
+      if (msg.role === 'user') {
+        for (const c of real) {
+          if (!c.method || !c.path) continue;
+          lines.push('', '等价复刻命令：', '', '```bash', curlOf(c), '```');
+        }
+      }
     }
     if (msg.artifacts?.length) {
       lines.push('', `产物：${msg.artifacts.map((a) => `[${a.label}](${a.url.replace(project.id, '{projectId}')})`).join(' · ')}`);
     }
     lines.push('');
+  }
+  // 一键复刻命令串：把本步所有用户指令的 curl 按顺序汇总，他人可直接重放
+  const replayable = chat.messages.filter((msg) => msg.role === 'user' && (msg.calls || []).some((c) => c.path && c.method));
+  if (replayable.length) {
+    lines.push('## 一键复刻命令串（按顺序执行）', '', '```bash', `# 0) 启动服务（端口按实际替换）`, `PORT=4599 node server.mjs`, `PROJECT={projectId}`, '');
+    for (const msg of replayable) {
+      for (const c of msg.calls.filter((x) => x.path && x.method)) {
+        lines.push(`# ${msg.seq}. ${String(msg.text).replace(/\n/g, ' ').slice(0, 60)}`);
+        lines.push(curlOf(c).replace(project.id, '{projectId}'));
+        lines.push('');
+      }
+    }
+    lines.push('```', '');
   }
   if (own?.runLog?.length) {
     lines.push('## 本步运行明细', '');

@@ -7,7 +7,7 @@ import {
   CHARACTER_VIEWS, MAX_CHARACTERS, EXTRACT_CAP,
   charNameKey, normalizeCharacter, buildCharacterPrompt,
   buildViewPrompt, buildExtractVars, buildCharacterPassages, mergeExtracted,
-  verifyEvidence,
+  verifyEvidence, supplementMainCharacters,
 } from '../src/core/characters.mjs';
 
 test('CHARACTER_VIEWS 定义五视图：4 个全身机位 + 1 个面部特写', () => {
@@ -336,4 +336,47 @@ test('verifyEvidence 忽略空白匹配：原文换行/缩进被模型抄丢也�
   );
   assert.equal(out.verified, 1, '空白差异不应误杀有效引用');
   assert.equal(out.dropped, 0);
+});
+
+test('buildExtractVars 候选池比最终角色上限更宽：长篇第 13 位之后的主角也能进提示词', () => {
+  // 20 位只有一句台词的配角把候选池挤满，主角「刘左」出场最多但从不紧跟说话动词
+  const crowd = '青崖白霜雪夜雨风灯船山海江河川林木石土火金水'
+    .split('').map((ch) => `沈${ch}说：“走。”`).join('');
+  const text = `${crowd}${'刘左同志看着窗外，一言不发。'.repeat(6)}`;
+  const vars = buildExtractVars({ name: 'x' }, { source: { text }, episodes: [] }, 12);
+  assert.ok(vars.candidates.length > 12, `候选池应大于输出上限，实际 ${vars.candidates.length}`);
+  assert.ok(vars.candidates.some((c) => c.name === '刘左'), '出场最多但不带说话动词的主角应在候选池内');
+});
+
+test('supplementMainCharacters：模型漏掉的主角按出场频次补回，已有称呼不重复', () => {
+  const text = `${'刘左同志看着窗外，一言不发。'.repeat(6)}${'林夏说：“走吧。”'.repeat(4)}`;
+  // 模型只给了配角「林夏」，主角整条漏掉
+  const out = supplementMainCharacters([{ name: '林夏', role: '配角' }], text, { max: 12, minHits: 3 });
+  assert.deepEqual(out.added, ['刘左'], '应补回高频出场的主角');
+  assert.equal(out.characters.length, 2);
+  const added = out.characters.find((c) => c.name === '刘左');
+  assert.equal(added.source, 'heuristic', '兜底角色不能冒充 LLM 人设');
+  assert.equal(added.auto, true);
+  assert.ok(added.evidence[0].quote.includes('刘左'), '补回的角色必须带可溯源原文');
+  assert.ok(text.includes(added.evidence[0].quote));
+
+  // 已经是别名的情况不重复补
+  const alias = supplementMainCharacters([{ name: '小林', aliases: ['刘左'] }], text, { max: 12, minHits: 3 });
+  assert.ok(!alias.added.includes('刘左'), '别名已覆盖同一实体时不应再补一条');
+});
+
+test('supplementMainCharacters：名额被配角占满时，强主线角色仍能挤进来并如实记录被挤掉的人', () => {
+  const text = `${'刘左同志看着窗外，一言不发。'.repeat(25)}${'林夏说：“走吧。”'.repeat(4)}`;
+  // 模型给了 3 个名额全是配角，主角没在里面
+  const full = [{ name: '林夏' }, { name: '老周' }, { name: '沈砚' }];
+  const out = supplementMainCharacters(full, text, { max: 3 });
+  assert.deepEqual(out.added, ['刘左'], '出场 25 次的主角应强制入列');
+  assert.deepEqual(out.displaced, ['沈砚'], '被挤掉的是列表末尾的角色，且要能如实上报');
+  assert.equal(out.characters.length, 3);
+  assert.ok(out.characters.some((c) => c.name === '刘左'));
+
+  // 只是普通高频（未达 forceHits）时不挤人
+  const weak = supplementMainCharacters(full, `${'刘左同志站着。'.repeat(9)}`, { max: 3, minHits: 3, forceHits: 20 });
+  assert.deepEqual(weak.added, [], '未达强主线阈值时不抢名额');
+  assert.deepEqual(weak.displaced, []);
 });

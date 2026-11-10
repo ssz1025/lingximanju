@@ -20,6 +20,28 @@ import { linkChapters, buildEpisodeRecords, splitSegments, matchEpisodeCharacter
 const cut = (s, n) => { const t = String(s || '').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
 /** 式(1) 输入归一：各集中部摘录拼接（≤2400 字），覆盖全部分集而非只取第一集 */
 const joinExcerpts = (eps) => cut((eps || []).map((e) => `【${e.title}】${e.excerpt || ''}`).join('\n'), 2400);
+/** 自动分季粒度：每 12 集一季（短剧行业惯例的一季体量），超长小说由 Agent 自动归季 */
+const SEASON_SIZE = 12;
+
+/**
+ * 自动分季：没有分季归属的集按集号顺序每 SEASON_SIZE 集归入一季，
+ * 并把用到的季登记进 management.seasons[]（保留用户已命名的季标题）。
+ * 用户手动移过的集（season 已有值）不动。
+ */
+function autoAssignSeasons(records, m, seasonSize = SEASON_SIZE, opts = {}) {
+  const size = Math.max(1, Math.floor(Number(seasonSize) || SEASON_SIZE));
+  for (const [i, ep] of records.entries()) {
+    // 换了每季集数：把此前自动归季的集清空季号，按新粒度重排；手动移过的集（无 seasonAuto 标记）不动
+    if (opts.resetAuto && ep.seasonAuto) ep.season = undefined;
+    if (!ep.season) { ep.season = Math.floor(i / size) + 1; ep.seasonAuto = true; }
+  }
+  const maxSeason = records.reduce((a, e) => Math.max(a, e.season || 1), 1);
+  const existing = Array.isArray(m.seasons) ? m.seasons : [];
+  const highest = Math.max(maxSeason, existing.reduce((a, s) => Math.max(a, Number(s?.no) || 1), 1));
+  m.seasons = Array.from({ length: highest }, (_, i) => existing.find((s) => Number(s?.no) === i + 1) || { no: i + 1 });
+  const count = new Set(records.map((e) => e.season || 1)).size;
+  return count;
+}
 
 /**
  * 把「解析 + 分集」的结果落成项目里的三类关联数据：
@@ -28,7 +50,7 @@ const joinExcerpts = (eps) => cut((eps || []).map((e) => `【${e.title}】${e.ex
  *   · management.episodes —— 每集带原文、章节清单、段落（宫格图槽位）、出场角色
  * 保留同集同文本下已生成的剧本 / 宫格图 / 导演包 / 视频，重算分集不清空成果。
  */
-function materializeEpisodes(m, novel, episodes, chapterSources, sources, characters) {
+function materializeEpisodes(m, novel, episodes, chapterSources, sources, characters, seasonSize = SEASON_SIZE) {
   const meta = chapterSources.length ? chapterSources
     : novel.chapters.map((c) => ({ title: c.title, sourceName: novel.filename || '粘贴文本', chars: c.chars }));
   const linked = linkChapters(novel, episodes, meta);
@@ -43,7 +65,11 @@ function materializeEpisodes(m, novel, episodes, chapterSources, sources, charac
     name: novel.filename || '粘贴文本', chars: novel.totalChars,
     chapterTitles: novel.chapters.map((c) => c.title),
   }];
-  return records;
+  // 超长小说自动分季：按 split.seasonSize（默认 12 集）一季归季；粒度变了就重排自动季，手动移季保留
+  const size = Math.max(1, Math.floor(Number(seasonSize) || SEASON_SIZE));
+  const prevSize = Math.max(1, Math.floor(Number(m.split?.seasonSize) || SEASON_SIZE));
+  const seasonCount = autoAssignSeasons(records, m, size, { resetAuto: size !== prevSize });
+  return { records, seasonCount };
 }
 
 /** 统一的输入解析：单文本 / 粘贴 / 多文件三条入口收敛到同一份原著 + 出处元数据 */
@@ -224,7 +250,7 @@ export function attachSource(project, opts = {}) {
   // 分集目录：左侧纵向一列，不干扰主 DAG；每集用 ref 边把数据传给剧本节点
   // 先落关联数据（章节 / 剧集 / 段落），画布节点再从同一份数据生成，避免两处口径不一致
   m.characters = mergeExtracted(m.characters || [], characters, { source: 'heuristic' }).characters;
-  const records = materializeEpisodes(m, novel, episodes, input.chapterSources, input.sources, m.characters);
+  const { records, seasonCount } = materializeEpisodes(m, novel, episodes, input.chapterSources, input.sources, m.characters, split.seasonSize);
   const episodeNodes = records.map((ep, i) => episodeNode(ep, i));
   for (const n of episodeNodes) {
     project.nodes.push(n);
@@ -253,7 +279,7 @@ export function attachSource(project, opts = {}) {
   return {
     novel, episodes, records,
     chapters: m.chapters, sources: m.sources,
-    message: `${input.message ? `${input.message} · ` : ''}已上传《${novel.title}》· ${novel.chapterCount} 章 ${novel.totalChars} 字 · 自动关联并拆为 ${episodes.length} 集`,
+    message: `${input.message ? `${input.message} · ` : ''}已上传《${novel.title}》· ${novel.chapterCount} 章 ${novel.totalChars} 字 · 自动关联并拆为 ${episodes.length} 集${seasonCount > 1 ? `（自动分 ${seasonCount} 季）` : ''}`,
   };
 }
 
@@ -302,7 +328,7 @@ export function refreshEpisodes(project, opts = {}) {
 
   // 复用上传时的关联逻辑：章节重挂到新集、段落重新切分，同集同文本保留已生成产物
   const chapterSources = (m.chapters || []).map((c) => ({ title: c.title, sourceName: c.sourceName, chars: c.chars }));
-  const records = materializeEpisodes(m, novel, episodes, chapterSources, m.sources || [], m.characters || []);
+  const { records, seasonCount } = materializeEpisodes(m, novel, episodes, chapterSources, m.sources || [], m.characters || [], split.seasonSize);
   for (const [i, ep] of records.entries()) {
     const n = episodeNode(ep, i);
     project.nodes.push(n);
@@ -322,5 +348,5 @@ export function refreshEpisodes(project, opts = {}) {
 
   m.split = split;
   m.updatedAt = Date.now();
-  return { episodes, records, novel, chapters: m.chapters, message: `已按 ${split.strategy} 策略重新拆为 ${episodes.length} 集 · 章节关联已同步` };
+  return { episodes, records, novel, chapters: m.chapters, message: `已按 ${split.strategy} 策略重新拆为 ${episodes.length} 集${seasonCount > 1 ? `（自动分 ${seasonCount} 季）` : ''} · 章节关联已同步` };
 }

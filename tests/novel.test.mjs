@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CHAPTER_RE, SPLIT_STRATEGIES, parseNovel, splitEpisodes,
-  validateNovelInput, extractCharacters, novelPreview,
+  validateNovelInput, extractCharacters, novelPreview, mergeNovelFiles,
 } from '../src/core/novel.mjs';
 
 /** 结构样本：短，用于校验书名 / 章节识别 */
@@ -189,4 +189,72 @@ test('SPLIT_STRATEGIES 三种策略均有 id/name/hint', () => {
   assert.equal(SPLIT_STRATEGIES.length, 3);
   assert.deepEqual(SPLIT_STRATEGIES.map((s) => s.id), ['chapter', 'fixed', 'scene']);
   assert.ok(SPLIT_STRATEGIES.every((s) => s.name && s.hint));
+});
+
+/* ---------------------------------------------------------------------------
+ * 多文件导入（mergeNovelFiles）：章节标题跨文件重编号、出处可回溯、上限校验。
+ * -------------------------------------------------------------------------*/
+const VOL_A = `第一章 山门\n${'沈青崖推开山门，雨夜的风裹着寒意灌进来。'.repeat(5)}`;
+const VOL_B = `第一章 归途\n${'林晚提着灯笼走过长街，檐下的雨滴敲着石板。'.repeat(5)}`;
+
+test('mergeNovelFiles 多文件：合并成功且章节标题带文件出处', () => {
+  const r = mergeNovelFiles([
+    { name: '第一卷.txt', text: VOL_A },
+    { name: '第二卷.txt', text: VOL_B },
+  ]);
+  assert.equal(r.ok, true);
+  assert.ok(/已合并 2 个文件/.test(r.message), `消息应说明合并了几个文件：${r.message}`);
+  assert.equal(r.sources.length, 2);
+  assert.deepEqual(r.sources.map((s) => s.name), ['第一卷.txt', '第二卷.txt']);
+  // 每章标题重写为「第N章：《文件名》原标题」，保证全局唯一且可被 CHAPTER_RE 识别
+  assert.equal(r.chapterSources.length, 2);
+  assert.equal(r.chapterSources[0].title, '第1章：《第一卷》第一章 山门');
+  assert.equal(r.chapterSources[1].title, '第2章：《第二卷》第一章 归途');
+  assert.equal(r.chapterSources[0].sourceName, '第一卷.txt');
+  // 重写后的标题必须能被章节正则识别，否则分集回溯会失效
+  assert.match(r.chapterSources[0].title, CHAPTER_RE);
+  assert.match(r.chapterSources[1].title, CHAPTER_RE);
+  // 合并文本可正常通过校验并分集
+  const v = validateNovelInput(r.text, { filename: r.filename, split: { strategy: 'chapter' } });
+  assert.equal(v.ok, true);
+  assert.equal(v.novel.chapterCount, 2);
+});
+
+test('mergeNovelFiles 单文件：不改写标题，仅补出处', () => {
+  const r = mergeNovelFiles([{ name: '全书.txt', text: SAMPLE }]);
+  assert.equal(r.ok, true);
+  assert.equal(r.filename, '全书.txt', '单文件保持原文件名，不重写为合辑');
+  const parsed = parseNovel(r.text, '全书.txt');
+  const first = parsed.chapters[0]?.title || '正文';
+  assert.ok(!/《全书》/.test(r.chapterSources[0].title), '单文件不应改写章节标题');
+  assert.ok(r.chapterSources.every((c) => c.sourceName === '全书.txt'));
+  assert.ok(first);
+});
+
+test('splitEpisodes maxEpisodes 支持超长小说的大集数（600 上限）', () => {
+  // 20 章 × 约 360 字，targetChars=300 → 每章自成一组，理论 20 集
+  const many = Array.from({ length: 20 }, (_, c) => `第${c + 1}章 卷${c + 1}\n${'她把伞收起来，靠在门边，雨水顺着伞尖滴在地板上。'.repeat(15)}`).join('\n\n');
+  const n = parseNovel(many, 'many.txt');
+  const eps = splitEpisodes(n, { strategy: 'chapter', targetChars: 300, maxEpisodes: 20 });
+  assert.ok(eps.length >= 15, `大集数应生效，实际 ${eps.length} 集`);
+  const capped = splitEpisodes(n, { strategy: 'chapter', targetChars: 300, maxEpisodes: 3 });
+  assert.equal(capped.length, 3, '超过 maxEpisodes 时尾部并入最后一集');
+});
+
+test('mergeNovelFiles 空内容 / 全空文件给出可读错误', () => {
+  assert.equal(mergeNovelFiles([]).ok, false);
+  const r = mergeNovelFiles([{ name: '空.txt', text: '   ' }]);
+  assert.equal(r.ok, false);
+  assert.ok(r.message);
+});
+
+test('mergeNovelFiles 支持 200 个文件，超过则拒绝并提示', () => {
+  const mk = (i) => ({ name: `第${i + 1}卷.txt`, text: VOL_A });
+  const ok = mergeNovelFiles(Array.from({ length: 200 }, (_, i) => mk(i)));
+  assert.equal(ok.ok, true, '200 个文件应可一次导入（超长小说按卷拆文件）');
+  assert.equal(ok.sources.length, 200);
+  assert.equal(ok.chapterSources.length, 200);
+  const over = mergeNovelFiles(Array.from({ length: 201 }, (_, i) => mk(i)));
+  assert.equal(over.ok, false);
+  assert.ok(/200 个文件/.test(over.message));
 });

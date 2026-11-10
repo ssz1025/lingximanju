@@ -45,8 +45,8 @@ export function openCreationWizard(opts = {}) {
           <span>② 分集拆解</span><span>→</span>
           <span>③ 剧本创作</span><span>→</span>
           <span>④ 角色与上下文</span><span>→</span>
-          <span>⑤ 分镜与画面</span><span>→</span>
-          <span>⑥ 成片交付</span>
+          <span>⑤ 分镜与画面 <i>提示词 · 关键帧 · 分镜板</i></span><span>→</span>
+          <span>⑥ 视频与交付</span>
         </div>
       </div>
     </div>

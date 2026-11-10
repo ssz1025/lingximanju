@@ -28,7 +28,7 @@ import { assignVoices } from '../agents/voice-agent.mjs';
 import { attachSource } from '../pipelines/novel-project.mjs';
 import { createProviders } from './providers.mjs';
 import { resolveModelSettings } from './app-settings.mjs';
-import { loadComfyConfig, resolveComfyConfig, comfySummary } from './comfy-config.mjs';
+import { loadComfyConfig, resolveComfyConfig, comfySummary, hasWorkflowFor } from './comfy-config.mjs';
 import { testConnection, describeWorkflow, parseWorkflow } from './comfyui.mjs';
 
 const CONV_DIR = path.join(DATA_DIR, 'conversations');
@@ -160,7 +160,7 @@ export function classify(text) {
   }
   if (/成片.*(好了|下载|链接)|给我.*成片|下载.*视频|看.*成片/.test(t)) return { id: 'film', params: {} };
   if (/导演包|交接包|mmxpack|打包/.test(t) && /导出|生成|下载|重打|重新/.test(t)) return { id: 'pack', params: {} };
-  if (/一键|全流程.*跑|跑完全部|全部流程|最终产物/.test(t)) return { id: 'director', params: { idea: quoted(t) } };
+  if (/一键|全流程.*跑|跑完全部|全部流程|最终产物/.test(t) && !/六步|六个步骤/.test(t)) return { id: 'director', params: { idea: quoted(t) } };
   if (/六步|全部步骤|依次跑|跑完所有|所有步骤/.test(t)) return { id: 'steps', params: {} };
   if (/第\s*[1-6]\s*步|执行.*步|单步|重跑.*步/.test(t)) {
     const hit = STEP_WORDS.find(([re]) => re.test(t));
@@ -332,7 +332,7 @@ async function executeIntent({ project, intent, params, modelId, log = () => {} 
           reply.push(`⚠ ${kind} 工作流无效：${err.message}`);
         }
       }
-      if (!cfg.videoWorkflow) reply.push('\n下一步：在「设置 → ComfyUI」导入「导出(API)」格式的视频工作流，然后说「使用真实 AI 视频模式」。');
+      if (!hasWorkflowFor(cfg, 'video')) reply.push('\n下一步：在「设置 → ComfyUI」导入「导出(API)」格式的视频工作流，然后说「使用真实 AI 视频模式」。');
       break;
     }
     case 'runtime':

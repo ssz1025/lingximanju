@@ -1,7 +1,7 @@
 // 系统域：SSE 事件流 / 健康检查 / 启动引导 / 示例原著 / 分集预览
 import fs from 'node:fs';
 import path from 'node:path';
-import { json, readBody } from '../http.mjs';
+import { json, readBody, NOVEL_BODY_LIMIT } from '../http.mjs';
 import { subscribe } from '../../core/events.mjs';
 import { listProjects, saveProject, EXAMPLES_DIR } from '../../core/store.mjs';
 import { buildTemplate, TEMPLATE_META } from '../../pipelines/templates.mjs';
@@ -11,6 +11,8 @@ import { STEPS } from '../../core/project-steps.mjs';
 import { listDirectorSkills, listDirectorSkillsByGroup, DIRECTOR_CAPABILITIES,
   DIRECTOR_SKILL_GROUPS } from '../../core/director-skills.mjs';
 import { DEFAULT_RUNTIME, normalizeRuntimeSpec } from '../../core/runtime-spec.mjs';
+import { STORYBOARD_LAYOUTS, STORYBOARD_ASPECTS, STORYBOARD_SOURCES, STORYBOARD_CAPTIONS,
+  STORYBOARD_GUIDES, PROMPT_PARTS, normalizeStoryboardSettings } from '../../core/storyboard-settings.mjs';
 import { validateNovelInput, novelPreview, mergeNovelFiles } from '../../core/novel.mjs';
 import { createProviders } from '../../core/providers.mjs';
 import { loadAppSettings, saveAppSettings, appSettingsSummary, ensureModelRoster, normalizeModelProfile, modelProfileSummary } from '../../core/app-settings.mjs';
@@ -18,12 +20,41 @@ import { loadAppSettings, saveAppSettings, appSettingsSummary, ensureModelRoster
 const cut60 = (v) => String(v ?? '').trim().slice(0, 60);
 const cut400 = (v) => String(v ?? '').trim().slice(0, 400);
 
+/**
+ * 前端依赖的 API 能力清单。
+ * 服务端是常驻进程：改了后端代码但没重启时，前端会照常拿到旧接口。
+ * 把能力显式暴露给前端，旧进程就能被立刻识别并提示重启，而不是让用户
+ * 以为「点了生成没反应 / 只出占位图」。
+ */
+const API_REVISION = '2026-11-09.10';
+const API_CAPABILITIES = [
+  'char-portrait-jobs',        // 角色定妆后台任务 + 进度查询/暂停
+  'char-portrait-require-real', // requireReal：无 ComfyUI 工作流直接失败，不回退占位图
+  'char-portrait-regen',        // 单视图 / 全部重生成
+  'step-artifact-check',        // 六步按真实产物校验，0 节点不再标绿
+  'step-stale-node-heal',       // 残留 running 节点自动复位后可重跑
+  'storyboard-images-only',     // 第⑤步只出提示词 + 关键帧 + 分镜板，不出视频
+  'video-in-deliver',           // 视频片段 / 转场视频统一在第⑥步生成
+  'step-incremental-regen',     // 重跑只补缺失图 / 缺失片段，不无条件全量重烧
+  'storyboard-real-image-check', // 分镜验收只看真实图，mock 占位不算已出图
+  'storyboard-shot-regen',      // 单镜头重出分镜图（不动其它镜头）
+  'step-stale-done-heal',       // 「已完成但没产物」的步骤自动降级为失败
+  'storyboard-layout-settings', // 分镜画面设置：版式（九宫格等）/ 画幅 / 格内信息 / 提示词公式
+  'storyboard-sheet-regen',     // 按当前版式重排分镜板（纯 SVG，不烧 GPU、不动关键帧）
+  'comfy-job-reconcile',        // ComfyUI 任务对账：已完成直接取回，找不到才重发
+  'comfy-queue-adopt',          // 无 prompt_id 的老任务也能凭队列前缀认领，不重复提交
+  'task-sent-vs-planned',       // 任务看板区分「已发送到 ComfyUI」与「本地排期等待发送」
+];
+function apiInfo() {
+  return { revision: API_REVISION, capabilities: API_CAPABILITIES };
+}
+
 export async function handleSystem(req, res, url) {
   const { pathname } = url;
   const method = req.method || 'GET';
 
   if (pathname === '/api/events' && method === 'GET') { subscribe(req, res); return true; }
-  if (pathname === '/api/health') return json(res, { ok: true, ts: Date.now() }), true;
+  if (pathname === '/api/health') return json(res, { ok: true, ts: Date.now(), ...apiInfo() }), true;
 
   /** 应用级模型配置：启动检查 / 设置弹窗共用；响应永不包含完整 API Key */
   if (pathname === '/api/settings' && method === 'GET') {
@@ -54,8 +85,16 @@ export async function handleSystem(req, res, url) {
       directorSkillGroups: Object.values(DIRECTOR_SKILL_GROUPS),
       // 短剧成片规格默认值：工作台首屏即可显示「30s / 3s / 10 片段」
       runtimeDefaults: normalizeRuntimeSpec(DEFAULT_RUNTIME),
+      // 分镜画面设置：版式清单与默认值随 bootstrap 下发，前端不硬编码「九宫格」
+      storyboardLayouts: STORYBOARD_LAYOUTS,
+      storyboardOptions: {
+        aspects: STORYBOARD_ASPECTS, sources: STORYBOARD_SOURCES,
+        captions: STORYBOARD_CAPTIONS, guides: STORYBOARD_GUIDES, promptParts: PROMPT_PARTS,
+      },
+      storyboardDefaults: normalizeStoryboardSettings(),
       recent: projects[0]?.id || null, serverTime: Date.now(),
       comfy: comfySummary(loadComfyConfig()),
+      api: apiInfo(),
       // 启动检查：前端据此判断是否需要弹「首次配置模型」引导框
       settings: appSettingsSummary(),
       steps: STEPS,
@@ -82,7 +121,7 @@ export async function handleSystem(req, res, url) {
 
   /** 新建项目向导的实时分集预览（不落盘） */
   if (pathname === '/api/novel/preview' && method === 'POST') {
-    const body = await readBody(req);
+    const body = await readBody(req, NOVEL_BODY_LIMIT);
     // 多文件：先合并成一份带文件出处的原著，再走与单文件完全相同的解析 / 分集
     const merged = Array.isArray(body.files) && body.files.length ? mergeNovelFiles(body.files) : null;
     if (merged && !merged.ok) return json(res, { ok: false, message: merged.message }), true;
@@ -101,7 +140,7 @@ export async function handleSystem(req, res, url) {
 
   /** 只合并、不落盘：工作台多文件选择后实时显示「文件 → 章节 → 剧集」预估 */
   if (pathname === '/api/novel/merge' && method === 'POST') {
-    const body = await readBody(req);
+    const body = await readBody(req, NOVEL_BODY_LIMIT);
     const merged = mergeNovelFiles(body.files);
     if (!merged.ok) return json(res, { ok: false, message: merged.message }), true;
     const checked = validateNovelInput(merged.text, { filename: merged.filename, split: body.split });

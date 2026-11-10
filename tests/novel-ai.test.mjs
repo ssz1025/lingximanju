@@ -85,7 +85,17 @@ test('AI 补全项目信息：只补空字段，不覆盖用户已填内容', as
   assert.equal(r2.body.filled, 0, '已补全的项目不会被 AI 覆盖');
 
   const r3 = await run(handleManagement, 'POST', `/api/projects/${p.id}/bible/ai`, { idea: '' });
-  assert.equal(r3.status, 400, '构想为空时拒绝');
+  // 一键生成不强制先写构想：为空时退回项目名 / 原著标题作为依据，仍可正常响应
+  assert.equal(r3.status, 200, '构想为空时回退项目名作为依据');
+  assert.equal(r3.body.filled, 0, '已完整的项目不再重复补全');
+  assert.equal(r3.body.name, '补全测试', '响应带项目当前名称，便于前端即时同步');
+  assert.ok(!r3.body.renamedTo, '模板补全不改用户起的项目名');
+
+  // 显式「一键生成」（regenerate）在无真实模型产出时仍然不得覆盖用户内容 / 改项目名
+  const r4 = await run(handleManagement, 'POST', `/api/projects/${p.id}/bible/ai`, { idea: '雨夜里的侦探', regenerate: true });
+  assert.equal(r4.status, 200);
+  assert.equal(r4.body.name, '补全测试', '模板数据不拿来重命名项目');
+  assert.equal(r4.body.filled, 0, '模板数据不覆盖已有字段');
 });
 
 test('AI 生成小说：大纲 → 整本注入，①② 步自动完成，来源明示 mock', async () => {

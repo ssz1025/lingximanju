@@ -381,3 +381,51 @@ test('路由正则：导演端点可匹配，且不会误吞其它项目路径',
   assert.doesNotMatch('/api/projects/prj_1/step', MATCH.directorRun);
   assert.doesNotMatch('/api/projects/prj_1/director-pack', MATCH.directorSkills);
 });
+
+test('验收回归：六步全 done、剧本 / 分镜已产出、仅成片未生成时，缺失项只剩成片相关', () => {
+  // 用户报告的场景：第⑦步面板引用导演全流程的历史快照（当时剧本/分镜还没跑），
+  // 六步完成后依然显示「统一格式剧本 / 分镜 / 成片时长规格」缺失。
+  // 服务端实时验收必须与画布现状对齐：script / storyboard 立即翻绿。
+  const p = skeleton();
+  const m = p.management;
+  m.source = { text: '原著正文', title: '测试小说', chapterCount: 1 };
+  m.episodes = [{ no: 1, title: '第一集' }];
+  m.steps.forEach((s) => { s.status = 'done'; });
+  p.nodes.find((n) => n.type === 'script').data.script = { title: '测试剧本' };
+  p.nodes.push({ type: 'shot', status: 'done' }, { type: 'keyframe', status: 'done' });
+
+  const live = verifyDirectorDeliverables(p, 'full');
+  assert.equal(live.items.find((i) => i.id === 'script').level, 'ok', '剧本节点已产出即达成');
+  assert.equal(live.items.find((i) => i.id === 'storyboard').level, 'ok', '镜头 / 关键帧在画布上即达成');
+  assert.equal(live.items.find((i) => i.id === 'steps').level, 'ok');
+  assert.equal(live.items.find((i) => i.id === 'runtime').level, 'missing', '成片还没生成时如实判缺失');
+  assert.doesNotMatch(live.summary, /统一格式剧本/, '摘要不再把已产出的剧本列为缺失');
+  assert.doesNotMatch(live.summary, /分镜/);
+  assert.match(live.summary, /成片时长规格/);
+});
+
+test('broadcastMeta 随事件附带实时最终产物验收（第⑦步面板的数据源）', async () => {
+  const { subscribe } = await import('../src/core/events.mjs');
+  const { broadcastMeta } = await import('../src/core/step-runner.mjs');
+  const chunks = [];
+  let closeCb = null;
+  const req = { on: (ev, cb) => { if (ev === 'close') closeCb = cb; } };
+  const res = { writeHead() {}, write(line) { chunks.push(line); } };
+  subscribe(req, res);
+  try {
+    const p = skeleton();
+    p.nodes.find((n) => n.type === 'script').data.script = { title: '测试剧本' };
+    broadcastMeta(p);
+    const events = chunks.filter((c) => c.startsWith('data: '))
+      .map((c) => JSON.parse(c.slice(6)));
+    const meta = events.find((e) => e.type === 'project:meta');
+    assert.ok(meta, '应广播 project:meta');
+    assert.equal(meta.projectId, p.id);
+    assert.ok(meta.verification, '广播应包含实时最终产物验收');
+    assert.equal(typeof meta.verification.complete, 'boolean');
+    assert.ok(Array.isArray(meta.verification.items) && meta.verification.items.length >= 6);
+    assert.equal(meta.verification.items.find((i) => i.id === 'script').level, 'ok');
+  } finally {
+    closeCb?.();   // 清掉 keepalive 定时器，避免挂住测试进程
+  }
+});

@@ -242,12 +242,16 @@ function seedValue(seedText = '') {
 function resolveVars(vars) {
   const cfg = vars.cfg || {};
   const prompt = String(vars.prompt ?? '');
+  // 接口档案自带的自定义占位符：{{model}} {{lora}} 等由档案参数 extra 提供，
+  // 键名白名单在 comfy-config.normalizeInterfaceParams 里已经过滤过一次。
+  const extraValues = (cfg.extraValues && typeof cfg.extraValues === 'object'
+    && !Array.isArray(cfg.extraValues)) ? cfg.extraValues : {};
   const negativePrompt = String(vars.negative ?? cfg.negativePrompt ?? '');
   const seed = seedValue(String(vars.seed ?? ''));
   // prompt_json：JSON 字符串内部安全形态（转义引号/换行），供 timeline_data 这类 JSON 字符串字段使用
   const jsonInner = (s) => JSON.stringify(s).slice(1, -1);
-  const prefix = String(vars.filenamePrefix || 'lingximanju');
-  return {
+  const prefix = String(vars.filenamePrefix || cfg.filenamePrefix || 'lingximanju');
+  const values = {
     prompt,
     prompt_json: jsonInner(prompt),
     negative_prompt: negativePrompt,
@@ -274,6 +278,13 @@ function resolveVars(vars) {
     // 抽卡朗读文案：只在值为字符串、且确实存在该字段时注入（见 injectWorkflow 的 ttsText 分支）
     audioText: vars.audioText === undefined ? undefined : String(vars.audioText),
   };
+  // 档案自定义占位符（优先级最低，不覆盖内置键）；{{model}} 也可由档案 params.model 直接给出
+  for (const [k, v] of Object.entries(extraValues)) {
+    if (!/^[A-Za-z][\w.-]{0,40}$/.test(k) || k in values) continue;
+    values[k] = String(v);
+  }
+  if (cfg.model !== undefined && cfg.model !== null && cfg.model !== '') values.model = String(cfg.model);
+  return values;
 }
 
 /**
@@ -295,14 +306,18 @@ function normalizeRefs(vars = {}) {
  * 把变量注入 workflow。返回 { prompt, applied, uploadSlots, outputNodes, values, promptInjection }
  * 不修改传入的 workflow 对象。
  */
-export function injectWorkflow(workflow, vars = {}, bindings = []) {
+export function injectWorkflow(workflow, vars = {}, bindings = [], overrides = null) {
   const wf = JSON.parse(JSON.stringify(workflow));
   const values = resolveVars(vars);
   const applied = [];
   const uploadSlots = [];
   const outputNodes = [];
-  const touched = new Set(); // 已被占位符/显式绑定处理过的 node::input
+  const touched = new Set(); // 已被占位符/显式绑定/节点覆盖处理过的 node::input
   const plan = { positive: null, negative: null, warnings: [] };
+  // 接口档案的节点级覆盖：没显式传时从 vars.cfg（即 resolveInterface 返回的 config）读取，
+  // 这样 describeWorkflow / drawVoiceCandidates 等所有调用点无需改签名也能生效。
+  const nodeOverrides = Array.isArray(overrides) ? overrides
+    : (Array.isArray(vars.cfg?.nodeOverrides) ? vars.cfg.nodeOverrides : []);
 
   const replace = (str) => String(str).replace(PLACEHOLDER_RE, (_, key) => {
     const val = values[key];
@@ -313,6 +328,19 @@ export function injectWorkflow(workflow, vars = {}, bindings = []) {
     classType: wf[node]?.class_type || '', title: nodeTitle(wf[node]),
     strategy, preview: clip(text),
   });
+
+  // -1) 接口档案的节点级覆盖（模型名 / LoRA / 采样器 / 自定义槽位）。
+  //     值里可以写 {{prompt}} / {{model}} 等占位符；标记 touched 防止自动识别再次改写。
+  //     显式绑定仍在第 4 步最后落盘，同一槽位冲突时以用户的显式绑定为准。
+  for (const o of nodeOverrides) {
+    const id = String(o?.node ?? '').trim();
+    const key = String(o?.input ?? '').trim();
+    if (!id || !key || !wf[id]) continue;
+    const value = typeof o.value === 'string' ? replace(o.value) : o.value;
+    wf[id].inputs[key] = value;
+    applied.push({ node: id, input: key, value, by: 'interface:nodeOverride' });
+    touched.add(`${id}::${key}`);
+  }
 
   // 0) 显式绑定优先级最高：绑定里写了 {{prompt}} 就认定用户已指定注入位置，不再自动注入
   for (const b of bindings || []) {
@@ -705,6 +733,118 @@ async function downloadOutput(config, file, signal) {
 }
 
 /**
+ * 一次读回 ComfyUI 的「队列 + 历史」快照。
+ * 对账只需要这两个接口：/queue 说明某条任务还在排队或正在跑，/history 说明它已经出结果。
+ * 两者都没有 = 这条任务在 ComfyUI 侧不存在（进程重启过 / 队列被清空 / 从未真正发出）。
+ */
+export async function fetchComfySnapshot(config, opts = {}) {
+  const base = String(config?.baseUrl || '').replace(/\/+$/, '');
+  if (!base) throw new Error('未配置 ComfyUI 地址');
+  const maxItems = Math.max(1, Math.min(2000, Number(opts.maxItems) || 500));
+  // 对账是「顺手核对一下」，不能把页面 / 执行卡在一个连不上的地址上：
+  // ComfyUI 关机或地址写错时 6 秒内必须给结论，退回「连不上 → 按未发送处理」。
+  const signal = opts.signal || AbortSignal.timeout(Math.max(1000, Number(opts.timeoutMs) || 6000));
+  const [queue, history] = await Promise.all([
+    requestJSON(`${base}/queue`, { signal }),
+    requestJSON(`${base}/history?max_items=${maxItems}`, { signal }),
+  ]);
+  return { queue: describeQueue(queue), history: history || {} };
+}
+
+/** /queue 的两种返回形态（新版对象 / 旧版数组）统一成 { running:Set, pending:Set } */
+export function describeQueue(queue) {
+  const running = new Set();
+  const pending = new Set();
+  const items = [];
+  const idOf = (row) => (Array.isArray(row) ? row[1] : row?.prompt_id || row?.promptId) || '';
+  const graphOf = (row) => (Array.isArray(row) ? row[2] : row?.prompt) || {};
+  const states = [
+    ['running', queue?.queue_running || queue?.running],
+    ['pending', queue?.queue_pending || queue?.pending],
+  ];
+  for (const [state, list] of states) {
+    for (const row of (Array.isArray(list) ? list : [])) {
+      const promptId = idOf(row);
+      if (!promptId) continue;
+      (state === 'running' ? running : pending).add(promptId);
+      // 队列条目同样带产物文件名前缀：没有 prompt_id 的老任务（升级前提交的）只能靠它认领，
+      // 否则会被误判成「从未发出」而重发一遍——那正是把正在算的任务又烧一次的根源。
+      const prefix = historyFilenamePrefix(graphOf(row));
+      items.push({ promptId, state, prefix, tag: parseArtifactPrefix(prefix), claimed: false });
+    }
+  }
+  return { running, pending, items };
+}
+
+/** history 条目的 prompt 图（新版是 [number, prompt_id, graph]，旧版直接是 graph） */
+export function historyPromptGraph(item) {
+  if (!item) return {};
+  if (Array.isArray(item.prompt)) return item.prompt[2] || {};
+  return item.prompt || {};
+}
+
+/** 从工作流图里取本次产物文件名前缀（SaveImage / VHS 等输出节点都带 filename_prefix） */
+export function historyFilenamePrefix(graph) {
+  for (const node of Object.values(graph || {})) {
+    const prefix = node?.inputs?.filename_prefix ?? node?.inputs?.filenamePrefix;
+    if (typeof prefix === 'string' && prefix) return prefix;
+  }
+  return '';
+}
+
+/**
+ * 把本项目写进 ComfyUI 的产物前缀解析成「哪一类、第几镜」。
+ * 前缀形如 lingximanju_keyframe_12_123456789：kind=keyframe，shotNo=12。
+ */
+export function parseArtifactPrefix(prefix) {
+  const m = String(prefix || '').match(/^lingximanju_([a-z][a-z-]*)_(\d+)(?:_|$)/i);
+  if (!m) return null;
+  return { kind: m[1].toLowerCase(), shotNo: Number(m[2]) };
+}
+
+/** history 条目里第一条消息的时间戳（execution_start），无则退回 0 */
+export function historyStartedAt(item) {
+  const messages = item?.status?.messages;
+  if (Array.isArray(messages)) {
+    for (const m of messages) {
+      const ts = m?.[1]?.timestamp;
+      if (Number(ts) > 0) return Number(ts);
+    }
+  }
+  return Number(item?.meta?.created_at) || 0;
+}
+
+/** history 条目是否已经跑完（有产物即视为完成；出错且无产物视为失败） */
+export function historyOutcome(item) {
+  const outputs = collectOutputs(item);
+  const statusStr = item?.status?.status_str || (item?.status?.completed ? 'success' : '');
+  if (outputs.length) return { state: 'success', outputs };
+  if (statusStr === 'error') {
+    const msg = (item?.status?.messages || []).map((m) => JSON.stringify(m)).join(' | ').slice(0, 400);
+    return { state: 'error', outputs: [], error: msg || 'ComfyUI 执行失败' };
+  }
+  return { state: 'running', outputs };
+}
+
+/**
+ * 从一条 history 记录里下载全部产物到本地资产目录。
+ * 与 runWorkflow 内的下载走同一条路径（/view → assets/），保证取回的图片和正常链路完全一致。
+ */
+export async function downloadHistoryOutputs(config, item, opts = {}) {
+  const { signal, log = () => {}, limit = 24 } = opts;
+  const { outputs } = historyOutcome(item);
+  const assets = [];
+  for (const file of outputs.slice(0, limit)) {
+    try {
+      assets.push(await downloadOutput(config, file, signal));
+    } catch (err) {
+      log('warn', `取回产物 ${file.filename} 失败：${err.message}`);
+    }
+  }
+  return assets;
+}
+
+/**
  * 完整执行一次 API 格式工作流。
  * vars.imageRefs：[{buffer,name}]，多张参考图按 LoadImage 插槽顺序一一对应；
  * vars.imageBuffer/imageName：单张参考图（应用到全部插槽，向后兼容）。
@@ -712,10 +852,15 @@ async function downloadOutput(config, file, signal) {
  *   promptInjection:Object, durationMs:number}>}
  */
 export async function runWorkflow(config, workflow, vars = {}, opts = {}) {
-  const { signal, log = () => {}, bindings = [] } = opts;
-  const built = injectWorkflow(workflow, vars, bindings);
+  const { signal, log = () => {}, bindings = [], onSubmitted } = opts;
+  const built = injectWorkflow(workflow, vars, bindings, config?.nodeOverrides || null);
   const prompt = built.prompt;
   const plan = built.promptInjection;
+  const chosen = config?.resolvedInterface;
+  if (chosen?.id) {
+    log('info', `接口档案「${chosen.name || chosen.id}」· 板块 ${chosen.scope || '默认'} · ${chosen.via}`);
+  }
+  for (const w of chosen?.warnings || []) log('warn', w);
 
   if (plan.positive) {
     log('info', `提示词 → ${plan.positive.node}.${plan.positive.input}` +
@@ -771,6 +916,11 @@ export async function runWorkflow(config, workflow, vars = {}, opts = {}) {
   });
   const promptId = queued?.prompt_id;
   if (!promptId) throw new Error('ComfyUI 未返回 prompt_id');
+  // 提交即回调：调用方可以立刻把 prompt_id 落盘到画布节点，
+  // 这样服务重启 / 请求中断后仍能凭它去 ComfyUI 历史里把结果认领回来，
+  // 而不是因为「不知道发的是哪一条」只能整批重烧一遍。
+  try { onSubmitted?.(promptId, { applied: built.applied.length, vars }); }
+  catch (err) { log('warn', `prompt_id 回调失败（不影响本次执行）：${err.message}`); }
   log('info', `ComfyUI 已排队 ${promptId} · 注入 ${built.applied.length} 个参数`);
 
   let history = null;

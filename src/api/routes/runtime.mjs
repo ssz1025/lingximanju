@@ -47,16 +47,19 @@ export async function handleRuntime(req, res, url) {
   if (method === 'POST') {
     const body = await readBody(req);
     // 明确拒绝非法数值，不静默回落到默认，避免用户以为保存成功
-    for (const key of ['totalSeconds', 'clipSeconds', 'fps']) {
+    for (const key of ['totalSeconds', 'clipSeconds', 'fps', 'width', 'height']) {
       if (body[key] === undefined) continue;
       const n = Number(body[key]);
       if (!Number.isFinite(n) || n <= 0) {
         return json(res, { error: `${key} 必须是正数` }, 400), true;
       }
     }
+    if (body.resolution !== undefined && !/^\d{2,5}\s*[×xX*]\s*\d{2,5}$/.test(String(body.resolution).trim())) {
+      return json(res, { error: 'resolution 必须是「宽×高」格式，例如 1280×720' }, 400), true;
+    }
     // 只提交本次真正给出的字段：undefined 不能用展开覆盖已有设置
     const patch = {};
-    for (const key of ['totalSeconds', 'clipSeconds', 'fps', 'enabled', 'filmPolicy']) {
+    for (const key of ['totalSeconds', 'clipSeconds', 'fps', 'enabled', 'filmPolicy', 'resolution', 'width', 'height']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     if (body.filmPolicy !== undefined && !['real', 'preview'].includes(String(body.filmPolicy))) {

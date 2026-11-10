@@ -435,12 +435,12 @@ final 节点 data: { film, directorPack, deliverables, outputMode }
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 纯逻辑 | `src/core/novel.mjs` | 解析小说（书名 / 章节 / 段落 / 字数）、三种分集策略、角色频次抽取、轻量预览与输入校验；无 DOM、无副作用 |
+| 纯逻辑 | `src/core/novel.mjs` | 解析小说（书名 / 章节 / 段落 / 字数）、三种分集策略、角色频次抽取（动词邻接 + `mineFrequentNames()` 全书频次挖掘，配合 `character-names.mjs` 的人名可信度判定）、轻量预览与输入校验；无 DOM、无副作用 |
 | 纯逻辑 | `src/core/source-view.mjs` | `buildSourceView(project)`：以 `management.source.text` 为准汇总六项统计，优先用 `management.chapters`，为空时调 `parseNovel()` 惰性重建；只读、不落盘、不改入参；供 `GET /api/projects/:id/source` 使用 |
 | 纯逻辑 | `src/core/project-steps.mjs` | `STEPS` 六步定义（含 `scope` 与论文依据）、`management` 元数据（含 `cover`）、步骤状态机、管理动作、统计与索引 |
 | 纯逻辑 | `src/core/bm25.mjs` | 检索算法层（零 I/O、零依赖）：中文 bigram 分词与停用词、`chunkNovel(512,128)` 分块、BM25 `KnowledgeBase`、`retrieveRelevantChunks()` 归一化重排 / 阈值过滤 / 分数累加 / 近重复去重、`formatFragments()` FRAGMENT 标签 |
 | 纯逻辑 | `src/core/knowledge.mjs` | 式(6) 本地知识库的**磁盘缓存层**：`saveKnowledgeCache()` / `loadKnowledgeCache()` → `data/knowledge/<projectId>.json`；算法部分从 `bm25.mjs` 转出（拆层是为避免 `characters → knowledge → store → project-steps → characters` 循环依赖） |
-| 纯逻辑 | `src/core/characters.mjs` | 角色域模型：属性归一（含静态/动态特征二分与派生兜底）、造型与多视图提示词拼装、论文式(6) 角色召回 `buildCharacterPassages()`、提取输入组装 `buildExtractVars()`、提取结果合并 `mergeExtracted()` |
+| 纯逻辑 | `src/core/characters.mjs` | 角色域模型：属性归一（含静态/动态特征二分与派生兜底）、造型与多视图提示词拼装、论文式(6) 角色召回 `buildCharacterPassages()`、提取输入组装 `buildExtractVars()`（候选池按上限 2 倍放宽，最多 40）、主角兜底 `supplementMainCharacters()`（按全书出场频次补回被漏角色，名额已满时仅强主线 ≥20 次可挤掉末尾）、提取结果合并 `mergeExtracted()` |
 | 构建 | `src/pipelines/novel-project.mjs` | `buildNovelProject()` 复用 `buildTemplate('novel2video')` 的完整 DAG，插入 `episode` 节点并注入原著 / 分集 / 交付设置；`refreshEpisodes()` 重算第 ② 步 |
 | 持久化 | `src/core/store.mjs` | 项目索引字段（`projectIndex`）、快照写入 / 列举 / 读取（`data/snapshots/<id>/<ts>.json`） |
 | 编排 | `src/core/orchestrator.mjs` | `runProject(id, { scope })` 按节点类型白名单分阶段调度；不传 `scope` 时行为不变 |

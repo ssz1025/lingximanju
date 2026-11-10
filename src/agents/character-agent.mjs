@@ -12,8 +12,9 @@ import { createProviders } from '../core/providers.mjs';
 import { resolveModelSettings } from '../core/app-settings.mjs';
 import { extractCharacters } from '../core/novel.mjs';
 import {
-  MAX_CHARACTERS, buildExtractVars, mergeExtracted, verifyEvidence,
+  MAX_CHARACTERS, buildExtractVars, mergeExtracted, supplementMainCharacters, verifyEvidence,
 } from '../core/characters.mjs';
+import { sanitizeCharacterList } from '../core/character-names.mjs';
 
 export const MAX_EXTRACT_LIMIT = MAX_CHARACTERS;
 
@@ -34,7 +35,7 @@ export async function extractProjectCharacters({
 
   const cap = Math.max(1, Math.min(MAX_CHARACTERS, Number(limit) || MAX_CHARACTERS));
   const heuristic = () => extractCharacters(text, cap);
-  const stats = { candidates: 0, fragments: 0, verified: 0, dropped: 0 };
+  const stats = { candidates: 0, fragments: 0, verified: 0, dropped: 0, invalid: 0, supplemented: 0 };
   let extracted = [];
   let source = 'llm';
   let fellBack = false;
@@ -90,9 +91,28 @@ export async function extractProjectCharacters({
     }
   }
 
+  // 主角兜底：无论 LLM 还是启发式，都按「全书出场频次」补回被漏掉的高频角色。
+  // 这一步不依赖模型判断——出场 800 次的角色漏掉是硬错误，不该靠提示词碰运气。
+  const guard = supplementMainCharacters(extracted, text, { max: cap });
+  extracted = guard.characters;
+  stats.supplemented = guard.added.length;
+  if (guard.added.length) {
+    const tail = guard.displaced.length ? `（名额已满，挤掉：${guard.displaced.join('、')}）` : '';
+    log('warn', `角色提取 · 按出场频次补回 ${guard.added.length} 位被漏掉的角色：${guard.added.slice(0, 6).join('、')}${guard.added.length > 6 ? '…' : ''}${tail}`);
+    message += `；按出场频次补回 ${guard.added.length} 位（${guard.added.slice(0, 4).join('、')}${guard.added.length > 4 ? '…' : ''}）${tail}`;
+  }
+
+  // 统一清洗：无论 LLM 还是启发式，非人物（回头/刀光/冲他）、粘连扩展名（沈青崖不）
+  // 与同一实体的重复称呼都在这里被剔除/归并，避免「把动作当角色」进项目。
+  const cleaned = sanitizeCharacterList(extracted, { text, max: cap });
+  stats.invalid = cleaned.dropped.length;
+  extracted = cleaned.characters;
+  if (cleaned.dropped.length) {
+    log('warn', `角色提取 · 已剔除 ${cleaned.dropped.length} 个非人物/重复候选：${cleaned.dropped.slice(0, 6).join('、')}${cleaned.dropped.length > 6 ? '…' : ''}`);
+  }
+
   return { ok: true, extracted, source, fellBack, message, stats };
 }
-
 // 注册为智能体列表 / 画布节点：可在画布作为「角色提取」节点运行
 defineAgent({
   id: 'character-extractor',
@@ -123,12 +143,13 @@ defineAgent({
     ctx.patch({
       added: merged.added,
       merged: merged.merged,
+      removed: merged.removed || [],
       source: result.source,
       fellBack: result.fellBack,
       stats: result.stats,
       summary: result.message,
     });
-    ctx.log('info', `${result.message} · 新增 ${merged.added} / 合并 ${merged.merged}`);
-    return { ...result, added: merged.added, merged: merged.merged };
+    ctx.log('info', `${result.message} · 新增 ${merged.added} / 合并 ${merged.merged}${merged.removed?.length ? ` / 清理 ${merged.removed.length}` : ''}`);
+    return { ...result, added: merged.added, merged: merged.merged, removed: merged.removed };
   },
 });
