@@ -133,6 +133,35 @@ test('③ 顺序说明条：默认只显示制作队列，层级说明折叠但�
   assert.ok(!/undefined|NaN/.test(intro));
 });
 
+/* ------------- 4. 设置弹窗「媒体生成接口档案」的窄容器布局 ------------- */
+const panelsSrc = fs.readFileSync(path.join(ROOT, 'public/panels.js'), 'utf8');
+
+test('接口档案参数表按弹窗内容区自适应，窄容器不再两列乱排 / 表头不再消失', () => {
+  assert.match(css, /\.settings-main\s*\{[^}]*container:\s*settings\s*\/\s*inline-size/,
+    '右侧内容区需声明为尺寸查询容器');
+  const block = css.match(/@container\s+settings\s*\(max-width:\s*760px\)\s*\{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.ok(block, '主断点必须是容器查询而不是视口媒体查询');
+  assert.match(block, /\.mi-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)\s+44px/,
+    '窄容器应是三列两行，不是 1fr 1fr 两列');
+  for (const rule of [
+    '.mi-row > .mi-slot { grid-column: 1; grid-row: 1; }',
+    '.mi-row > .mi-cur { grid-column: 2; grid-row: 1; }',
+    '.mi-row > select[data-cell="source"] { grid-column: 1; grid-row: 2; }',
+    '.mi-row > .mi-cfg { grid-column: 2; grid-row: 2; }',
+    '.mi-row > .mi-order { grid-column: 3; grid-row: 1 / 3;',
+    '.mi-row > .mi-detail { grid-column: 1 / -1; grid-row: 3; }',
+    '.mi-th > :nth-child(5) { grid-column: 3; grid-row: 1 / 3;',
+  ]) assert.ok(block.includes(rule), `缺少显式格位规则：${rule}`);
+  assert.ok(!/\.mi-th\s*\{[^}]*display:\s*none/.test(css), '表头不能按视口整块隐藏');
+  assert.match(css, /@container\s+settings\s*\(max-width:\s*620px\)\s*\{[^}]*#iface-bindings\s+\.modal-grid/,
+    '板块绑定表在更窄时才转单列');
+  assert.match(css, /@supports\s+not\s*\(container-type:\s*inline-size\)/, '不支持容器查询的内核需有兜底');
+  assert.match(css, /\.mi-nodes\s*>\s*\.mi-node\s*\{\s*flex:\s*none;\s*\}/,
+    'flex 列容器里的节点卡片不可被压缩，否则第二行的取值来源下拉会被裁掉');
+  assert.match(panelsSrc, /class="iface-meta"/, '档案卡信息区需成组');
+  assert.match(panelsSrc, /class="iface-actions"/, '档案卡操作区需成组，按钮不逐颗散落');
+});
+
 test('统一后其它渲染部件仍能正常出 HTML，且无脏值', () => {
   setActiveEpisode(P, 2);
   const parts = {

@@ -404,3 +404,15 @@
 | 真实页面 | Playwright 直连 45367：**弹窗** 6 类导航切换正确（general 4 / workspace 2 / agent 2 / image 2 / video 1 / audio 1 个 section）、`isPageHost=0`（确实不再是整页）、Escape 关闭 ✓、Agent 设置两个跳转按钮都切到图片服务并露出目标区块 ✓、三类服务「导入 JSON / 测试全部」入口齐全 ✓；**节点分组** Krea2 38 项 → 15 个节点卡片，常用视图只展开 4 组、显示全部 15 组、表头「38 项 · 常用 4 项 · 15 个节点」、4 个已选 chips ✓；**备注** 节点名 / 参数名 / 档案名三处编辑后 `GET /schema` 均读回、chips 文本同步、折叠与 chip 定位生效、保存参数表 `inputOrder` 38 项 ✓；深浅主题 `rgb(238,241,246)`、`docOverflowX=0`、**0 pageerror**；截图 `/tmp/pwtest/settings-modal-dark.png`、`node-groups-dark.png`、`node-groups-light.png` |
 | 数据安全 | 验证写入全部还原：`nodeNotes` / `inputNotes` / `inputSchema` / `inputOrder` 归零、档案名回 `Krea2_turbo_00033.json`。页面另有 2 条 404（`comfy_mw53xodz3izi.png`、`comfy_mw7z29wi1j7x.png`）属上一轮事故遗留的缺失 png，与本轮改动无关 |
 | 边界 | 备注字段纯新增、老配置读取幂等；`_meta.title` 仍是节点名默认回落；接口绑定 / 板块绑定 / 请求级 interfaceId / Agent 配参 / 媒体双写 / 试跑产物预览全部未变 |
+
+## 2026-11-11 · 媒体生成接口档案展示样式错乱（窄窗口排版）
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「媒体生成接口档展示样式错乱」。按「规划先行」先只读复现并给方案，用户拍板 **按推荐规划只修排版**（不动数据 / 分类逻辑） |
+| 复现 | Playwright 直连 45367，设置 → 图片服务 → 展开「⚙ 输入参数」：1440px 正常；1000px 起档案卡 4 个按钮逐颗散成两行；≤900px 参数表头消失、5 个单元格被塞进 2 列 grid 自动重排成三行（取值来源独占一行、配置列空、顺序按钮掉到末尾）。页面 2 条 404 是历史缺失 png，与样式无关 |
+| 根因 | ① `styles.css` 旧 `@media (max-width:900px)` 按**视口**宽度判断，但参数表实际宽度由弹窗内容区决定，且 2 列规则没给 5 个单元格指定格位；② `.iface-head` 是裸 `flex-wrap:wrap`，按钮逐颗换行；③ `.mi-nodes` 是固定高度的 flex 列容器，`.mi-node` 默认 `flex-shrink:1` 被压扁，两行布局的第二行「取值来源」下拉被 `overflow:hidden` 裁掉（放大截图抓到，DOM 的 display / visible 都是正常值） |
+| 改动 | `styles.css`：`.settings-main` 声明 `container: settings / inline-size`；`@container settings (max-width:760px)` 把参数表折成 3 列两行「卡片式」，为 5 个数据单元格与 5 个表头格显式指定 `grid-column/grid-row`，顺序按钮固定右侧跨两行；`@container (max-width:620px)` 让板块绑定表转单列；`@supports not (container-type:inline-size)` + `@media (max-width:1000px)` 作旧内核兜底；`.mi-nodes > .mi-node { flex:none }` 修裁剪；`.mi-scope` / `.mi-chips-line > .cf-note` 窄屏对齐。`panels.js`：`renderInterfaces` 的 `.iface-head` 拆成 `.iface-meta` / `.iface-actions` 两组（事件委托用 `closest` + `item.contains`，结构变化不影响） |
+| 验证 | `tests/ui-style.test.mjs` 新增 1 项静态回归（容器声明 / 主断点 / 7 条格位规则 / 表头不隐藏 / 620 断点 / 兜底 / 两个分组 / flex:none）→ **8/8**；**`npm test` 766/766**；`npm run check` **183 文件** |
+| 真实页面 | Playwright 四档 1440 / 1000 / 900 / 800 × 深浅主题：1440 保持 5 列，其余为 3 列两行且表头可见、5 个单元格格位 `(1,1)(2,1)(1,2)(2,2)(3,1~2)` 全部可见、操作按钮 4 个同一行、绑定表仅 800 单列、`docOverflowX=0` / `mainOverflowX=0`、**0 pageerror**；交互回归：JSON 展开折叠、常用 4 ↔ 全部 38、节点折叠、chip 定位、保存档案与试跑（**写请求全部拦截，不落盘**）、视频分类切换、Escape 全部通过；截图 `/tmp/pwtest/final-iface-*.png`、`final-cells-800.png` |
+| 边界 | 只动前端样式 + 2 个 wrapper，后端 / 数据 / 接口绑定 / 分类过滤均未改。档案列表仍按全部接口显示（视频接口会出现在图片服务里），板块绑定仍需滚动——用户选择本轮不处理 |

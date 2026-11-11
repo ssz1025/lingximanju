@@ -21,7 +21,9 @@ export function showModal({ title, sub = '', body = '', actions = [] }) {
   const root = $('modal-root');
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
-  backdrop.innerHTML = `<div class="modal">
+  // 设置弹窗走宽屏左右分栏布局，用显式 class 标记（不依赖 :has()，兼容旧内核）
+  const wide = body.includes('settings-shell');
+  backdrop.innerHTML = `<div class="modal${wide ? ' modal-settings' : ''}">
     <h2>${esc(title)}</h2>${sub ? `<div class="sub">${sub}</div>` : ''}
     <div class="modal-body">${body}</div>
     <div class="modal-actions"></div>
@@ -227,10 +229,10 @@ export async function openSettings(project, onSave) {
         <label class="cf-check"><input type="checkbox" id="cf-stitch" ${cfg.stitch !== false ? 'checked' : ''}> 用本机 ffmpeg 把 ComfyUI 片段拼成一条成片 MP4</label>
         <div class="cf-note">导演包包含 pack.json、shared_params/、asset_groups/NN/group.json、timeline.json，可被 ComfyUI 导演工作台「Import pack」直接读取；extra/ 附带中文分镜表与原始 API 工作流。</div>
       </div>
+      <div id="cf-result" class="cf-result" hidden></div>
       </div>
     </div>
-
-    <div id="cf-result" class="cf-result" hidden></div>`;
+`;
 
   const modal = showModal({
     title: '设置',
@@ -1548,17 +1550,21 @@ export async function openSettings(project, onSave) {
       const bound = (e.boundScopes || []).map((s) => SCOPE_LABELS[s] || s).join('、');
       return `<div class="iface-item ${open ? 'open' : ''}" data-id="${esc(e.id)}">
         <div class="iface-head">
-          <button class="iface-toggle" type="button" data-act="toggle" title="展开 / 收起参数">${open ? '▾' : '▸'}</button>
-          <b class="iface-name">${esc(e.name)}</b>
-          <span class="wf-badge none">${esc(IFACE_KIND_LABEL[e.kind] || e.kind)}</span>
-          ${e.active ? '<span class="wf-badge ok">默认</span>' : ''}
-          ${e.capability ? `<span class="wf-badge">${esc(e.capability)}</span>` : ''}
-          <span class="iface-summary">${e.nodes || 0} 节点 · ${esc(paramSummary(e))}</span>
-          ${bound ? `<span class="wf-badge run" title="已绑定到这些板块">用于 ${esc(bound)}</span>` : ''}
-          <button class="btn sm" type="button" data-act="edit-json" title="直接查看 / 修改导入的接口 JSON 文件">✎ 接口 JSON</button>
-          <button class="btn sm" type="button" data-act="inputs" title="从接口 JSON 自动列出输入并可视化配置">⚙ 输入参数</button>
-          <button class="wf-test" type="button" data-act="test" title="按该档案的参数真实试跑一次">▶ 测试</button>
-          <button class="btn sm" type="button" data-act="save">保存档案</button>
+          <div class="iface-meta">
+            <button class="iface-toggle" type="button" data-act="toggle" title="展开 / 收起参数">${open ? '▾' : '▸'}</button>
+            <b class="iface-name">${esc(e.name)}</b>
+            <span class="wf-badge none">${esc(IFACE_KIND_LABEL[e.kind] || e.kind)}</span>
+            ${e.active ? '<span class="wf-badge ok">默认</span>' : ''}
+            ${e.capability ? `<span class="wf-badge">${esc(e.capability)}</span>` : ''}
+            <span class="iface-summary">${e.nodes || 0} 节点 · ${esc(paramSummary(e))}</span>
+            ${bound ? `<span class="wf-badge run" title="已绑定到这些板块">用于 ${esc(bound)}</span>` : ''}
+          </div>
+          <div class="iface-actions">
+            <button class="btn sm" type="button" data-act="edit-json" title="直接查看 / 修改导入的接口 JSON 文件">✎ 接口 JSON</button>
+            <button class="btn sm" type="button" data-act="inputs" title="从接口 JSON 自动列出输入并可视化配置">⚙ 输入参数</button>
+            <button class="wf-test" type="button" data-act="test" title="按该档案的参数真实试跑一次">▶ 测试</button>
+            <button class="btn sm" type="button" data-act="save">保存档案</button>
+          </div>
         </div>
         <div class="iface-editor" ${open ? '' : 'hidden'}>
           <div class="field"><label>能力标签（文生图 / 图生图 / 多参考生图 …）</label>

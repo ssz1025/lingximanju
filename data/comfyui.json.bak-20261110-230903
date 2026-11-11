@@ -1,0 +1,1928 @@
+{
+  "enabled": true,
+  "baseUrl": "http://100.105.39.90:8188",
+  "clientId": "lingximanju",
+  "strict": false,
+  "timeoutMs": 900000,
+  "pollIntervalMs": 1000,
+  "imageWorkflow": {
+    "29": {
+      "inputs": {
+        "filename_prefix": "Krea2_turbo",
+        "images": [
+          "30:8",
+          0
+        ]
+      },
+      "class_type": "SaveImage",
+      "_meta": {
+        "title": "保存图像",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "49": {
+      "inputs": {
+        "aspect_ratio": "9:16 (Portrait Widescreen)",
+        "megapixels": 1.8,
+        "multiple": 8
+      },
+      "class_type": "ResolutionSelector",
+      "_meta": {
+        "title": "分辨率选择器",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:6": {
+      "inputs": {
+        "text": [
+          "30:28",
+          0
+        ],
+        "clip": [
+          "30:11",
+          0
+        ]
+      },
+      "class_type": "CLIPTextEncode",
+      "_meta": {
+        "title": "CLIP文本编码",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:5": {
+      "inputs": {
+        "width": [
+          "49",
+          0
+        ],
+        "height": [
+          "49",
+          1
+        ],
+        "batch_size": 1
+      },
+      "class_type": "EmptyLatentImage",
+      "_meta": {
+        "title": "空Latent图像",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:3": {
+      "inputs": {
+        "seed": 448980190432331,
+        "steps": 8,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1,
+        "model": [
+          "30:22",
+          0
+        ],
+        "positive": [
+          "30:6",
+          0
+        ],
+        "negative": [
+          "30:13",
+          0
+        ],
+        "latent_image": [
+          "30:5",
+          0
+        ]
+      },
+      "class_type": "KSampler",
+      "_meta": {
+        "title": "K采样器",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:8": {
+      "inputs": {
+        "samples": [
+          "30:3",
+          0
+        ],
+        "vae": [
+          "30:12",
+          0
+        ]
+      },
+      "class_type": "VAEDecode",
+      "_meta": {
+        "title": "VAE解码",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:10": {
+      "inputs": {
+        "unet_name": "krea2_turbo_fp8_scaled.safetensors",
+        "weight_dtype": "default"
+      },
+      "class_type": "UNETLoader",
+      "_meta": {
+        "title": "UNet加载器",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:11": {
+      "inputs": {
+        "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+        "type": "krea2",
+        "device": "default"
+      },
+      "class_type": "CLIPLoader",
+      "_meta": {
+        "title": "加载CLIP",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:12": {
+      "inputs": {
+        "vae_name": "qwen_image_vae.safetensors"
+      },
+      "class_type": "VAELoader",
+      "_meta": {
+        "title": "加载VAE",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:13": {
+      "inputs": {
+        "conditioning": [
+          "30:6",
+          0
+        ]
+      },
+      "class_type": "ConditioningZeroOut",
+      "_meta": {
+        "title": "条件零化",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:15": {
+      "inputs": {
+        "lora_name": "krea2_darkbrush.safetensors",
+        "strength_model": 0.8,
+        "model": [
+          "30:10",
+          0
+        ]
+      },
+      "class_type": "LoraLoaderModelOnly",
+      "_meta": {
+        "title": "LoRA加载器（仅模型）",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:16": {
+      "inputs": {
+        "prompt": [
+          "30:17",
+          0
+        ],
+        "max_length": 512,
+        "sampling_mode": "on",
+        "sampling_mode.temperature": 0.7,
+        "sampling_mode.top_k": 64,
+        "sampling_mode.top_p": 0.95,
+        "sampling_mode.min_p": 0.05,
+        "sampling_mode.repetition_penalty": 1.05,
+        "sampling_mode.seed": 0,
+        "sampling_mode.presence_penalty": 0,
+        "thinking": false,
+        "use_default_template": true,
+        "mtp": "auto",
+        "clip": [
+          "30:11",
+          0
+        ]
+      },
+      "class_type": "TextGenerate",
+      "_meta": {
+        "title": "TextGenerate",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:17": {
+      "inputs": {
+        "string_a": [
+          "30:18",
+          0
+        ],
+        "string_b": [
+          "30:19",
+          0
+        ],
+        "delimiter": ""
+      },
+      "class_type": "StringConcatenate",
+      "_meta": {
+        "title": "连接",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:18": {
+      "inputs": {
+        "value": "You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt.\n\nThink step by step about the request before writing the answer:\n- What is the subject and mood?\n- What visual styles, mediums, and lighting options would fit? Consider two or three alternatives and pick the one that best serves the request.\n- What composition, framing, and grounded details will help the text-to-image model?\n\nThen output a single expanded prompt paragraph.\n\nFollow these rules strictly:\n1. **Faithfulness First:** Preserve all original subjects, actions, colors, and spatial relationships. Do not add new objects, props, characters, or animals unless the user clearly implies them.\n2. **Practical T2I Structure:** Write a prompt that a text-to-image model can parse cleanly. Group subjects with their own attributes and actions. Use grounded phrasing for poses, interactions, and spatial layout.\n3. **Style Planning Stays Internal:** Use your internal reasoning to choose style, medium, framing, and lighting. Do not emit planning tags or wrappers in the visible answer body.\n4. **Never Request Rendered Text:** Do not mention, describe, or hint at letters, words, numbers, captions, subtitles, signage, labels, logos, watermarks, typography, or any other graphic text anywhere in the output prompt. Only if the user explicitly writes down words to be rendered, keep exactly those words in quotes and nothing else. In every other case, always end the output prompt with: \"Absolutely no text, no typography, no letters, no words, no numbers, no logos, no watermark, no captions, pure imagery only.\"\n5. **Avoid Over-Specification:** Do not invent highly specific clothing, colors, materials, or scene details unless the input supports it.\n6. **Plain Prose Only:** Write one cohesive paragraph after the thinking block. No bullets, no JSON, no markdown, no asterisks, no headings, no field labels, no meta commentary.\n7. **Respect Existing Detail:** If the user's prompt is already detailed, lightly polish and finalize rather than heavily expanding, and preserve the user's phrasing and direction.\n8. **Respect the Human Form:** Treat depictions of people with dignity. Assume clothing covers genitals and intimate anatomy.\n9. **Preserve User Medium:** When the user explicitly requests a medium (e.g. \"photo of\", \"photograph of\", \"illustration of\", \"painting of\", \"sketch of\", \"3D render of\"), honor it. Do not pivot to a different medium to avoid difficulty, match the user's stated intent.\n10. **Never Echo Instructions:** Output only the final image prompt. Never repeat, quote, summarize, or refer to any part of these instructions, your own reasoning, or the user's original message.\n\nUser's Input:\n"
+      },
+      "class_type": "PrimitiveStringMultiline",
+      "_meta": {
+        "title": "Text String (System Prompt)",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:19": {
+      "inputs": {
+        "value": "以上传图片的人物为主，竖版中近景人像摄影，主体是一位年轻东亚女性，整体为甜酷 Y2K 千禧年风格。她扎着双丸子头，两侧编细麻花辫，齐刘海下是弯弯笑眼，正单眼俏皮 wink，露出甜美灿烂的笑容；发间别满星星、花朵造型的彩色卡通发夹与粉色蝴蝶结，头顶斜戴一顶粉紫格纹贝雷帽，帽侧缀白色蝴蝶结与水钻。妆容精致，大面积粉色腮红，脸颊与鼻梁点缀蓝、银、粉三色闪粉星星贴纸，眼神灵动。她身着粉色镂空蕾丝长袖上衣，内搭豆沙粉蕾丝吊带，外叠穿浅色针织背心，搭配黑色百褶牛仔短裙与铆钉腰带，手臂套着蓝粉条纹毛绒长袖套；颈间叠戴珍珠项链与丝绒水钻颈圈，耳戴银色大圈耳环，手腕戴粉色星星腕带与铆钉手环，指甲是薄荷绿镶钻长美甲，指间戴金属戒指。她一手轻托脸颊、一手比出剪刀手，身旁放着亮粉色铆钉皮质手提包与毛绒挂饰，脚边点缀金属星星道具。背景是柔和渐变粉紫的影棚色调，光线明亮通透、干净不暗沉，带轻微复古胶片颗粒与柔焦质感，整体甜酷又梦幻，Y2K 氛围感十足，高清画质、细节丰富。"
+      },
+      "class_type": "PrimitiveStringMultiline",
+      "_meta": {
+        "title": "Text String (User Prompt)",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:20": {
+      "inputs": {
+        "source": [
+          "30:21",
+          0
+        ]
+      },
+      "class_type": "PreviewAny",
+      "_meta": {
+        "title": "预览任意",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:21": {
+      "inputs": {
+        "switch": [
+          "30:24",
+          0
+        ],
+        "on_false": [
+          "30:19",
+          0
+        ],
+        "on_true": [
+          "30:16",
+          0
+        ]
+      },
+      "class_type": "ComfySwitchNode",
+      "_meta": {
+        "title": "切换",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:22": {
+      "inputs": {
+        "switch": [
+          "30:23",
+          0
+        ],
+        "on_false": [
+          "30:10",
+          0
+        ],
+        "on_true": [
+          "30:15",
+          0
+        ]
+      },
+      "class_type": "ComfySwitchNode",
+      "_meta": {
+        "title": "Switch (Model)",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:23": {
+      "inputs": {
+        "value": false
+      },
+      "class_type": "PrimitiveBoolean",
+      "_meta": {
+        "title": "Boolean (Enable LoRA?)",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:24": {
+      "inputs": {
+        "value": true
+      },
+      "class_type": "PrimitiveBoolean",
+      "_meta": {
+        "title": "Boolean (Refine Prompt?)",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:27": {
+      "inputs": {
+        "string_a": [
+          "30:20",
+          0
+        ],
+        "string_b": "muted minimalist sketch style",
+        "delimiter": ", "
+      },
+      "class_type": "StringConcatenate",
+      "_meta": {
+        "title": "Concatenate Text (LoRA Trigger Word)",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    },
+    "30:28": {
+      "inputs": {
+        "switch": [
+          "30:23",
+          0
+        ],
+        "on_false": [
+          "30:20",
+          0
+        ],
+        "on_true": [
+          "30:27",
+          0
+        ]
+      },
+      "class_type": "ComfySwitchNode",
+      "_meta": {
+        "title": "切换",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      }
+    }
+  },
+  "videoWorkflow": {
+    "1": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    "2": {
+      "class_type": "PathchSageAttentionKJ",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "sage_attention": "auto",
+        "allow_compile": false
+      }
+    },
+    "3": {
+      "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+      "inputs": {
+        "model": [
+          "2",
+          0
+        ]
+      }
+    },
+    "4": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    "5": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    "6": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    "7": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "lingximanju_reference.png"
+      }
+    },
+    "8": {
+      "class_type": "MiniMaxH3DirectorGroupImageToVideo",
+      "inputs": {
+        "first_frame": [
+          "7",
+          0
+        ],
+        "prompt": "{{prompt}}",
+        "duration_sec": "{{duration}}"
+      }
+    },
+    "9": {
+      "class_type": "MiniMaxH3DirectorGroupsCombine",
+      "inputs": {
+        "groups.group_0": [
+          "8",
+          0
+        ]
+      }
+    },
+    "10": {
+      "class_type": "MiniMaxH3Director",
+      "inputs": {
+        "model": [
+          "3",
+          0
+        ],
+        "video_vae": [
+          "5",
+          0
+        ],
+        "audio_vae": [
+          "6",
+          0
+        ],
+        "clip": [
+          "4",
+          0
+        ],
+        "i2v_groups": [
+          "9",
+          0
+        ],
+        "task_type": "i2v — 图生视频(Image to Video)",
+        "global_prompt": "{{prompt}}",
+        "bd_grp_sample": "采样设置",
+        "cfg": 1,
+        "seed": 12345,
+        "frame_rate": "{{fps}}",
+        "width": 864,
+        "height": 480,
+        "ref_max_size": 256,
+        "total_frames": 124,
+        "timeline_data": "{\"version\": 5, \"editMode\": \"segment\", \"timelineMode\": \"i2v\", \"totalFrames\": {{frames}}, \"frameRate\": {{fps}}, \"width\": {{width}}, \"height\": {{height}}, \"refMaxSize\": 256, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"1:1 (Square)\", \"megapixels\": 0.07, \"multiple\": 32, \"longEdge\": 256, \"width\": {{width}}, \"height\": {{height}}, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"generate\", \"continuityEnabled\": false, \"continuityOverlapFrames\": 9}, \"videoClips\": [], \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": {{frames}}, \"deletedSourceRanges\": []}, \"global\": {\"taskType\": \"i2v — 图生视频(Image to Video)\", \"prompt\": \"{{prompt_json}}\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"{{image}}\"}, \"refAudios\": []}, \"segments\": [{\"id\": \"shot0\", \"start\": 0, \"length\": {{frames}}, \"frameCount\": {{frames}}, \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"isStartFrame\": true, \"isEndFrame\": false, \"genImage\": {\"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}}, \"endImage\": null, \"taskType\": \"\", \"refs\": []}], \"shots\": [{\"id\": \"shot0\", \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"startImage\": {\"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}}, \"endImage\": null}], \"runSelectEnabled\": false, \"runSelection\": [], \"gen\": {\"defaultFrameCount\": {{frames}}}, \"liveTaePreview\": true, \"keyframes\": [{\"id\": \"shot0_s\", \"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}, \"start\": 0, \"length\": {{frames}}, \"frameCount\": {{frames}}, \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": {{duration}}}",
+        "bd_grp_advanced": "高级采样",
+        "steps": 8,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "shift_video": 12,
+        "shift_audio": 3,
+        "bd_grp_perf": "性能",
+        "clear_vram_between_segments": true,
+        "export_source_images": false
+      }
+    },
+    "11": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "images": [
+          "10",
+          0
+        ],
+        "audio": [
+          "10",
+          1
+        ],
+        "fps": [
+          "10",
+          2
+        ],
+        "bit_depth": 8
+      }
+    },
+    "12": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "video": [
+          "11",
+          0
+        ],
+        "filename_prefix": "{{filename_prefix}}",
+        "format": "auto",
+        "codec": "auto"
+      }
+    }
+  },
+  "audioWorkflow": null,
+  "imageWorkflowName": "Krea2_turbo_00033.json",
+  "videoWorkflowName": "minimax_h3_i2v",
+  "audioWorkflowName": "",
+  "imageWorkflowLib": [
+    {
+      "id": "wfimage_107mvsq",
+      "name": "Krea2_turbo_00033.json",
+      "workflow": {
+        "29": {
+          "inputs": {
+            "filename_prefix": "Krea2_turbo",
+            "images": [
+              "30:8",
+              0
+            ]
+          },
+          "class_type": "SaveImage",
+          "_meta": {
+            "title": "保存图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "49": {
+          "inputs": {
+            "aspect_ratio": "9:16 (Portrait Widescreen)",
+            "megapixels": 1.8,
+            "multiple": 8
+          },
+          "class_type": "ResolutionSelector",
+          "_meta": {
+            "title": "分辨率选择器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:6": {
+          "inputs": {
+            "text": [
+              "30:28",
+              0
+            ],
+            "clip": [
+              "30:11",
+              0
+            ]
+          },
+          "class_type": "CLIPTextEncode",
+          "_meta": {
+            "title": "CLIP文本编码",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:5": {
+          "inputs": {
+            "width": [
+              "49",
+              0
+            ],
+            "height": [
+              "49",
+              1
+            ],
+            "batch_size": 1
+          },
+          "class_type": "EmptyLatentImage",
+          "_meta": {
+            "title": "空Latent图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:3": {
+          "inputs": {
+            "seed": 448980190432331,
+            "steps": 8,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": [
+              "30:22",
+              0
+            ],
+            "positive": [
+              "30:6",
+              0
+            ],
+            "negative": [
+              "30:13",
+              0
+            ],
+            "latent_image": [
+              "30:5",
+              0
+            ]
+          },
+          "class_type": "KSampler",
+          "_meta": {
+            "title": "K采样器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:8": {
+          "inputs": {
+            "samples": [
+              "30:3",
+              0
+            ],
+            "vae": [
+              "30:12",
+              0
+            ]
+          },
+          "class_type": "VAEDecode",
+          "_meta": {
+            "title": "VAE解码",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:10": {
+          "inputs": {
+            "unet_name": "krea2_turbo_fp8_scaled.safetensors",
+            "weight_dtype": "default"
+          },
+          "class_type": "UNETLoader",
+          "_meta": {
+            "title": "UNet加载器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:11": {
+          "inputs": {
+            "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+            "type": "krea2",
+            "device": "default"
+          },
+          "class_type": "CLIPLoader",
+          "_meta": {
+            "title": "加载CLIP",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:12": {
+          "inputs": {
+            "vae_name": "qwen_image_vae.safetensors"
+          },
+          "class_type": "VAELoader",
+          "_meta": {
+            "title": "加载VAE",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:13": {
+          "inputs": {
+            "conditioning": [
+              "30:6",
+              0
+            ]
+          },
+          "class_type": "ConditioningZeroOut",
+          "_meta": {
+            "title": "条件零化",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:15": {
+          "inputs": {
+            "lora_name": "krea2_darkbrush.safetensors",
+            "strength_model": 0.8,
+            "model": [
+              "30:10",
+              0
+            ]
+          },
+          "class_type": "LoraLoaderModelOnly",
+          "_meta": {
+            "title": "LoRA加载器（仅模型）",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:16": {
+          "inputs": {
+            "prompt": [
+              "30:17",
+              0
+            ],
+            "max_length": 512,
+            "sampling_mode": "on",
+            "sampling_mode.temperature": 0.7,
+            "sampling_mode.top_k": 64,
+            "sampling_mode.top_p": 0.95,
+            "sampling_mode.min_p": 0.05,
+            "sampling_mode.repetition_penalty": 1.05,
+            "sampling_mode.seed": 0,
+            "sampling_mode.presence_penalty": 0,
+            "thinking": false,
+            "use_default_template": true,
+            "mtp": "auto",
+            "clip": [
+              "30:11",
+              0
+            ]
+          },
+          "class_type": "TextGenerate",
+          "_meta": {
+            "title": "TextGenerate",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:17": {
+          "inputs": {
+            "string_a": [
+              "30:18",
+              0
+            ],
+            "string_b": [
+              "30:19",
+              0
+            ],
+            "delimiter": ""
+          },
+          "class_type": "StringConcatenate",
+          "_meta": {
+            "title": "连接",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:18": {
+          "inputs": {
+            "value": "You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt.\n\nThink step by step about the request before writing the answer:\n- What is the subject and mood?\n- What visual styles, mediums, and lighting options would fit? Consider two or three alternatives and pick the one that best serves the request.\n- What composition, framing, and grounded details will help the text-to-image model?\n\nThen output a single expanded prompt paragraph.\n\nFollow these rules strictly:\n1. **Faithfulness First:** Preserve all original subjects, actions, colors, and spatial relationships. Do not add new objects, props, characters, or animals unless the user clearly implies them.\n2. **Practical T2I Structure:** Write a prompt that a text-to-image model can parse cleanly. Group subjects with their own attributes and actions. Use grounded phrasing for poses, interactions, and spatial layout.\n3. **Style Planning Stays Internal:** Use your internal reasoning to choose style, medium, framing, and lighting. Do not emit planning tags or wrappers in the visible answer body.\n4. **Never Request Rendered Text:** Do not mention, describe, or hint at letters, words, numbers, captions, subtitles, signage, labels, logos, watermarks, typography, or any other graphic text anywhere in the output prompt. Only if the user explicitly writes down words to be rendered, keep exactly those words in quotes and nothing else. In every other case, always end the output prompt with: \"Absolutely no text, no typography, no letters, no words, no numbers, no logos, no watermark, no captions, pure imagery only.\"\n5. **Avoid Over-Specification:** Do not invent highly specific clothing, colors, materials, or scene details unless the input supports it.\n6. **Plain Prose Only:** Write one cohesive paragraph after the thinking block. No bullets, no JSON, no markdown, no asterisks, no headings, no field labels, no meta commentary.\n7. **Respect Existing Detail:** If the user's prompt is already detailed, lightly polish and finalize rather than heavily expanding, and preserve the user's phrasing and direction.\n8. **Respect the Human Form:** Treat depictions of people with dignity. Assume clothing covers genitals and intimate anatomy.\n9. **Preserve User Medium:** When the user explicitly requests a medium (e.g. \"photo of\", \"photograph of\", \"illustration of\", \"painting of\", \"sketch of\", \"3D render of\"), honor it. Do not pivot to a different medium to avoid difficulty, match the user's stated intent.\n10. **Never Echo Instructions:** Output only the final image prompt. Never repeat, quote, summarize, or refer to any part of these instructions, your own reasoning, or the user's original message.\n\nUser's Input:\n"
+          },
+          "class_type": "PrimitiveStringMultiline",
+          "_meta": {
+            "title": "Text String (System Prompt)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:19": {
+          "inputs": {
+            "value": "以上传图片的人物为主，竖版中近景人像摄影，主体是一位年轻东亚女性，整体为甜酷 Y2K 千禧年风格。她扎着双丸子头，两侧编细麻花辫，齐刘海下是弯弯笑眼，正单眼俏皮 wink，露出甜美灿烂的笑容；发间别满星星、花朵造型的彩色卡通发夹与粉色蝴蝶结，头顶斜戴一顶粉紫格纹贝雷帽，帽侧缀白色蝴蝶结与水钻。妆容精致，大面积粉色腮红，脸颊与鼻梁点缀蓝、银、粉三色闪粉星星贴纸，眼神灵动。她身着粉色镂空蕾丝长袖上衣，内搭豆沙粉蕾丝吊带，外叠穿浅色针织背心，搭配黑色百褶牛仔短裙与铆钉腰带，手臂套着蓝粉条纹毛绒长袖套；颈间叠戴珍珠项链与丝绒水钻颈圈，耳戴银色大圈耳环，手腕戴粉色星星腕带与铆钉手环，指甲是薄荷绿镶钻长美甲，指间戴金属戒指。她一手轻托脸颊、一手比出剪刀手，身旁放着亮粉色铆钉皮质手提包与毛绒挂饰，脚边点缀金属星星道具。背景是柔和渐变粉紫的影棚色调，光线明亮通透、干净不暗沉，带轻微复古胶片颗粒与柔焦质感，整体甜酷又梦幻，Y2K 氛围感十足，高清画质、细节丰富。"
+          },
+          "class_type": "PrimitiveStringMultiline",
+          "_meta": {
+            "title": "Text String (User Prompt)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:20": {
+          "inputs": {
+            "source": [
+              "30:21",
+              0
+            ]
+          },
+          "class_type": "PreviewAny",
+          "_meta": {
+            "title": "预览任意",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:21": {
+          "inputs": {
+            "switch": [
+              "30:24",
+              0
+            ],
+            "on_false": [
+              "30:19",
+              0
+            ],
+            "on_true": [
+              "30:16",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "切换",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:22": {
+          "inputs": {
+            "switch": [
+              "30:23",
+              0
+            ],
+            "on_false": [
+              "30:10",
+              0
+            ],
+            "on_true": [
+              "30:15",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "Switch (Model)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:23": {
+          "inputs": {
+            "value": false
+          },
+          "class_type": "PrimitiveBoolean",
+          "_meta": {
+            "title": "Boolean (Enable LoRA?)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:24": {
+          "inputs": {
+            "value": true
+          },
+          "class_type": "PrimitiveBoolean",
+          "_meta": {
+            "title": "Boolean (Refine Prompt?)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:27": {
+          "inputs": {
+            "string_a": [
+              "30:20",
+              0
+            ],
+            "string_b": "muted minimalist sketch style",
+            "delimiter": ", "
+          },
+          "class_type": "StringConcatenate",
+          "_meta": {
+            "title": "Concatenate Text (LoRA Trigger Word)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:28": {
+          "inputs": {
+            "switch": [
+              "30:23",
+              0
+            ],
+            "on_false": [
+              "30:20",
+              0
+            ],
+            "on_true": [
+              "30:27",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "切换",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        }
+      },
+      "createdAt": 1793955431578,
+      "lastTest": {
+        "ok": true,
+        "durationMs": 30904,
+        "at": 1793964014133,
+        "error": null
+      }
+    },
+    {
+      "id": "wf_mw5oekkgxkrf",
+      "name": "A1-3_参考生图急速",
+      "workflow": {
+        "29": {
+          "inputs": {
+            "filename_prefix": "Krea2_turbo_style_reference",
+            "images": [
+              "30:62",
+              0
+            ]
+          },
+          "class_type": "SaveImage",
+          "_meta": {
+            "title": "保存图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "69": {
+          "inputs": {
+            "image": "女主1_v1.png"
+          },
+          "class_type": "LoadImage",
+          "_meta": {
+            "title": "加载图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "71": {
+          "inputs": {
+            "aspect_ratio": "1:1 (Square)",
+            "megapixels": 1,
+            "multiple": 8
+          },
+          "class_type": "ResolutionSelector",
+          "_meta": {
+            "title": "分辨率选择器",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:5": {
+          "inputs": {
+            "width": [
+              "71",
+              0
+            ],
+            "height": [
+              "71",
+              1
+            ],
+            "batch_size": 1
+          },
+          "class_type": "EmptyLatentImage",
+          "_meta": {
+            "title": "空Latent图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:10": {
+          "inputs": {
+            "unet_name": "krea2_turbo_int8_convrot.safetensors",
+            "weight_dtype": "default"
+          },
+          "class_type": "UNETLoader",
+          "_meta": {
+            "title": "UNet加载器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:11": {
+          "inputs": {
+            "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+            "type": "krea2",
+            "device": "default"
+          },
+          "class_type": "CLIPLoader",
+          "_meta": {
+            "title": "加载CLIP",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:12": {
+          "inputs": {
+            "vae_name": "qwen_image_vae.safetensors"
+          },
+          "class_type": "VAELoader",
+          "_meta": {
+            "title": "加载VAE",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:13": {
+          "inputs": {
+            "conditioning": [
+              "30:53",
+              0
+            ]
+          },
+          "class_type": "ConditioningZeroOut",
+          "_meta": {
+            "title": "条件零化",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:15": {
+          "inputs": {
+            "lora_name": "krea2_style_reference.safetensors",
+            "strength_model": 1,
+            "model": [
+              "30:10",
+              0
+            ]
+          },
+          "class_type": "LoraLoaderModelOnly",
+          "_meta": {
+            "title": "LoRA加载器（仅模型）",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:16": {
+          "inputs": {
+            "prompt": [
+              "30:17",
+              0
+            ],
+            "max_length": 512,
+            "sampling_mode": "on",
+            "sampling_mode.temperature": 0.7,
+            "sampling_mode.top_k": 64,
+            "sampling_mode.top_p": 0.95,
+            "sampling_mode.min_p": 0.05,
+            "sampling_mode.repetition_penalty": 1.05,
+            "sampling_mode.seed": 0,
+            "sampling_mode.presence_penalty": 0,
+            "thinking": false,
+            "use_default_template": true,
+            "mtp": "auto",
+            "clip": [
+              "30:11",
+              0
+            ]
+          },
+          "class_type": "TextGenerate",
+          "_meta": {
+            "title": "TextGenerate",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:17": {
+          "inputs": {
+            "string_a": [
+              "30:18",
+              0
+            ],
+            "string_b": [
+              "30:19",
+              0
+            ],
+            "delimiter": ""
+          },
+          "class_type": "StringConcatenate",
+          "_meta": {
+            "title": "连接",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:18": {
+          "inputs": {
+            "value": "You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt.\n\nThink step by step about the request before writing the answer:\n- What is the subject and mood?\n- What visual styles, mediums, and lighting options would fit? Consider two or three alternatives and pick the one that best serves the request.\n- What composition, framing, and grounded details will help the text-to-image model?\n\nThen output a single expanded prompt paragraph.\n\nFollow these rules strictly:\n1. **Faithfulness First:** Preserve all original subjects, actions, colors, and spatial relationships. Do not add new objects, props, characters, or animals unless the user clearly implies them.\n2. **Practical T2I Structure:** Write a prompt that a text-to-image model can parse cleanly. Group subjects with their own attributes and actions. Use grounded phrasing for poses, interactions, and spatial layout.\n3. **Style Planning Stays Internal:** Use your internal reasoning to choose style, medium, framing, and lighting. Do not emit planning tags or wrappers in the visible answer body.\n4. **Never Request Rendered Text:** Do not mention, describe, or hint at letters, words, numbers, captions, subtitles, signage, labels, logos, watermarks, typography, or any other graphic text anywhere in the output prompt. Only if the user explicitly writes down words to be rendered, keep exactly those words in quotes and nothing else. In every other case, always end the output prompt with: \"Absolutely no text, no typography, no letters, no words, no numbers, no logos, no watermark, no captions, pure imagery only.\"\n5. **Avoid Over-Specification:** Do not invent highly specific clothing, colors, materials, or scene details unless the input supports it.\n6. **Plain Prose Only:** Write one cohesive paragraph after the thinking block. No bullets, no JSON, no markdown, no asterisks, no headings, no field labels, no meta commentary.\n7. **Respect Existing Detail:** If the user's prompt is already detailed, lightly polish and finalize rather than heavily expanding, and preserve the user's phrasing and direction.\n8. **Respect the Human Form:** Treat depictions of people with dignity. Assume clothing covers genitals and intimate anatomy.\n9. **Preserve User Medium:** When the user explicitly requests a medium (e.g. \"photo of\", \"photograph of\", \"illustration of\", \"painting of\", \"sketch of\", \"3D render of\"), honor it. Do not pivot to a different medium to avoid difficulty, match the user's stated intent.\n10. **Never Echo Instructions:** Output only the final image prompt. Never repeat, quote, summarize, or refer to any part of these instructions, your own reasoning, or the user's original message.\n\nUser's Input:\n"
+          },
+          "class_type": "PrimitiveStringMultiline",
+          "_meta": {
+            "title": "Text String (System Prompt)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:19": {
+          "inputs": {
+            "value": "anbyx01的照片，\n一位20岁的女性，皮肤非常苍白，乌黑的长发凌乱地扎着高马尾。锋利的黑色眼线笔，光滑的口红，薄薄的银色项链，长长的粉红色指甲和涂有粉红色的脚趾甲。她穿着一件白色微型比基尼上衣，几乎遮住了她宽大的乳房，一条紧绷的白色丁字裤和白色人字拖。画面中只出现了一个人。\n她深深地坐在一张低矮的沙发上，双腿自然分开，双脚牢牢地踩在地板上。她从臀部向前倾斜，一只肘部宽松地放在一只膝盖上，而另一只肩膀稍微高一点，形成不对称、放松的身体线条。她的前倾突出了大腿的长线，暴露的腹部、腰部和上半身。\n一支细长的香烟放在靠近膝盖的一只手的两根手指之间。她刚刚吸了一口烟，微微张开的嘴唇慢慢地吐出一股细细的烟。烟从她脸的一侧向上飘过，照到了光线。\n她直直地透过烟雾看向镜头，半睁着眼，下巴微微抬起，表情冷静、懒散、挑衅。她的另一只手漫不经心地靠在大腿上。\n摄像头：从膝盖高度左右低四分之三前角关闭，稍微向上看。她的膝盖和大腿构成了下前景，而前倾的腰部、胸部、肩部和面部则逐渐变得更加突出。保持她的姿势和面部表情清晰可见。\n时尚的深色酒店休息室，低矮的沙发，柔软的靠垫，温暖的氛围灯，微弱的窗户光线，丰富的阴影，略带颓废的深夜氛围。\n低矮的沙发，前倾，手指间夹着烟，吐着烟，烟在脸上，直视，白色微型比基尼，暴露的腹部和大腿，低拍摄角度，颓废的酒店休息室，电影般的感官摄影，逼真的照片，高细节。"
+          },
+          "class_type": "PrimitiveStringMultiline",
+          "_meta": {
+            "title": "Text String (User Prompt)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:20": {
+          "inputs": {
+            "source": [
+              "30:21",
+              0
+            ]
+          },
+          "class_type": "PreviewAny",
+          "_meta": {
+            "title": "预览任意",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:21": {
+          "inputs": {
+            "switch": [
+              "30:24",
+              0
+            ],
+            "on_false": [
+              "30:19",
+              0
+            ],
+            "on_true": [
+              "30:16",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "切换",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:24": {
+          "inputs": {
+            "value": false
+          },
+          "class_type": "PrimitiveBoolean",
+          "_meta": {
+            "title": "Boolean (Refine Prompt?)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:52": {
+          "inputs": {
+            "prompt": [
+              "30:20",
+              0
+            ],
+            "clip": [
+              "30:11",
+              0
+            ],
+            "vae": [
+              "30:12",
+              0
+            ],
+            "image1": [
+              "69",
+              0
+            ]
+          },
+          "class_type": "TextEncodeQwenImageEditPlus",
+          "_meta": {
+            "title": "文本编码 Qwen Image 编辑 Plus",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:53": {
+          "inputs": {
+            "reference_latents_method": "index_timestep_zero",
+            "conditioning": [
+              "30:52",
+              0
+            ]
+          },
+          "class_type": "FluxKontextMultiReferenceLatentMethod",
+          "_meta": {
+            "title": "FluxKontext多参考潜在方法",
+            "cnr_id": "comfy-core",
+            "ver": "0.5.1"
+          }
+        },
+        "30:57": {
+          "inputs": {
+            "cfg": 1,
+            "model": [
+              "30:64",
+              0
+            ],
+            "positive": [
+              "30:53",
+              0
+            ],
+            "negative": [
+              "30:13",
+              0
+            ]
+          },
+          "class_type": "CFGGuider",
+          "_meta": {
+            "title": "CFG引导器",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:58": {
+          "inputs": {
+            "noise": [
+              "30:63",
+              0
+            ],
+            "guider": [
+              "30:57",
+              0
+            ],
+            "sampler": [
+              "30:59",
+              0
+            ],
+            "sigmas": [
+              "30:60",
+              0
+            ],
+            "latent_image": [
+              "30:61",
+              0
+            ]
+          },
+          "class_type": "SamplerCustomAdvanced",
+          "_meta": {
+            "title": "自定义采样器（高级）",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:59": {
+          "inputs": {
+            "sampler_name": "euler"
+          },
+          "class_type": "KSamplerSelect",
+          "_meta": {
+            "title": "K采样器选择",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:60": {
+          "inputs": {
+            "scheduler": "simple",
+            "steps": 8,
+            "denoise": 1,
+            "model": [
+              "30:64",
+              0
+            ]
+          },
+          "class_type": "BasicScheduler",
+          "_meta": {
+            "title": "基本调度器",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:61": {
+          "inputs": {
+            "width": [
+              "71",
+              0
+            ],
+            "height": [
+              "71",
+              1
+            ],
+            "batch_size": 1
+          },
+          "class_type": "EmptyLatentImage",
+          "_meta": {
+            "title": "空Latent图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:62": {
+          "inputs": {
+            "samples": [
+              "30:58",
+              0
+            ],
+            "vae": [
+              "30:12",
+              0
+            ]
+          },
+          "class_type": "VAEDecode",
+          "_meta": {
+            "title": "VAE解码",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:63": {
+          "inputs": {
+            "noise_seed": 777465118654000
+          },
+          "class_type": "RandomNoise",
+          "_meta": {
+            "title": "随机噪波",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        },
+        "30:64": {
+          "inputs": {
+            "max_shift": 1.15,
+            "base_shift": 0.5,
+            "width": [
+              "71",
+              0
+            ],
+            "height": [
+              "71",
+              1
+            ],
+            "model": [
+              "30:15",
+              0
+            ]
+          },
+          "class_type": "ModelSamplingFlux",
+          "_meta": {
+            "title": "采样算法（Flux）",
+            "cnr_id": "comfy-core",
+            "ver": "0.28.0"
+          }
+        }
+      },
+      "createdAt": 1794011966369,
+      "lastTest": {
+        "ok": true,
+        "durationMs": 228577,
+        "at": 1794012196136,
+        "error": null
+      }
+    },
+    {
+      "id": "wf_mwatgr3gmiqr2",
+      "name": "Krea2_turbo_00033",
+      "workflow": {
+        "29": {
+          "inputs": {
+            "filename_prefix": "Krea2_turbo",
+            "images": [
+              "30:8",
+              0
+            ]
+          },
+          "class_type": "SaveImage",
+          "_meta": {
+            "title": "保存图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "49": {
+          "inputs": {
+            "aspect_ratio": "9:16 (Portrait Widescreen)",
+            "megapixels": 1.8,
+            "multiple": 8
+          },
+          "class_type": "ResolutionSelector",
+          "_meta": {
+            "title": "分辨率选择器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:6": {
+          "inputs": {
+            "text": [
+              "30:28",
+              0
+            ],
+            "clip": [
+              "30:11",
+              0
+            ]
+          },
+          "class_type": "CLIPTextEncode",
+          "_meta": {
+            "title": "CLIP文本编码",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:5": {
+          "inputs": {
+            "width": [
+              "49",
+              0
+            ],
+            "height": [
+              "49",
+              1
+            ],
+            "batch_size": 1
+          },
+          "class_type": "EmptyLatentImage",
+          "_meta": {
+            "title": "空Latent图像",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:3": {
+          "inputs": {
+            "seed": 448980190432331,
+            "steps": 8,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": [
+              "30:22",
+              0
+            ],
+            "positive": [
+              "30:6",
+              0
+            ],
+            "negative": [
+              "30:13",
+              0
+            ],
+            "latent_image": [
+              "30:5",
+              0
+            ]
+          },
+          "class_type": "KSampler",
+          "_meta": {
+            "title": "K采样器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:8": {
+          "inputs": {
+            "samples": [
+              "30:3",
+              0
+            ],
+            "vae": [
+              "30:12",
+              0
+            ]
+          },
+          "class_type": "VAEDecode",
+          "_meta": {
+            "title": "VAE解码",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:10": {
+          "inputs": {
+            "unet_name": "krea2_turbo_fp8_scaled.safetensors",
+            "weight_dtype": "default"
+          },
+          "class_type": "UNETLoader",
+          "_meta": {
+            "title": "UNet加载器",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:11": {
+          "inputs": {
+            "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+            "type": "krea2",
+            "device": "default"
+          },
+          "class_type": "CLIPLoader",
+          "_meta": {
+            "title": "加载CLIP",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:12": {
+          "inputs": {
+            "vae_name": "qwen_image_vae.safetensors"
+          },
+          "class_type": "VAELoader",
+          "_meta": {
+            "title": "加载VAE",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:13": {
+          "inputs": {
+            "conditioning": [
+              "30:6",
+              0
+            ]
+          },
+          "class_type": "ConditioningZeroOut",
+          "_meta": {
+            "title": "条件零化",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:15": {
+          "inputs": {
+            "lora_name": "krea2_darkbrush.safetensors",
+            "strength_model": 0.8,
+            "model": [
+              "30:10",
+              0
+            ]
+          },
+          "class_type": "LoraLoaderModelOnly",
+          "_meta": {
+            "title": "LoRA加载器（仅模型）",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:16": {
+          "inputs": {
+            "prompt": [
+              "30:17",
+              0
+            ],
+            "max_length": 512,
+            "sampling_mode": "on",
+            "sampling_mode.temperature": 0.7,
+            "sampling_mode.top_k": 64,
+            "sampling_mode.top_p": 0.95,
+            "sampling_mode.min_p": 0.05,
+            "sampling_mode.repetition_penalty": 1.05,
+            "sampling_mode.seed": 0,
+            "sampling_mode.presence_penalty": 0,
+            "thinking": false,
+            "use_default_template": true,
+            "mtp": "auto",
+            "clip": [
+              "30:11",
+              0
+            ]
+          },
+          "class_type": "TextGenerate",
+          "_meta": {
+            "title": "TextGenerate",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:17": {
+          "inputs": {
+            "string_a": [
+              "30:18",
+              0
+            ],
+            "string_b": [
+              "30:19",
+              0
+            ],
+            "delimiter": ""
+          },
+          "class_type": "StringConcatenate",
+          "_meta": {
+            "title": "连接",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:18": {
+          "inputs": {
+            "value": "You are an expert prompt engineer for text-to-image models. Your task is to expand the user's prompt into a highly effective image-generation prompt.\n\nThink step by step about the request before writing the answer:\n- What is the subject and mood?\n- What visual styles, mediums, and lighting options would fit? Consider two or three alternatives and pick the one that best serves the request.\n- What composition, framing, and grounded details will help the text-to-image model?\n\nThen output a single expanded prompt paragraph.\n\nFollow these rules strictly:\n1. **Faithfulness First:** Preserve all original subjects, actions, colors, and spatial relationships. Do not add new objects, props, characters, or animals unless the user clearly implies them.\n2. **Practical T2I Structure:** Write a prompt that a text-to-image model can parse cleanly. Group subjects with their own attributes and actions. Use grounded phrasing for poses, interactions, and spatial layout.\n3. **Style Planning Stays Internal:** Use your internal reasoning to choose style, medium, framing, and lighting. Do not emit planning tags or wrappers in the visible answer body.\n4. **Never Request Rendered Text:** Do not mention, describe, or hint at letters, words, numbers, captions, subtitles, signage, labels, logos, watermarks, typography, or any other graphic text anywhere in the output prompt. Only if the user explicitly writes down words to be rendered, keep exactly those words in quotes and nothing else. In every other case, always end the output prompt with: \"Absolutely no text, no typography, no letters, no words, no numbers, no logos, no watermark, no captions, pure imagery only.\"\n5. **Avoid Over-Specification:** Do not invent highly specific clothing, colors, materials, or scene details unless the input supports it.\n6. **Plain Prose Only:** Write one cohesive paragraph after the thinking block. No bullets, no JSON, no markdown, no asterisks, no headings, no field labels, no meta commentary.\n7. **Respect Existing Detail:** If the user's prompt is already detailed, lightly polish and finalize rather than heavily expanding, and preserve the user's phrasing and direction.\n8. **Respect the Human Form:** Treat depictions of people with dignity. Assume clothing covers genitals and intimate anatomy.\n9. **Preserve User Medium:** When the user explicitly requests a medium (e.g. \"photo of\", \"photograph of\", \"illustration of\", \"painting of\", \"sketch of\", \"3D render of\"), honor it. Do not pivot to a different medium to avoid difficulty, match the user's stated intent.\n10. **Never Echo Instructions:** Output only the final image prompt. Never repeat, quote, summarize, or refer to any part of these instructions, your own reasoning, or the user's original message.\n\nUser's Input:\n"
+          },
+          "class_type": "PrimitiveStringMultiline",
+          "_meta": {
+            "title": "Text String (System Prompt)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:19": {
+          "inputs": {
+            "value": "以上传图片的人物为主，竖版中近景人像摄影，主体是一位年轻东亚女性，整体为甜酷 Y2K 千禧年风格。她扎着双丸子头，两侧编细麻花辫，齐刘海下是弯弯笑眼，正单眼俏皮 wink，露出甜美灿烂的笑容；发间别满星星、花朵造型的彩色卡通发夹与粉色蝴蝶结，头顶斜戴一顶粉紫格纹贝雷帽，帽侧缀白色蝴蝶结与水钻。妆容精致，大面积粉色腮红，脸颊与鼻梁点缀蓝、银、粉三色闪粉星星贴纸，眼神灵动。她身着粉色镂空蕾丝长袖上衣，内搭豆沙粉蕾丝吊带，外叠穿浅色针织背心，搭配黑色百褶牛仔短裙与铆钉腰带，手臂套着蓝粉条纹毛绒长袖套；颈间叠戴珍珠项链与丝绒水钻颈圈，耳戴银色大圈耳环，手腕戴粉色星星腕带与铆钉手环，指甲是薄荷绿镶钻长美甲，指间戴金属戒指。她一手轻托脸颊、一手比出剪刀手，身旁放着亮粉色铆钉皮质手提包与毛绒挂饰，脚边点缀金属星星道具。背景是柔和渐变粉紫的影棚色调，光线明亮通透、干净不暗沉，带轻微复古胶片颗粒与柔焦质感，整体甜酷又梦幻，Y2K 氛围感十足，高清画质、细节丰富。"
+          },
+          "class_type": "PrimitiveStringMultiline",
+          "_meta": {
+            "title": "Text String (User Prompt)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:20": {
+          "inputs": {
+            "source": [
+              "30:21",
+              0
+            ]
+          },
+          "class_type": "PreviewAny",
+          "_meta": {
+            "title": "预览任意",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:21": {
+          "inputs": {
+            "switch": [
+              "30:24",
+              0
+            ],
+            "on_false": [
+              "30:19",
+              0
+            ],
+            "on_true": [
+              "30:16",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "切换",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:22": {
+          "inputs": {
+            "switch": [
+              "30:23",
+              0
+            ],
+            "on_false": [
+              "30:10",
+              0
+            ],
+            "on_true": [
+              "30:15",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "Switch (Model)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:23": {
+          "inputs": {
+            "value": false
+          },
+          "class_type": "PrimitiveBoolean",
+          "_meta": {
+            "title": "Boolean (Enable LoRA?)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:24": {
+          "inputs": {
+            "value": true
+          },
+          "class_type": "PrimitiveBoolean",
+          "_meta": {
+            "title": "Boolean (Refine Prompt?)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:27": {
+          "inputs": {
+            "string_a": [
+              "30:20",
+              0
+            ],
+            "string_b": "muted minimalist sketch style",
+            "delimiter": ", "
+          },
+          "class_type": "StringConcatenate",
+          "_meta": {
+            "title": "Concatenate Text (LoRA Trigger Word)",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        },
+        "30:28": {
+          "inputs": {
+            "switch": [
+              "30:23",
+              0
+            ],
+            "on_false": [
+              "30:20",
+              0
+            ],
+            "on_true": [
+              "30:27",
+              0
+            ]
+          },
+          "class_type": "ComfySwitchNode",
+          "_meta": {
+            "title": "切换",
+            "cnr_id": "comfy-core",
+            "ver": "0.25.0"
+          }
+        }
+      },
+      "createdAt": 1794322797100,
+      "lastTest": {
+        "ok": true,
+        "durationMs": 32059,
+        "at": 1794322829343,
+        "error": null
+      }
+    }
+  ],
+  "videoWorkflowLib": [
+    {
+      "id": "wfvideo_1ko68lk",
+      "name": "minimax_h3_i2v",
+      "workflow": {
+        "1": {
+          "class_type": "UNETLoader",
+          "inputs": {
+            "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "weight_dtype": "default"
+          }
+        },
+        "2": {
+          "class_type": "PathchSageAttentionKJ",
+          "inputs": {
+            "model": [
+              "1",
+              0
+            ],
+            "sage_attention": "auto",
+            "allow_compile": false
+          }
+        },
+        "3": {
+          "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+          "inputs": {
+            "model": [
+              "2",
+              0
+            ]
+          }
+        },
+        "4": {
+          "class_type": "CLIPLoader",
+          "inputs": {
+            "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+            "type": "minimax",
+            "device": "default"
+          }
+        },
+        "5": {
+          "class_type": "VAELoader",
+          "inputs": {
+            "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+          }
+        },
+        "6": {
+          "class_type": "VAELoader",
+          "inputs": {
+            "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+          }
+        },
+        "7": {
+          "class_type": "LoadImage",
+          "inputs": {
+            "image": "lingximanju_reference.png"
+          }
+        },
+        "8": {
+          "class_type": "MiniMaxH3DirectorGroupImageToVideo",
+          "inputs": {
+            "first_frame": [
+              "7",
+              0
+            ],
+            "prompt": "{{prompt}}",
+            "duration_sec": "{{duration}}"
+          }
+        },
+        "9": {
+          "class_type": "MiniMaxH3DirectorGroupsCombine",
+          "inputs": {
+            "groups.group_0": [
+              "8",
+              0
+            ]
+          }
+        },
+        "10": {
+          "class_type": "MiniMaxH3Director",
+          "inputs": {
+            "model": [
+              "3",
+              0
+            ],
+            "video_vae": [
+              "5",
+              0
+            ],
+            "audio_vae": [
+              "6",
+              0
+            ],
+            "clip": [
+              "4",
+              0
+            ],
+            "i2v_groups": [
+              "9",
+              0
+            ],
+            "task_type": "i2v — 图生视频(Image to Video)",
+            "global_prompt": "{{prompt}}",
+            "bd_grp_sample": "采样设置",
+            "cfg": 1,
+            "seed": 12345,
+            "frame_rate": "{{fps}}",
+            "width": 864,
+            "height": 480,
+            "ref_max_size": 256,
+            "total_frames": 124,
+            "timeline_data": "{\"version\": 5, \"editMode\": \"segment\", \"timelineMode\": \"i2v\", \"totalFrames\": {{frames}}, \"frameRate\": {{fps}}, \"width\": {{width}}, \"height\": {{height}}, \"refMaxSize\": 256, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"1:1 (Square)\", \"megapixels\": 0.07, \"multiple\": 32, \"longEdge\": 256, \"width\": {{width}}, \"height\": {{height}}, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"generate\", \"continuityEnabled\": false, \"continuityOverlapFrames\": 9}, \"videoClips\": [], \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": {{frames}}, \"deletedSourceRanges\": []}, \"global\": {\"taskType\": \"i2v — 图生视频(Image to Video)\", \"prompt\": \"{{prompt_json}}\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"{{image}}\"}, \"refAudios\": []}, \"segments\": [{\"id\": \"shot0\", \"start\": 0, \"length\": {{frames}}, \"frameCount\": {{frames}}, \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"isStartFrame\": true, \"isEndFrame\": false, \"genImage\": {\"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}}, \"endImage\": null, \"taskType\": \"\", \"refs\": []}], \"shots\": [{\"id\": \"shot0\", \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"startImage\": {\"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}}, \"endImage\": null}], \"runSelectEnabled\": false, \"runSelection\": [], \"gen\": {\"defaultFrameCount\": {{frames}}}, \"liveTaePreview\": true, \"keyframes\": [{\"id\": \"shot0_s\", \"imageFile\": \"{{image}}\", \"width\": {{width}}, \"height\": {{height}}, \"start\": 0, \"length\": {{frames}}, \"frameCount\": {{frames}}, \"durationSec\": {{duration}}, \"prompt\": \"{{prompt_json}}\", \"negativePrompt\": \"{{negative_json}}\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": {{duration}}}",
+            "bd_grp_advanced": "高级采样",
+            "steps": 8,
+            "sampler": "res_multistep",
+            "scheduler": "simple",
+            "shift_video": 12,
+            "shift_audio": 3,
+            "bd_grp_perf": "性能",
+            "clear_vram_between_segments": true,
+            "export_source_images": false
+          }
+        },
+        "11": {
+          "class_type": "CreateVideo",
+          "inputs": {
+            "images": [
+              "10",
+              0
+            ],
+            "audio": [
+              "10",
+              1
+            ],
+            "fps": [
+              "10",
+              2
+            ],
+            "bit_depth": 8
+          }
+        },
+        "12": {
+          "class_type": "SaveVideo",
+          "inputs": {
+            "video": [
+              "11",
+              0
+            ],
+            "filename_prefix": "{{filename_prefix}}",
+            "format": "auto",
+            "codec": "auto"
+          }
+        }
+      },
+      "createdAt": 1793955431582,
+      "lastTest": null
+    }
+  ],
+  "audioWorkflowLib": [],
+  "imageActiveId": "wfimage_107mvsq",
+  "videoActiveId": "wfvideo_1ko68lk",
+  "audioActiveId": null,
+  "bindings": {
+    "image": [],
+    "video": [],
+    "audio": []
+  },
+  "negativePrompt": "low quality, blurry, deformed hands, extra fingers, watermark, text, inconsistent character",
+  "width": 864,
+  "height": 480,
+  "fps": 24,
+  "frames": 124,
+  "steps": 25,
+  "cfg": 1,
+  "outputMode": "both",
+  "packTarget": "minimax-h3",
+  "stitch": true
+}
