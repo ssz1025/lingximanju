@@ -276,23 +276,28 @@ REST：`GET/POST /api/projects/:id/runtime`（规格快照 / 保存 / 片段时�
 - **`preview`**：显式切换才启用（「使用关键帧预览模式」），产物标注「非 AI 视频」，验收记 **降级**。
 - 验收新增第 9 项「ComfyUI 真实 AI 片段」：逐片段核对 provider 与文件，`prompt_id` 全部留痕可追溯。
 
-### AI 制片对话：每一步都能在对话框里完成
+### 统一 AI 对话：一个对话框装下所有对话
 
-小说合成短剧的全部操作都可以用一句中文在对话里完成，改的就是真实业务状态（与 UI 按钮同一条链路），不是聊天玩具：
+全项目**只有一个** AI 对话面板（顶栏「✦ AI 对话」、各步「💬 对话」、项目封面、导演风格、画布 Agent 全部打开它）。换档位只换**提示与按钮**，对话历史连成一条线——向上滚动即可回看全部往来。
 
-| 层 | 入口 | 能做什么 |
+| 档位 | 提示与按钮 | 后端 |
 |---|---|---|
-| 分步对话 `src/core/step-chat.mjs` | 工作台每一步的「💬 对话」按钮（含项目总助理） | 改创作设定 / 分集策略 / 集标题 / 角色属性 / 音色 / 成片规格 / 交付物 / 切成片策略 / 重跑本步或剩余步骤；顶部常驻 token 账目（执行 / 对话 / 合计 + 运行明细） |
-| 制片对话 `src/core/production-chat.mjs` | `POST /api/projects/:id/production/chat` | 跨步单会话：状态 / 准备小说 / 规格 / 策略 / ComfyUI 自检 / 技能 / 角色 / 音色 / 单步 / 六步 / 一键全流程 / 验收 / 导演包 / 成片 / 导出记录 |
+| 总览 | 看状态 / 跑完六步 / 一键全流程 / 验收 / 出片 | `src/core/production-chat.mjs`（17 意图，长任务转后台） |
+| ①上传 ②分集 ③剧本 ④角色 ⑤分镜 ⑥交付 | 每步各自的现状摘要 + 重跑本步 / 本步现状 / 改设定… | `src/core/step-chat.mjs`（零 LLM 正则意图） |
+| 封面 | 一键生成封面 / 上传参考图 / 资源库选图 / 保存为封面 | `src/agents/cover-agent.mjs`（VLM 看参考图） |
+| 风格 | 保存为导演风格 / 再改一轮（草稿随会话留存） | `src/core/style-forge-chat.mjs` |
+| 画布 | 整理画布 / 检查一致性 / 项目进度（能真正改画布） | `src/agents/canvas-agent.mjs` |
 
-- **全量留痕**：每条消息带意图、参数、实际调用的接口与等价 `curl` 命令，按步落盘 `data/conversations/{projectId}.step-{stepId}.json`，项目内 `management.stepChats` 双写。
-- **复刻导出**：`GET /api/projects/:id/steps/:stepId/chat/export?format=md|json` 与 `/production/chat/export` 生成 Markdown（对话全文 + 按顺序的一键复刻命令串 + 环境要求）与可脚本重放的 JSON，发给其他用户即可照着重跑。
+- **一条总线程**：`src/core/ai-thread.mjs` 在**读取时**把分步会话（`management.stepChats`）、制片会话（`management.conversation`）与新增档位（`management.aiScopes`）按 `(at, 桶序, seq)` 合并成一条时间线；既有会话容器与写入路径**完全不动**，41 项既有测试原样通过。新增档位从此也有服务端历史（此前关窗即丢）。
+- **统一接口**：`GET /ai/scopes`（档位目录：提示 / 快捷指令 / 功能按钮 / token 账目）、`GET /ai/thread?scope=&before=`（游标分页，向上翻历史）、`POST /ai/chat`（按档派发到上表各自的业务函数）、`POST /ai/append`（客户端动作回写）、`GET /ai/export?format=md|json`。
+- **生成内容就地看**：封面图 / 分镜板 / 定妆图 / 提示词块 / 产物下载链接都渲染在同一条线程的气泡里，不用跳去别的面板找。
+- **全量留痕 + 复刻导出**：每条消息带意图、参数、实际调用的接口与等价 `curl`，可导出 Markdown（对话全文 + 一键复刻命令串 + 环境要求）与可重放 JSON。
 - **token 分账**：重跑步骤的消耗记在 `step.tokens`，对话本身的消耗记在 `step.chatTokens`，`GET /steps/tokens` 出每步明细。
 
 ### 自动化测试
 
 ```bash
-npm test        # node --test tests/*.test.mjs —— 572 项断言全部通过
+npm test        # node --test tests/*.test.mjs —— 818 项断言全部通过
 npm run check   # 关键文件语法检查（159 个文件）
 ```
 
@@ -341,6 +346,9 @@ npm run check   # 关键文件语法检查（159 个文件）
 | `tests/film-policy.test.mjs` | **成片真实性策略**：策略清单与默认 real、脏输入回落、`isRealClip`（ComfyUI 产物 + 视频文件 + 未标合成）、`isRealFilm`（preview-frames 一律不算）、`evaluateFilm` 四档（零真实片段判缺失 / 全真实判 ok / 少一段判缺失 / 预览模式如实降级）、无成片任何策略不得通过 | 9 |
 | `tests/step-chat.test.mjs` | **分步对话**：会话范围与动作清单、token 分账累计、① 一句话改创作设定写回 bible、⑤ 一句话改规格 30÷3=10 落库、⑥ 切预览策略显式降级、项目总览与 token 报表、未知步骤拒绝、闲聊回落 help、会话概览、**导出 Markdown 含一键复刻命令串 / JSON 可重放** | 32 |
 | `tests/production-chat.test.mjs` | **制片对话**：指令清单完整、中文意图识别（规格 / 策略 / 技能 / 步骤 / 验收…）、等价 HTTP 与 curl、短意图即时回复、规格真实落库、长意图转后台任务且重复触发被拒、验收如实披露、**导出含对话全文 + 一键复刻命令串 + 环境要求** | 9 |
+| `tests/ai-thread.test.mjs` | **统一对话线程**：档位注册表形状（每档有提示 / 快捷指令 / 功能按钮 / token 账目）、分步 + 制片 + 新增档位按时间交织且来源标签正确、「仅当前档」筛选、**分页游标稳定**（新消息到达后旧游标不漂移）、新增档位落盘与重载留存、按档派发落回各自既有会话桶、统一导出含等价 curl | 21 |
+| `tests/chat-panel.test.mjs` | **统一对话面板**：档位切换条与计数徽标、**切档位换掉提示 / 按钮 / 占位文案**、同项目重复打开只切档位不叠页面、消息按来源档位带标签混排、「全部 / 仅当前档」筛选、滚到顶部自动载入更早一页 | 6 |
+| `tests/chat-counts.test.mjs` | **对话条数口径**：前端徽标计数与服务端 `threadCounts()` 逐档位一致（徽标与面板里的条数不能对不上）、脏数据不炸 | 5 |
 
 另有 `tests/bm25.test.mjs`、`tests/character-routes.test.mjs` 等角色检索增强用例由并行改动纳入；上表只列主要模块，全量以 `npm test` 实际输出为准。
 

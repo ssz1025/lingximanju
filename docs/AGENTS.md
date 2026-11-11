@@ -249,12 +249,21 @@ ctx.patch({ film, directorPack, runtime, deliverables: { outputMode, video, dire
 - 参考图上传、回退 Mock、拼接失败、导演包生成均有 `ctx.log` / SSE 日志。
 - 成片节点的 `meta` 仍记录耗时与成本估算；`report.realClips` 记录真实片段数，便于区分 Mock 与真实出片。
 
-### 11.6 对话型入口（step-chat / production-chat）
+### 11.6 统一 AI 对话（一个对话框 · 一条总线程）
 
 对话不是第 12 个 Agent，而是**既有 Agent 与业务函数的对话式壳**：意图分类（零 LLM 正则）→ 与 UI 按钮完全相同的调用（`applyManageAction` / `executeSteps` / `runDirector` / `extractProjectCharacters` / `assignVoices` / `ensureDirectorPack`）→ 回复带等价 HTTP 与 curl。因此「对话改了什么」在数据层与按钮操作不可区分，token 分账也按「执行（重跑步骤）/ 对话（LLM 生成）」分开记。
 
+**统一层**（`core/ai-thread.mjs` + `api/routes/ai-thread.mjs`）：全项目只有一个对话面板（`public/chat-panel.js`），十个档位（总览 / 六步 / 封面 / 风格 / 画布）共享一条时间线。
+
+- **读取时合并**：分步会话（`management.stepChats[stepId]`）、制片会话（`management.conversation`）与新增档位（`management.aiScopes[scope]`）按 `(at, 桶序, seq)` 合成一条；既有会话容器与写入路径**完全不动**，41 项既有测试原样通过。新增档位（封面 / 风格 / 画布）从此也有服务端历史（此前关窗即丢）。
+- **按档派发**：`POST /ai/chat` 把一句话交给该档位**既有**的业务函数——六步 → `runStepChat`、总览 → `runProductionChat`、封面 → `coverChat`、风格 → `styleForgeChat`、画布 → `chatWithCanvas`。统一层只做路由与归一，不复制业务逻辑。
+- **档位目录**：`GET /ai/scopes` 下发每档的占位提示、开场提示、现状摘要、快捷指令、功能按钮与 token 账目；前端据此渲染，**档位差异不在前端硬编码**，切档位只换提示与按钮、不清空消息。
+- **游标分页**：`GET /ai/thread?before=` 用 `(at, 桶序, seq)` 复合键做游标，新消息只追加到末尾，旧游标指向的边界不漂移——向上滚动翻历史不重不漏。
+- **生成内容就地看**：封面图 / 分镜板 / 定妆图 / 提示词块 / 产物链接都渲染在同一条线程的气泡里（`blocks` 字段）。
+
+**底层两套业务函数**（职责不变，各自单测锁死）：
 - `step-chat`（`core/step-chat.mjs`）：六步各一个会话 + 项目总助理；长任务互斥、归档式清空；`exportStepChat` 输出含**一键复刻命令串**的 Markdown。
-- `production-chat`（`core/production-chat.mjs`）：跨步单会话，17 类意图，长意图转后台任务（SSE `production:chat`），`exportChat` 输出全流程复刻记录。
+- `production-chat`（`core/production-chat.mjs`）：跨步单会话，17 类意图，长意图转后台任务（SSE `production:chat`，统一面板已接该事件把结果补回线程），`exportChat` 输出全流程复刻记录。
 
 ---
 

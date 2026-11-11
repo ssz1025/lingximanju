@@ -4,7 +4,8 @@ import { NODE_TYPES, PALETTE_ORDER, typeOf, STATUS_LABEL } from './nodes.js';
 import * as UI from './panels.js';
 import { openLinkPicker, closeLinkPicker, isLinkPickerOpen } from './link-picker.js';
 import { openAssetLibrary } from './asset-manager.js';
-import { openStepChat } from './step-chat.js';
+import { openAIChat } from './chat-hub.js';
+import * as AIChat from './chat-hub.js';
 import { openCreationWizard } from './wizard.js';
 import * as PM from './project-manager.js';
 import * as PV from './project-view.js';
@@ -417,8 +418,9 @@ function handleEvent(e) {
       stream.title = state.logs.slice(-12).map((x) => x.message).join('\n');
       break;
     }
-    case 'chat':
-      UI.appendChat(e.role || 'assistant', e.content);
+    case 'production:chat':
+      // 制片助手的后台任务：结果已写进会话记录，由统一面板重新拉取
+      AIChat.onServerEvent?.(e);
       break;
     case 'state': {
       if (!e.project) break;
@@ -817,7 +819,6 @@ async function closeProject(opts = {}) {
   refreshProjectSidebar();              // 项目侧栏清空
   renderCanvasTools();                  // 画布工具恢复中性文案，不带上一个项目的统计
   renderInspector(); renderStepPanel(); renderCanvasStepBar();
-  $('chat-log')?.replaceChildren();     // Agent 对话同样属于上一个项目
   const stream = $('log-stream');
   if (stream) { stream.className = 'log-stream'; stream.textContent = '项目列表 · 选择项目继续创作'; stream.title = ''; }
   setView('home');
@@ -869,10 +870,7 @@ function projectSidebarCtx(opts = {}) {
     onHelp: () => { closeAllPages(); UI.openHelp(state.project); },
     onCover: () => {
       closeAllPages();
-      PM.openCoverDialog({
-        project: state.project, toast: UI.toast, comfy: state.comfy,
-        onChanged: async () => { await refreshProjects(); refreshProjectSidebar(); renderProjectView(); },
-      });
+      openStepChatFor('cover');
     },
     onExport: () => { if (state.project) exportProjectJson(state.project.id); },
   };
@@ -907,18 +905,18 @@ function stepPanelCtx() {
 function renderStepPanel() { PM.renderStepPanel($('insp-steps'), stepPanelCtx()); }
 
 /**
- * 打开某一步的对话页。
+ * 打开统一 AI 对话面板（定位到某个档位）。
+ * 全项目只有一个面板：重复打开只是切档位，不会叠出一堆对话页。
  * onChanged 里必须重新拉项目：对话可能改了创作设定 / 分集参数 / 重跑了某步，
  * 面板上的状态、token 账目与画布节点都会变，只刷 UI 不重拉会显示旧数据。
  */
-function openStepChatFor(stepId) {
+function openStepChatFor(stepId, prefill = '') {
   if (!state.project) return;
-  const def = stepId === 'project' ? null : (state.steps || []).find((s) => s.id === stepId);
-  return openStepChat({
+  return openAIChat({
     projectId: state.project.id,
     projectName: state.project.name,
-    stepId,
-    label: def ? `第 ${def.no} 步 · ${def.title}` : '制片助理',
+    scope: stepId,
+    prefill,
     onChanged: async (d) => {
       await loadProject(state.project.id, { keepPages: true, view: state.view });
       renderStepPanel(); renderCanvasStepBar(); updateStats();
@@ -1331,10 +1329,7 @@ function projectViewCtx() {
     onRefreshAssets: async () => { await refreshAssetIndex(true); renderProjectView(); },
     onPreviewAsset: (file) => openAssetLibrary({ mode: 'manage', files: [file] }),
     onReupload: () => { PV.setWorkshopStep('upload'); openWorkshopTab('overview'); },
-    onOpenCover: () => PM.openCoverDialog({
-      project: state.project, toast: UI.toast, comfy: state.comfy,
-      onChanged: async () => { await refreshProjects(); refreshProjectSidebar(); renderProjectView(); },
-    }),
+    onOpenCover: () => openStepChatFor('cover'),
     onDownloadPack: () => exportPack(false),
     // 季 / 集管理：只改 management，立即落盘并刷新所有联动视图
     onAssignSeason: (no, season) => applySeasonMutation((m) => {
@@ -1581,6 +1576,7 @@ async function openManagePanel(tab) {
     project: state.project, stats: state.projectStats, comfy: state.comfy, api: state.api, tab,
     progress: { label: `${v.done}/${v.total}`, percent: v.percent },
     toast: UI.toast,
+    onOpenChat: (scope) => openStepChatFor(scope),
     onChanged: (deleted) => onProjectsChanged(deleted),
     onRunStep: (id) => runStep(id, false),
     onOpenEpisode: (no) => openEpisode(no),
@@ -1670,9 +1666,9 @@ async function onAction(act, id) {
     case 'dup': canvas.select([id]); canvas.duplicateSelection(); break;
     case 'delete': canvas.select([id]); canvas.deleteSelection(); break;
     case 'chat':
-      switchInspector('agent');
-      $('chat-input').value = `请解释 @${id} 的上游依赖和数据来源`;
-      $('chat-input').focus();
+      // 画布 Agent 现在也走统一面板（画布档位），不再有独立的侧栏对话。
+      // 预填 @节点ID：画布 Agent 靠它定位节点（与旧侧栏输入框同一套说法）。
+      openStepChatFor('canvas', `请解释 @${id} 的上游依赖和数据来源`);
       break;
     case 'download-film': {
       const n = state.project?.nodes.find((x) => x.id === id);
@@ -1732,16 +1728,6 @@ function switchInspector(tab) {
   $('insp-steps').hidden = tab !== 'steps';
   $('insp-agent').hidden = tab !== 'agent';
   if (tab === 'steps') renderStepPanel();
-  if (tab === 'agent') $('chat-input')?.focus();
-}
-async function sendChat(text) {
-  const msg = (text ?? $('chat-input').value).trim();
-  if (!msg || !state.project) return;
-  $('chat-input').value = '';
-  UI.appendChat('user', msg);
-  try {
-    await api(`/api/projects/${state.project.id}/chat`, { method: 'POST', body: JSON.stringify(withModelId('canvas', { message: msg })) });
-  } catch (e) { UI.appendChat('assistant', `请求失败：${e.message}`); }
 }
 
 /* ---------------- 事件绑定 ---------------- */
@@ -1780,12 +1766,12 @@ function bindUI() {
     if (b?.dataset.crumb === 'workshop') setView(backView());
   });
   $('btn-view-toggle').addEventListener('click', () => setView(state.view === 'workshop' ? 'canvas' : 'workshop'));
+  // 统一 AI 对话：全项目只有一个面板，重复点击只是切档位
+  $('btn-ai-chat').addEventListener('click', () => openStepChatFor('project'));
   $('btn-project-manage').addEventListener('click', () => openManagePanel());
   $('btn-step-run').addEventListener('click', () => runStep(null, false));
-  // 模型下拉：完整流水线运行（顶栏）与画布 Agent 对话（右侧 Inspector）各一个
+  // 模型下拉：完整流水线运行（顶栏）一个；画布 Agent 的模型选择改在统一面板里按档位记忆
   ensureModelPicker('run', $('btn-run').parentElement, $('btn-run'));
-  const chatCompose = document.querySelector('.chat-compose');
-  if (chatCompose) ensureModelPicker('canvas', chatCompose, $('chat-input'));
   $('btn-run').addEventListener('click', () => run());
   $('btn-stop').addEventListener('click', async () => {
     if (!state.project) return;
@@ -1815,11 +1801,8 @@ function bindUI() {
     $('btn-insp-toggle').textContent = el.classList.contains('collapsed') ? '‹' : '›';
   });
   document.querySelectorAll('.insp-tab').forEach((b) => b.addEventListener('click', () => switchInspector(b.dataset.tab)));
-  $('btn-send').addEventListener('click', () => sendChat());
-  $('chat-input').addEventListener('keydown', (e) => {
-    if (e.key === 'ENTER' && !e.shiftKey) { e.preventDefault(); sendChat(); }
-  });
-  document.querySelectorAll('.chat-chips button').forEach((b) => b.addEventListener('click', () => sendChat(b.dataset.q)));
+  // 检查器里的「Agent 对话」页签不再自带输入框：跳到统一面板的画布档位
+  $('btn-insp-ai-chat').addEventListener('click', () => openStepChatFor('canvas'));
   document.querySelectorAll('.canvas-toolbar button').forEach((b) => b.addEventListener('click', () => {
     const act = b.dataset.act;
     if (act === 'zoom-in') canvas.setZoom(canvas.vp.zoom * 1.2);
@@ -1939,7 +1922,6 @@ async function boot() {
   setView('home');
   renderStepPanel(); renderCanvasStepBar(); updateRunUI();
   initSSE();
-  UI.appendChat('assistant', '你好，我是画布协作者。我可以读整张图、解释依赖、检查一致性、整理布局，也能直接给场景补镜头链。试试下面的快捷指令吧。');
 
   const qs = new URLSearchParams(window.location.search);
   // 启动检查：模型未配置且用户没跳过过时弹引导框；「先跳过」写入本地 + 服务端

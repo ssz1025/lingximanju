@@ -36,7 +36,7 @@ function consistency(project) {
   return lines.join('\n');
 }
 
-export async function chatWithCanvas(project, message = '', modelId = '') {
+export async function chatWithCanvas(project, message = '', modelId = '', onUsage = null) {
   const text = String(message).trim();
   const segments = [];
   let changed = false;
@@ -63,7 +63,7 @@ export async function chatWithCanvas(project, message = '', modelId = '') {
     if (!scene) {
       segments.push('当前画布还没有场景节点。请先运行完整流水线，让「层次化叙事分解」长出事件与场景，再让我补镜头。');
     } else {
-      const providers = createProviders(resolveModelSettings(project, modelId), () => {});
+      const providers = createProviders(resolveModelSettings(project, modelId), () => {}, onUsage);
       const runState = { runId: 'chat', pending: new Set(), dirty: false };
       const ctx = buildContext({
         project, node: scene, inputs: [], upstream: [], providers,

@@ -13,6 +13,7 @@ import { handleProjects } from './routes/projects.mjs';
 import { handleEpisodes } from './routes/episodes.mjs';
 import { handleAssets } from './routes/assets.mjs';
 import { handleStepChat } from './routes/step-chat.mjs';
+import { handleAiThread } from './routes/ai-thread.mjs';
 
 // 跨源白名单：默认空（浏览器/Electron 都是同源访问，不需要任何 CORS 头）。
 // 需要跨源调试时用 ALLOW_ORIGIN=https://dev.example.com,http://other:1234 显式放行。
@@ -51,6 +52,8 @@ export async function handleApi(req, res, url) {
   // 对话域：分步会话（steps/*）与项目级制片对话（production/chat）各管一段，路径互不相交
   if (await handleStepChat(req, res, url)) return true;
   if (await handleProductionChat(req, res, url)) return true;
+  // 统一对话线程（ai/*）：读取时合并上面两段 + 新增档位，派发时按档位回到各自业务函数
+  if (await handleAiThread(req, res, url)) return true;
 
   return json(res, { error: `未知接口 ${method} ${pathname}` }, 404), true;
 }

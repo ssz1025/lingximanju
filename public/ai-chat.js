@@ -1,8 +1,13 @@
 /* ============================================================================
- * 可复用 AI 对话弹窗组件：消息气泡（用户 / 助手）、图片附件、提示词块、
+ * 可复用 AI 对话组件：消息气泡（用户 / 助手）、图片附件、提示词块、
  * 可点击建议（chips）与动作按钮、输入框、忙等指示。
- * 纯 DOM 实现、零依赖；任何需要「和 AI 对话」的入口（封面创作、后续其他场景）
- * 都通过 openAIChat({ onSend, actions }) 接入：组件只管交互，业务在调用方。
+ * 纯 DOM 实现、零依赖；任何需要「和 AI 对话」的入口都通过
+ * openAIChat({ onSend, actions }) 或 openChatPanel() 接入：
+ * 组件只管交互，业务在调用方。
+ *
+ * 两层结构：
+ *   bubbleHTML / bindBubble —— 纯渲染层（气泡 HTML 与事件绑定），统一面板直接复用；
+ *   openAIChat              —— 旧的「开一个新对话页」入口（签名与 DOM 契约保持不变）。
  * ==========================================================================*/
 
 /** 模型选择器（可选）：库里有模型时在输入栏前插入下拉，本次对话用哪个模型由用户临时决定 */
@@ -11,6 +16,73 @@ import { ensureInterfacePicker } from './interface-picker.js';
 import { openPage } from './page.js';
 import { esc as $esc } from './utils.js';
 
+/**
+ * 气泡 HTML。
+ * @param {object} msg role / text / images / promptBlock / suggestions / actions / links
+ * @returns {string}
+ */
+export function bubbleHTML(msg) {
+  const isUser = msg.role === 'user';
+  const imgs = (Array.isArray(msg.images) && msg.images.length)
+    ? `<div class="aichat-imgs">${msg.images.map((u) => `<img src="${$esc(u)}" alt="" loading="lazy" title="点击放大查看">`).join('')}</div>` : '';
+  const pb = msg.promptBlock
+    ? `<div class="aichat-promptbox"><b>✦ 画面提示词${msg.promptBlock.negative ? ' <small>（已保存，可继续对话调整）</small>' : ''}</b>
+          <p>${$esc(msg.promptBlock.prompt)}</p>${msg.promptBlock.negative ? `<small>负向：${$esc(msg.promptBlock.negative)}</small>` : ''}</div>` : '';
+  const chips = (Array.isArray(msg.suggestions) && msg.suggestions.length)
+    ? `<div class="aichat-chips">${msg.suggestions.map((s, i) => `<button class="aichat-chip" data-aichat-chip="${i}" title="点击发送">${$esc(s)}</button>`).join('')}</div>` : '';
+  const acts = (Array.isArray(msg.actions) && msg.actions.length)
+    ? `<div class="aichat-acts">${msg.actions.map((a, i) => `<button class="btn sm ${a.primary ? 'primary' : ''}" data-aichat-act="${i}" ${a.disabled ? 'disabled' : ''}>${$esc(a.label)}</button>`).join('')}</div>` : '';
+  // 外链产物（下载导演包 / 成片 MP4 / 导出记录）：直接用 <a> 而不是动作按钮，
+  // 浏览器原生下载与 target=_blank 比 JS 转发更可靠，也不会被忙等态静默禁用。
+  const links = (Array.isArray(msg.links) && msg.links.length)
+    ? `<div class="aichat-links">${msg.links.map((l) => `<a class="aichat-link" href="${$esc(l.url)}" target="_blank" rel="noopener">${$esc(l.label)}</a>`).join('')}</div>` : '';
+  const text = String(msg.text || '').trim();
+  return `<div class="aichat-msg ${isUser ? 'user' : 'assistant'}">
+    <div class="aichat-bubble">${text ? `<div class="aichat-text">${$esc(text).replace(/\n/g, '<br>')}</div>` : ''}${imgs}${pb}${links}${chips}${acts}</div></div>`;
+}
+
+/**
+ * 绑定气泡内的事件：图片放大、chips 发送、动作按钮回调。
+ * @param {HTMLElement} el 气泡元素
+ * @param {object} msg 消息（actions / suggestions 需与渲染时一致）
+ * @param {object} h
+ * @param {Function} [h.onAction] (act, data, msg) => void
+ * @param {Function} [h.onChip]   (text, msg) => void
+ */
+export function bindBubble(el, msg, h = {}) {
+  // 图片：点击放大查看（生成结果、当前封面、参考图都适用）
+  el.querySelectorAll('.aichat-imgs img').forEach((img) => img.addEventListener('click', () => openImgPreview(img.src)));
+  // 建议 chips：点击即作为用户消息发送；同气泡内按钮互斥（点击后全部禁用，防重复触发）
+  el.querySelectorAll('[data-aichat-chip]').forEach((chip) => chip.addEventListener('click', () => {
+    if (h.disabled?.()) return;
+    disableMsgButtons(el);
+    h.onChip?.(chip.textContent.trim(), msg);
+  }));
+  // 动作按钮：交给调用方 actions 表处理
+  el.querySelectorAll('[data-aichat-act]').forEach((btn) => btn.addEventListener('click', () => {
+    if (h.disabled?.()) return;
+    const act = msg.actions[Number(btn.dataset.aichatAct)];
+    if (!act || act.disabled) return;
+    disableMsgButtons(el);
+    h.onAction?.(act, msg);
+  }));
+}
+
+/** 消费式禁用一条消息内的全部按钮（动作 + 建议），防止同气泡内重复触发 */
+export function disableMsgButtons(el) {
+  for (const sel of ['[data-aichat-act]', '[data-aichat-chip]']) {
+    el.querySelectorAll(sel).forEach((b) => (b.disabled = true));
+  }
+}
+
+/** 气泡内图片点击放大：组件内自建 lightbox，保持零依赖（不引入 panels 的预览弹窗） */
+export function openImgPreview(src) {
+  const lb = document.createElement('div');
+  lb.className = 'aichat-lightbox';
+  lb.innerHTML = `<img src="${$esc(src)}" alt="放大预览">`;
+  lb.addEventListener('click', () => lb.remove());
+  document.body.appendChild(lb);
+}
 
 /**
  * 打开一个 AI 对话弹窗。
@@ -51,10 +123,6 @@ export function openAIChat(o = {}) {
       });
     }
   };
-  /** 消费式禁用一条消息内的全部按钮（动作 + 建议），防止同气泡内重复触发 */
-  const disableMsgButtons = (el) => {
-    for (const sel of BUTTON_SELS) el.querySelectorAll(sel).forEach((b) => (b.disabled = true));
-  };
 
   const page = openPage({
     title, sub: subtitle, variant: 'chat',
@@ -80,36 +148,6 @@ export function openAIChat(o = {}) {
   if (modelEntry) ensureModelPicker(modelEntry, backdrop.querySelector('.aichat-inputbar'), input);
   if (interfaceEntry) ensureInterfacePicker(interfaceEntry, backdrop.querySelector('.aichat-inputbar'), input);
 
-  /** 气泡内图片点击放大：组件内自建 lightbox，保持零依赖（不引入 panels 的预览弹窗） */
-  function openImgPreview(src) {
-    const lb = document.createElement('div');
-    lb.className = 'aichat-lightbox';
-    lb.innerHTML = `<img src="${$esc(src)}" alt="放大预览">`;
-    lb.addEventListener('click', () => lb.remove());
-    document.body.appendChild(lb);
-  }
-
-  /** 消息渲染：气泡内可含图片行、提示词块、建议 chips、动作按钮 */
-  function bubbleHTML(msg) {
-    const isUser = msg.role === 'user';
-    const imgs = (Array.isArray(msg.images) && msg.images.length)
-      ? `<div class="aichat-imgs">${msg.images.map((u) => `<img src="${$esc(u)}" alt="" loading="lazy" title="点击放大查看">`).join('')}</div>` : '';
-    const pb = msg.promptBlock
-      ? `<div class="aichat-promptbox"><b>✦ 画面提示词${msg.promptBlock.negative ? ' <small>（已保存，可继续对话调整）</small>' : ''}</b>
-          <p>${$esc(msg.promptBlock.prompt)}</p>${msg.promptBlock.negative ? `<small>负向：${$esc(msg.promptBlock.negative)}</small>` : ''}</div>` : '';
-    const chips = (Array.isArray(msg.suggestions) && msg.suggestions.length)
-      ? `<div class="aichat-chips">${msg.suggestions.map((s, i) => `<button class="aichat-chip" data-aichat-chip="${i}" title="点击发送">${$esc(s)}</button>`).join('')}</div>` : '';
-    const acts = (Array.isArray(msg.actions) && msg.actions.length)
-      ? `<div class="aichat-acts">${msg.actions.map((a, i) => `<button class="btn sm ${a.primary ? 'primary' : ''}" data-aichat-act="${i}" ${a.disabled ? 'disabled' : ''}>${$esc(a.label)}</button>`).join('')}</div>` : '';
-    // 外链产物（下载导演包 / 成片 MP4 / 导出记录）：直接用 <a> 而不是动作按钮，
-    // 浏览器原生下载与 target=_blank 比 JS 转发更可靠，也不会被忙等态静默禁用。
-    const links = (Array.isArray(msg.links) && msg.links.length)
-      ? `<div class="aichat-links">${msg.links.map((l) => `<a class="aichat-link" href="${$esc(l.url)}" target="_blank" rel="noopener">${$esc(l.label)}</a>`).join('')}</div>` : '';
-    const text = String(msg.text || '').trim();
-    return `<div class="aichat-msg ${isUser ? 'user' : 'assistant'}">
-      <div class="aichat-bubble">${text ? `<div class="aichat-text">${$esc(text).replace(/\n/g, '<br>')}</div>` : ''}${imgs}${pb}${links}${chips}${acts}</div></div>`;
-  }
-
   const ui = {
     /** 追加一条消息并滚动到底部；text 会进入对话历史供 onSend 组装上下文 */
     addMessage(msg) {
@@ -121,22 +159,11 @@ export function openAIChat(o = {}) {
       list.scrollTop = list.scrollHeight;
       const text = String(msg.text || '').trim();
       if (text) history.push({ role: msg.role === 'user' ? 'user' : 'assistant', content: text });
-      // 图片：点击放大查看（生成结果、当前封面、参考图都适用）
-      el.querySelectorAll('.aichat-imgs img').forEach((img) => img.addEventListener('click', () => openImgPreview(img.src)));
-      // 建议 chips：点击即作为用户消息发送；同气泡内按钮互斥（点击后全部禁用，防重复触发）
-      el.querySelectorAll('[data-aichat-chip]').forEach((chip) => chip.addEventListener('click', () => {
-        if (busy) return;
-        disableMsgButtons(el);
-        dispatchSend(chip.textContent.trim());
-      }));
-      // 动作按钮：交给调用方 actions 表处理
-      el.querySelectorAll('[data-aichat-act]').forEach((btn) => btn.addEventListener('click', () => {
-        if (busy) return;
-        const act = msg.actions[Number(btn.dataset.aichatAct)];
-        if (!act || act.disabled) return;
-        disableMsgButtons(el);
-        runTask(() => actions[act.act]?.(ui, act.data, msg) ?? Promise.resolve());
-      }));
+      bindBubble(el, msg, {
+        disabled: () => busy,
+        onAction: (act) => runTask(() => actions[act.act]?.(ui, act.data, msg) ?? Promise.resolve()),
+        onChip: (text) => dispatchSend(text),
+      });
       // 忙等期间新增的消息（如提示词生成中追加的回复）：按钮同样先置灰，忙等结束后恢复
       if (busy) holdBusyButtons(el);
       return el;

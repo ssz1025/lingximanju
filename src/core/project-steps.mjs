@@ -137,6 +137,7 @@ export function defaultBible(opts = {}) {
     title: String(opts.title || '').slice(0, 80),        // 剧名（可与项目名不同）
     genre: '', audience: '',
     logline: String(opts.logline || '').slice(0, 300),   // 一句话简介（AI 补全 / 手动填写）
+    synopsis: String(opts.synopsis || '').slice(0, 2000), // 故事概略（已上传小说时由 AI 读原著生成）
     totalEpisodes: Number(opts.totalEpisodes) || 0,      // 总集数：0 = 未设定
     ending: '', artStyle: '', tone: '',
     firstEpisodeTheme: '',                               // 首集锚定主题
@@ -211,6 +212,9 @@ export function createManagement(opts = {}) {
     steps: freshSteps({ pending: !!opts.skeleton }),
     // 每步独立对话记录（工作台「和 Agent 对话修改」）：{ [stepId]: { messages[], tokens } }
     stepChats: {},
+    // 统一对话线程里新增档位的历史（封面 / 导演风格 / 画布）：
+    // { [scope]: { messages[], tokens, state } }——旧项目惰性补齐，不覆盖已有内容
+    aiScopes: {},
     currentStep: opts.skeleton ? 1 : 3,
     theory: { paper: 'ViMax · arXiv:2606.07649v2', doc: 'docs/THEORY.md', defaults: { k: 2, anchorRequired: true, ragRequired: true, eventChainRequired: true } },
   };
@@ -256,6 +260,10 @@ export function ensureManagement(project) {
   }
   if (!project.management.stepChats || typeof project.management.stepChats !== 'object') {
     project.management.stepChats = {};
+  }
+  // 统一对话线程的新增档位桶（封面 / 导演风格 / 画布）
+  if (!project.management.aiScopes || typeof project.management.aiScopes !== 'object') {
+    project.management.aiScopes = {};
   }
   if (Array.isArray(project.management.episodes)) {
     project.management.episodes = project.management.episodes.map((e) => ({
@@ -512,6 +520,7 @@ export function applyManageAction(project, action, value) {
       const s = (k, max) => value?.[k] === undefined ? b[k] : String(value[k]).slice(0, max);
       b.title = s('title', 80); b.genre = s('genre', 24); b.audience = s('audience', 24);
       b.logline = s('logline', 300);
+      b.synopsis = s('synopsis', 2000) || '';   // 旧项目没有该字段时补空串，不落 undefined
       b.ending = s('ending', 24); b.artStyle = s('artStyle', 24); b.tone = s('tone', 24);
       b.firstEpisodeTheme = s('firstEpisodeTheme', 300);
       b.adaptation = s('adaptation', 1200); b.bottomLines = s('bottomLines', 1200);

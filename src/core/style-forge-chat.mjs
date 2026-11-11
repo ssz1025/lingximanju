@@ -58,10 +58,10 @@ function slimDraft(draft) {
  * @param {object} [o.draft]   上一轮草稿（前端持有并回传）
  * @param {string} [o.modelId] 模型档案 id（可空，走全局激活模型）
  */
-export async function styleForgeChat({ messages = [], draft = null, modelId = '', log = () => {} } = {}) {
+export async function styleForgeChat({ messages = [], draft = null, modelId = '', log = () => {}, onUsage = null } = {}) {
   const history = cleanHistory(messages);
   const prevDraft = slimDraft(draft);
-  const providers = createProviders(resolveModelSettings(null, modelId), log);
+  const providers = createProviders(resolveModelSettings(null, modelId), log, onUsage);
   const out = await providers.generate('styleForge', {
     history,
     draft: prevDraft,

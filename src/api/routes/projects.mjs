@@ -142,12 +142,10 @@ export async function handleProjects(req, res, url) {
     }
 
     if (action === 'chat' && method === 'POST') {
+      // 画布对话已并入统一 AI 对话面板（scope=canvas）：这里保留接口但不再逐段推 SSE，
+      // 避免同一段回复既走事件流又走统一线程、出现两处显示。
       const body = await readBody(req);
       const result = await chatWithCanvas(project, body.message || '', body.modelId);
-      for (const seg of result.segments) {
-        emit('chat', { projectId: id, role: 'assistant', content: seg });
-        await new Promise((r) => setTimeout(r, 90));
-      }
       if (result.changed) {
         saveProject(project);
         emit('state', { projectId: id, project, reason: result.action });

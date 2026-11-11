@@ -25,6 +25,7 @@ import { storyboardFrameSettingsHTML, storyboardSheetsHTML } from './storyboard-
 import { taskPanelHTML, startTaskTicker, stopTaskTicker, copyPromptId } from './task-panel.js';
 import { filmTimelineHTML, stepStatsTableHTML } from './deliver-panel.js';
 import { esc, cut, num, fmtNum } from './utils.js';
+import { chatCount } from './chat-counts.js';
 
 /** 角色出图请求：并上「本次使用的接口」，定妆板单独按 character-sheet 记忆 */
 const withCharImage = (body = {}) => withInterfaceId(
@@ -2052,7 +2053,7 @@ export function stepSectionHTML(s, no, m, body, busy) {
   // 「设置基础信息」在状态机里没有独立步骤（字段都落在 bible 上），
   // 它的对话入口挂到第 ① 步——那边的 Agent 动作正是改创作设定。
   const chatId = s.id === 'basic' ? 'upload' : s.id;
-  const chatCount = (m.stepChats?.[chatId]?.messages || []).length;
+  const chatMsgCount = chatCount(m, chatId);
   // 步骤区头的 token 汇总：工作台主视图也要能一眼看出「这一步花了多少」
   const stepState = (m.steps || []).find((x) => x.id === chatId) || null;
   const execTok = stepState?.tokens?.total || 0;
@@ -2096,7 +2097,7 @@ export function stepSectionHTML(s, no, m, body, busy) {
       ${tokBadge}
       <span class="pv-pill st-${st}">${STATUS_TEXT[st] || st}</span>
       <button class="btn sm pv-chat-btn" data-act="chat-step" data-id="${chatId}"
-        title="和 Agent 对话修改这一步（记录会保留）">💬${chatCount ? ` ${chatCount}` : ' 对话'}</button>
+        title="和 Agent 对话修改这一步（记录会保留）">💬${chatMsgCount ? ` ${chatMsgCount}` : ' 对话'}</button>
       ${mainAct}
     </div>
     <div class="pv-sstep-body">${body}</div>

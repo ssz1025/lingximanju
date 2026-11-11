@@ -92,4 +92,11 @@ export const MATCH = {
   stepChat: /^\/api\/projects\/([^/]+)\/steps\/([a-z]+)\/chat$/,
   stepChatIndex: /^\/api\/projects\/([^/]+)\/steps\/chats$/,
   stepTokens: /^\/api\/projects\/([^/]+)\/steps\/tokens$/,
+  // 统一 AI 对话线程：档位目录 / 合并时间线 / 按档派发 / 客户端回写 / 导出
+  // （ai/export 与 ai/chat/append 必须先于 ai/chat 匹配，否则会被当成普通路径）
+  aiExport: /^\/api\/projects\/([^/]+)\/ai\/export$/,
+  aiAppend: /^\/api\/projects\/([^/]+)\/ai\/append$/,
+  aiChat: /^\/api\/projects\/([^/]+)\/ai\/chat$/,
+  aiThread: /^\/api\/projects\/([^/]+)\/ai\/thread$/,
+  aiScopes: /^\/api\/projects\/([^/]+)\/ai\/scopes$/,
 };

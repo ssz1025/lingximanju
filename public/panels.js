@@ -2146,13 +2146,3 @@ export function renderInspector(node, project, handlers) {
   });
 }
 
-/* ---------- 对话气泡 ---------- */
-export function appendChat(role, content) {
-  const log = $('chat-log');
-  const el = document.createElement('div');
-  el.className = `chat-msg ${role}`;
-  el.textContent = content;
-  log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
-  return el;
-}

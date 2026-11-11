@@ -89,8 +89,8 @@ export function resolveChatRefs(refs) {
  * 输入项目资料 + 用户画面要求 + 参考图（VLM 真实看图），输出一句完整连贯的中文画面描述 + 负向提示词。
  * LLM 未配置 / 调用失败时自动落到完整句模板兜底（providers 内置）。
  */
-export async function designCoverPrompt({ project, m, requirement = '', refs = [], providers, modelId = '', log = () => {} }) {
-  const p = providers || createProviders(resolveModelSettings(project, modelId), log);
+export async function designCoverPrompt({ project, m, requirement = '', refs = [], providers, modelId = '', log = () => {}, onUsage = null }) {
+  const p = providers || createProviders(resolveModelSettings(project, modelId), log, onUsage);
   const vars = {
     ...buildCoverVars(project, m, String(requirement || '').trim()),
     requirement: String(requirement || '').trim().slice(0, 400),
@@ -116,14 +116,14 @@ export async function designCoverPrompt({ project, m, requirement = '', refs = [
  * 提示词一律由独立的 designCoverPrompt agent 产出（对话与设计并行请求，互不阻塞）。
  * 返回 { reply, prompt, negative, suggestions, source, fellBack, message }；prompt 为空视为失败。
  */
-export async function coverChat({ project, m, messages = [], refs = [], modelId = '', log = () => {} }) {
+export async function coverChat({ project, m, messages = [], refs = [], modelId = '', log = () => {}, onUsage = null }) {
   const history = (Array.isArray(messages) ? messages : [])
     .filter((x) => x && (x.role === 'user' || x.role === 'assistant') && String(x.content || '').trim())
     .slice(-12)
     .map((x) => ({ role: x.role, content: String(x.content).slice(0, 1000) }));
   const lastUser = [...history].reverse().find((x) => x.role === 'user')?.content || '';
   const providers = createProviders(resolveModelSettings(project, modelId),
-    (level, msg) => log(level, msg));
+    (level, msg) => log(level, msg), onUsage);
   const talkVars = {
     ...buildCoverVars(project, m, ''),
     history,

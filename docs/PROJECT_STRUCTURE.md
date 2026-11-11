@@ -36,6 +36,7 @@ lingximanju/
 │   │   ├── director-styles.mjs # 十位导演美学档案 + 消费函数：DIRECTOR_STYLES / 调色板 / resolveAesthetic / aestheticPrompt / aestheticShotSuffix / aestheticTreatment / resolveProjectAesthetic / 自定义风格注册表（registerCustomStyles，纯内存无 IO）
 │   │   ├── director-style-store.mjs # 自定义导演风格持久化（data/director-styles.json）：normalizeCustomStyle 校验归一（与内置同构）/ save·delete upsert / 注册注入 + 技能索引重建
 │   │   ├── style-forge-chat.mjs # AI 导演风格设计师对话（无状态草稿回传协议）：styleForgeChat / draftToStyle，产出与 DIRECTOR_STYLES 同构的风格档案
+│   │   ├── ai-thread.mjs       # 统一 AI 对话线程：档位注册表（10 档）/ 读取时合并分步 + 制片 + 新增档位成一条时间线 / (at,桶序,seq) 游标分页 / 按档派发到既有业务函数 / 新增档位桶（management.aiScopes）/ 统一导出
 │   │   ├── graph.mjs           # DAG 拓扑分层 / 上下游 / 自动布局
 │   │   ├── agent.mjs           # Agent 注册表 + 执行上下文
 │   │   ├── orchestrator.mjs    # 分层并发调度、join 汇聚、取消、断点续跑
@@ -72,6 +73,7 @@ lingximanju/
 │                               #   projects.mjs 另含 GET /api/projects/:id/source（原著统计与全文）
 │                               #   director.mjs：GET/POST /director/skills（清单 / 选技能 / 切主色调 / 计划 / 验收快照）+ POST /director/run
 │                               #   runtime.mjs：GET/POST /runtime（30s·3s 规格快照 / 保存 / 片段时间线 / 验收）
+│                               #   ai-thread.mjs：统一 AI 对话域（/ai/scopes 档位目录 / /ai/thread 合并时间线 / /ai/chat 按档派发 / /ai/append 客户端回写 / /ai/export 统一导出）
 ├── electron/                   # Electron 主进程（多端打包入口，见 README「桌面版安装与分发」）
 ├── examples/                   # workflows/ 两份 API 工作流 + sample-novel.txt 示例小说
 ├── public/
@@ -95,7 +97,12 @@ lingximanju/
 │   ├── link-picker.js          # 拖拽松手后的「选择下一个节点 / 连接关系」浮层
 │   ├── panels.js               # 检查器 / 对话 / 双 Tab 设置 / 弹窗 / 产物卡片；openSettings / openHelp 接收当前项目，标题与快捷键随项目切换
 │   ├── model-picker.js         # AI 入口模型下拉：按「项目 + 入口」隔离记忆（modelScopeKey / setModelProjectScope），项目会话内显示「本项目默认模型」
+│   ├── ai-chat.js              # AI 对话气泡组件（零依赖）：bubbleHTML / bindBubble 渲染层（图片 / 提示词块 / chips / 动作按钮 / 外链），openAIChat 保留旧的「开一个新对话页」入口
+│   ├── chat-panel.js           # 统一 AI 对话面板：档位切换条 + 提示条 + 功能按钮 + 混排消息流 + 游标翻历史；单例，重复打开只切档位
+│   ├── chat-hub.js             # 统一面板的应用层接线：客户端动作（封面出图 / 参考图上传 / 风格保存 / 画布定位）+ 服务端事件转发
+│   ├── chat-counts.js          # 对话条数口径（与服务端 threadCounts 同口径）：步骤面板与工作台的「💬 对话 · N」徽标用
+│   ├── style-forge.js          # 导演风格设计师的独立对话框（无项目上下文时的兜底；项目内走统一面板的风格档位）
 │   └── app.js                  # 状态机 / API / SSE / 六步执行 / 快捷键；项目会话 requestExitProject（唯一用户出口，两处 UI 共用）→ closeProject、updateChrome、openProjectAssetLibrary、renderCanvasTools、toggleTheme；新增画布范围 activeCanvasGraph / composeGraph / setCanvasScope / updateCanvasScopeUI / openOverallCanvas / openEpisodeCanvas、ensureSourceView（带 localSourceView 回退）、applySeasonMutation、openWorkshopTab、更多菜单绑定与组合画布只读保护 scopeReadOnly()
-├── tests/                      # node:test 单元与 HTTP 闭环验证（npm test，304 项）；结构整理新增 utils(8) / canvas-scope(7)，退出出口收敛新增 project-exit(5) 结构契约测试
+├── tests/                      # node:test 单元与 HTTP 闭环验证（npm test，818 项）；统一对话新增 ai-thread(21) / chat-panel(6) / chat-counts(5)
 └── data/                       # 运行时：projects/*.json、assets/*、snapshots/*、comfyui.json
 ```

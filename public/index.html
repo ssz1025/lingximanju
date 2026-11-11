@@ -47,6 +47,7 @@
         <!-- 应用级入口：只在项目列表页显示；打开项目后整页只讲当前项目 -->
         <button id="btn-config-chip" class="btn config-chip app-only" title="模型尚未配置完整，点击去设置" hidden>⚠ 模型未配置</button>
         <button id="btn-view-toggle" class="btn project-only" title="切换 项目工作台 / 画布视图">⬡ 画布</button>
+        <button id="btn-ai-chat" class="btn project-only" title="AI 对话：所有对话都在这一个面板里（制片 / 六步 / 封面 / 风格 / 画布）">✦ AI 对话</button>
         <button id="btn-project-manage" class="btn project-only in-more" title="项目管理：分集 / 产物 / 快照 / 标签">▦ 项目管理</button>
         <span class="tb-sep project-only in-more"></span>
         <button id="btn-export" class="icon-btn project-only in-more" title="导出项目 JSON">⇩</button>
@@ -171,16 +172,9 @@
         <div id="insp-steps" class="insp-body" hidden></div>
         <div id="insp-agent" class="insp-body" hidden>
           <div class="agent-intro">画布协作者能读到整张图：节点、连线、状态与产物。用 <code>@节点ID</code> 指向具体节点。</div>
-          <div id="chat-log" class="chat-log"></div>
-          <div class="chat-chips">
-            <button data-q="项目进度">项目进度</button>
-            <button data-q="整理画布">整理画布</button>
-            <button data-q="检查一致性">检查一致性</button>
-            <button data-q="下一步做什么">下一步</button>
-          </div>
-          <div class="chat-compose">
-            <textarea id="chat-input" rows="2" placeholder="例如：给场景补 4 个镜头 / 解释 @n_1 的依赖"></textarea>
-            <button id="btn-send" class="btn primary">发送 ↵</button>
+          <div class="acp-jump">
+            <button class="btn primary" id="btn-insp-ai-chat">✦ 打开 AI 对话（画布档）</button>
+            <p class="acp-jump-tip">所有对话都在同一个面板里：制片、六步、封面、风格、画布按档位切换，历史连成一条线。</p>
           </div>
         </div>
       </aside>
