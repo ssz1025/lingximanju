@@ -159,6 +159,22 @@ export function normalizeInputOrder(raw) {
   return out;
 }
 
+/**
+ * 中文备注表：节点备注键为节点 id，参数备注键为 `node::input`。
+ * 独立于 workflow 本体存放，所以「✎ 接口 JSON」或重新导入同一份工作流都不会把备注冲掉。
+ * 值只留 60 字以内的非空字符串；前端传全量表，清空某个备注直接删掉该键即可。
+ */
+export function normalizeNotes(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [key, val] of Object.entries(raw).slice(0, 400)) {
+    const k = String(key).trim().slice(0, 120);
+    const v = typeof val === 'string' ? val.trim().slice(0, 60) : '';
+    if (k && v) out[k] = v;
+  }
+  return out;
+}
+
 /** 按用户顺序重排输入清单；未出现在顺序表里的（工作流新增的）统一排到末尾 */
 export function applyInputOrder(inputs = [], order = []) {
   const norm = normalizeInputOrder(order);
@@ -369,6 +385,9 @@ function normalize(raw) {
         bindings: normalizeEntryBindings(item.bindings),
         inputSchema: normalizeInputSchema(item.inputSchema),
         inputOrder: normalizeInputOrder(item.inputOrder),
+        // 中文备注（节点 / 参数）：与 workflow 本体解耦，重新导入 JSON 不丢
+        nodeNotes: normalizeNotes(item.nodeNotes),
+        inputNotes: normalizeNotes(item.inputNotes),
         capability: String(item.capability || '').trim().slice(0, 40),
         lastTest: item.lastTest && typeof item.lastTest === 'object' ? {
           ok: Boolean(item.lastTest.ok),
@@ -397,7 +416,7 @@ function normalize(raw) {
             workflow: mirror,
             createdAt: Date.now(),
             params: {}, nodeOverrides: [], bindings: [], inputSchema: [], inputOrder: [], capability: '',
-            lastTest: null,
+            nodeNotes: {}, inputNotes: {}, lastTest: null,
           });
           cfg[activeKey] = id;
         }
@@ -659,6 +678,8 @@ export function addLibraryItems(cfg, kind, items) {
       failed.push({ name, error: '已存在（同名同内容），已跳过' });
       continue;
     }
+    // 同一份工作流改名重新导入时，中文备注应当跟着走（备注独立于 JSON 内容）
+    const twin = lib.find((e) => JSON.stringify(e.workflow) === content);
     let finalName = name;
     if (lib.some((e) => e.name === name)) {
       let n = 2;
@@ -672,6 +693,8 @@ export function addLibraryItems(cfg, kind, items) {
       bindings: normalizeEntryBindings(item?.bindings),
       inputSchema: normalizeInputSchema(item?.inputSchema),
       inputOrder: normalizeInputOrder(item?.inputOrder),
+      nodeNotes: normalizeNotes(twin?.nodeNotes),
+      inputNotes: normalizeNotes(twin?.inputNotes),
       capability: String(item?.capability || '').trim().slice(0, 40),
     };
     lib.push(entry);

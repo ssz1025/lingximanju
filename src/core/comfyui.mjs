@@ -349,6 +349,27 @@ function isLongText(node, key, val) {
   return val.length > 80;
 }
 
+/**
+ * 「常用参数」判定：参数表默认只展示需要用户输入的项，其余技术参数收进「显示全部」。
+ * 常用 = 媒体素材（图片/视频/音频）、提示词（positive / negative / {{prompt}} 占位符 /
+ * 无法归链的多行文本）、宽高尺寸、随机种子（固定种子可复现画面）。
+ * 返回 '' 表示非常用 —— 默认不展示、不落盘（保持「自动识别」，工作流原值生效）。
+ */
+function commonTagOf(role, key, val, media, multiline, type) {
+  if (media) return 'media';
+  const r = String(role || '');
+  // 系统提示词模板（工作流内部的 LLM 专家指令等）：默认不展示，需改时点「显示全部」
+  if (/systemPrompt/.test(r)) return '';
+  if (/^(positive|negative)/.test(r)) return 'prompt';
+  // {{prompt}} 占位符：确切命中「占位符 prompt」，避免 prompt_json 之类误命中
+  if (/^占位符 prompt(,|$)/.test(r)) return 'prompt';
+  // 角色归不上链但确实是多行文本的槽位（串联节点里的用户提示词等）
+  if (r === 'text' && multiline) return 'prompt';
+  if (/^(width|height|aspect|ratio)/i.test(String(key)) && type === 'number') return 'size';
+  if (r === 'seed' || SEED_KEY_RE.test(String(key))) return 'seed';
+  return '';
+}
+
 function inputValueText(v) {
   if (isLink(v)) return `[连线 → 节点 ${v[0]}]`;
   // 多图 / 多素材数组：列出内容，让用户在表格里直接看到每张参考图
@@ -376,13 +397,15 @@ export function describeInterfaceInputs(wf) {
       const isArr = !linked && Array.isArray(val);
       const role = roleBySlot.get(`${id}::${key}`) || '';
       const media = linked ? '' : mediaKindOf(node, key, val);
+      const multiline = !linked && !media && isLongText(node, key, val);
+      const type = linked ? 'link' : isArr ? 'array' : typeof val === 'number' ? 'number'
+        : typeof val === 'boolean' ? 'boolean' : typeof val === 'string' ? 'text' : 'other';
       out.push({
         node: id,
         classType: String(node.class_type || ''),
         nodeTitle: nodeTitle(node),
         input: key,
-        type: linked ? 'link' : isArr ? 'array' : typeof val === 'number' ? 'number'
-          : typeof val === 'boolean' ? 'boolean' : typeof val === 'string' ? 'text' : 'other',
+        type,
         value: linked ? undefined : val,
         valueText: inputValueText(val),
         hasPlaceholder: typeof val === 'string' && placeholderKeys(val).length > 0,
@@ -392,10 +415,12 @@ export function describeInterfaceInputs(wf) {
         multiple: isArr,
         // 参数表只渲染需要人填的槽位：连线由工作流内部驱动，不展示也不可配
         editable: !linked,
+        // 常用参数归类（media / prompt / seed / size / ''）：前端默认只展示常用项
+        common: commonTagOf(role, key, val, media, multiline, type),
         // 媒体槽位（image / video / audio）在表格里给「上传 / 从资源库选择」
         media,
         // 长文本用多行输入框：提示词、带换行的值、超长字符串
-        multiline: !linked && !media && isLongText(node, key, val),
+        multiline,
       });
     }
   }

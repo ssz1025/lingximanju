@@ -428,6 +428,50 @@ test('describeInterfaceInputs：长文本用多行控件，短文本保持单行
   assert.equal(media.multiline, false, '媒体槽位有自己的上传控件，不再用多行文本');
 });
 
+/* ---------- 常用参数归类：默认只看常用，技术参数收进「显示全部」 ---------- */
+
+const commonWf = () => ({
+  sys: { class_type: 'PrimitiveStringMultiline', _meta: { title: '系统提示词' },
+    inputs: { value: 'You are an expert prompt engineer for text-to-image.' } },
+  pos: { class_type: 'PrimitiveStringMultiline', _meta: { title: '正向提示词' },
+    inputs: { value: '一位年轻东亚女性，竖版中近景人像摄影。' } },
+  enc: { class_type: 'CLIPTextEncode', inputs: { text: ['pos', 0] } },
+  ks: { class_type: 'KSampler', inputs: { seed: 42, steps: 25, cfg: 1.0, positive: ['enc', 0] } },
+  size: { class_type: 'EmptyLatentImage', inputs: { width: 864, height: 480, batch_size: 1 } },
+  stray: { class_type: 'PrimitiveStringMultiline', inputs: { value: '第一行\n第二行' } },
+});
+
+test('describeInterfaceInputs：常用参数归类（提示词 / 素材 / 尺寸 / 种子），技术参数不算常用', () => {
+  const at = (n, k) => describeInterfaceInputs(commonWf()).find((i) => i.node === n && i.input === k);
+  assert.equal(at('pos', 'value').common, 'prompt', '正向链路上的用户提示词');
+  assert.equal(at('sys', 'value').common, '', '系统提示词模板默认不展示');
+  assert.equal(at('stray', 'value').common, 'prompt', '归不上链但确实多行的用户文本也算提示词');
+  assert.equal(at('ks', 'seed').common, 'seed', '种子默认保留（固定种子可复现画面）');
+  assert.equal(at('ks', 'steps').common, '', '采样步数收进显示全部');
+  assert.equal(at('ks', 'cfg').common, '');
+  assert.equal(at('size', 'width').common, 'size');
+  assert.equal(at('size', 'height').common, 'size');
+  assert.equal(at('size', 'batch_size').common, '', 'batch_size 不是尺寸比例');
+
+  const mat = (n, k) => describeInterfaceInputs(mediaWf()).find((i) => i.node === n && i.input === k);
+  assert.equal(mat('1', 'image').common, 'media', '图片素材是常用参数');
+  assert.equal(mat('2', 'video').common, 'media');
+  assert.equal(mat('3', 'audio').common, 'media');
+  assert.equal(mat('4', 'unet_name').common, '', '模型名不算常用');
+  assert.equal(mat('6', 'tiled').common, '', '布尔开关不算常用');
+  assert.equal(mat('8', 'filename_prefix').common, '');
+});
+
+test('describeInterfaceInputs：{{prompt}} 占位符槽位算常用，prompt_json 之类不误命中', () => {
+  const wf = {
+    '1': { class_type: 'MiniH3Director', inputs: { prompt: '{{prompt}}', prompt_json: '{"a":1}', negative_json: '{"b":2}' } },
+  };
+  const at = (k) => describeInterfaceInputs(wf).find((i) => i.input === k);
+  assert.equal(at('prompt').common, 'prompt', '{{prompt}} 是用户提示词注入口');
+  assert.equal(at('prompt_json').common, '', '占位符列表里夹 prompt_json 不能误判成提示词');
+  assert.equal(at('negative_json').common, '');
+});
+
 test('compileInputSchema：布尔固定值按真布尔写回（下拉回传的是字符串）', () => {
   const wf = mediaWf();
   const on = CFG.compileInputSchema([{ node: '6', input: 'tiled', source: 'fixed', value: 'true' }], wf);
@@ -553,4 +597,65 @@ test('POST /interfaces/:id/media：ComfyUI 不可达时仍保存本地并给 war
     assert.match(r.data.warning, /ECONNREFUSED/);
     assert.ok(fs.existsSync(path.join(TMP, 'assets', r.data.asset)), '本地仍落下文件');
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test('normalizeNotes：中文备注表只留非空短字符串，空值即删除', () => {
+  const out = CFG.normalizeNotes({
+    '7': '  参考图1  ',
+    '7::image': '图片素材',
+    empty: '',
+    num: 123,
+    nested: { a: 1 },
+    long: 'x'.repeat(200),
+  });
+  assert.equal(out['7'], '参考图1');
+  assert.equal(out['7::image'], '图片素材');
+  assert.equal(out.long, 'x'.repeat(60), '超长备注截断到 60 字');
+  assert.equal('empty' in out, false);
+  assert.equal('num' in out, false);
+  assert.equal('nested' in out, false);
+  assert.deepEqual(CFG.normalizeNotes(null), {});
+  const many = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`k${i}`, 'v']));
+  assert.equal(Object.keys(CFG.normalizeNotes(many)).length, 400, '备注表上限 400 项');
+});
+
+test('PUT /interfaces/:id 保存中文备注 → GET /schema 读回，落盘持久化且不误清', async () => {
+  reset();
+  fs.writeFileSync(FILE, JSON.stringify(baseCfg()));
+  const put = await api('PUT', '/api/comfyui/interfaces/wf_a', {
+    nodeNotes: { '5': 'K采样器', '10': '' },
+    inputNotes: { '6::width': '宽度', '6::height': '高度' },
+  });
+  assert.equal(put.status, 200, `备注保存失败：${put.data.error}`);
+  const schema = await api('GET', '/api/comfyui/interfaces/wf_a/schema');
+  assert.deepEqual(schema.data.nodeNotes, { '5': 'K采样器' }, '空值即删除该备注');
+  assert.deepEqual(schema.data.inputNotes, { '6::width': '宽度', '6::height': '高度' });
+  assert.deepEqual(readCfg().imageWorkflowLib[0].nodeNotes, { '5': 'K采样器' });
+  // 保存参数表/排序时不提交备注 → 保持原值不被清空
+  const keep = await api('PUT', '/api/comfyui/interfaces/wf_a', { inputSchema: [], inputOrder: [] });
+  assert.equal(keep.status, 200);
+  assert.deepEqual(readCfg().imageWorkflowLib[0].inputNotes, { '6::width': '宽度', '6::height': '高度' });
+});
+
+test('改接口 JSON 不动中文备注；同一份 JSON 改名重新导入会继承备注', async () => {
+  reset();
+  fs.writeFileSync(FILE, JSON.stringify(baseCfg({
+    imageWorkflowLib: [{
+      id: 'wf_a', name: '文生图A', workflow: WF, createdAt: 1, lastTest: null,
+      params: {}, nodeOverrides: [], bindings: [], inputSchema: [], capability: '',
+      nodeNotes: { '5': 'K采样器' }, inputNotes: { '6::width': '宽度' },
+    }],
+  })));
+  // ① 编辑接口 JSON 只替换 workflow 本体
+  const edited = await api('PUT', '/api/comfyui/interfaces/wf_a/workflow', { workflow: WF });
+  assert.equal(edited.status, 200, `改 JSON 失败：${edited.data.error}`);
+  assert.deepEqual(readCfg().imageWorkflowLib[0].nodeNotes, { '5': 'K采样器' });
+  // ② 改名重新导入同一份工作流 → 新档案继承旧备注
+  const { added, failed, lib } = CFG.addLibraryItems(CFG.loadComfyConfig(), 'image', [
+    { name: '文生图A-副本', workflow: WF },
+  ]);
+  assert.equal(added.length, 1, `导入失败：${JSON.stringify(failed)}`);
+  const fresh = lib.find((e) => e.id === added[0].id);
+  assert.deepEqual(fresh.nodeNotes, { '5': 'K采样器' });
+  assert.deepEqual(fresh.inputNotes, { '6::width': '宽度' });
 });

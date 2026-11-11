@@ -105,6 +105,18 @@
 
 参数表的目的是「让我知道这次要填什么」，所以**连线槽位不再成行出现**：`type === 'link'`（`[节点id, 输出序号]`）由工作流内部连接驱动，既不可配也不展示，只在表头留一行统计「已隐藏 M 个连线槽位」。`describeInterfaceInputs` 为此补了 `editable` 字段（连线 `false`），库项按钮的「⚙ 参数（N）」也改成只数可编辑项（`inputCount`），另给 `linkCount`。
 
+**默认「只看常用」**：可编辑参数里再分两层——常用参数默认展示，其余技术参数（steps / cfg / 采样器 / 模型名 / 布尔开关…）收进「显示全部」。`describeInterfaceInputs` 给每个输入一个 `common` 归类：
+
+| `common` | 含义 | 判定 |
+|---|---|---|
+| `prompt` | 提示词 | 角色 `positive` / `negative`、`{{prompt}}` 占位符、归不上链但确实多行的用户文本 |
+| `media` | 素材 | 图片 / 视频 / 音频槽位（判定见下） |
+| `size` | 尺寸比例 | 输入名 `width` / `height` / `aspect` / `ratio` 且是数字 |
+| `seed` | 随机种子 | 角色 `seed` 或输入名命中 `seed` / `noise_seed` 等（固定种子可复现画面，默认保留） |
+| `''` | 非常用 | 其余，**默认不展示也不落盘**（保持「自动识别」，工作流原值生效） |
+
+表头是「N 项 · 常用 K 项」加「只看常用 / 显示全部」切换（记住在浏览器里）。两个要点：**系统提示词模板**（工作流内部给 LLM 的指令，角色 `systemPrompt`）不算常用，默认藏起；**配置优先于过滤**——用户把某行来源改成「固定值 / 内置变量 / Agent」后，即使它不常用也保持可见（按当前 DOM 判断，保存前的编辑同样生效）。切换只改行的显隐、不重渲染，未保存的编辑不会丢。
+
 **输入控件按参数类型匹配**（`public/panels.js` 的 `inputControlHTML`），不再是清一色单行文本框：
 
 | 参数类型 | 控件 | 判定依据 |
@@ -134,6 +146,33 @@
 **生图 Agent 自动配参只有一个兜底点**：`createProviders` 的 `runComfy()`。`resolveInterface()` 把「由 Agent 生成」的字段放进 `cfg.paramPlan`，`runComfy` 在提交前仅当有这些标记时调用一次 LLM（`intent: 'interface-params'`），解析成 `nodeOverrides` 追加进本次配置；Mock 项目不触发 LLM（直接用档案兜底值），真实 LLM 调用失败 / 返回不可解析时同样回落兜底值，**绝不阻断出图**。没有任何标记的接口零额外开销。所有生成入口（封面 / 角色 / 分镜 / 视频 / 音色 / 试跑）都自动获得这套行为，新增入口也只需沿用 `runComfy`。
 
 配置落在全局 `data/comfyui.json` 各库项的 `inputSchema` 字段；老配置每次读取幂等补空数组，工作流本体、镜像与既有 `params` / `nodeOverrides` 均不受影响。
+
+### 2.9 设置弹窗分类导航 · 工作流按节点分组 · 中文备注
+
+**设置从整页改回浮层弹窗**：`openSettings` 由 `showPage()`（整页宿主）换成 `showModal()`，顶栏 ⚙ 打开的是带遮罩的「设置」窗口（Escape / 点遮罩关闭）。左侧竖排六类导航，右侧内容区独立滚动；切换只改 `.cf-section` 的 `hidden`，不重渲染，未保存的编辑不会丢。
+
+| 分类 | 内容 |
+|---|---|
+| 通用设置 | 本地 ComfyUI 连接、生成参数、最终产物、提示词注入自检 |
+| 工作空间 | 项目级运行参数（best-of-k / 并发）、图像接口地址 |
+| Agent 设置 | 全局模型库、各服务当前接口的只读摘要 |
+| 图片服务 | 出图工作流库 + 媒体生成接口档案 / 板块绑定 |
+| 音频服务 | 音色工作流库 |
+| 视频服务 | 视频工作流库 |
+
+**导入的工作流 JSON 分类展示**：图片 / 音频 / 视频服务页里列出的，就是导入的本地 ComfyUI「导出(API)」工作流文件；每份可选中生效、单独试跑、直接改接口 JSON、配置参数。参数表改成**按节点分组的折叠卡片**（`paintInputTable` 的 `.mi-node`）：卡片头显示中文节点名、节点类型、`#节点id` 与「已配置 / 可编辑输入数」；默认展开含常用参数或已配置参数的节点，其余可手动展开。顶部「已选」chips 来自常用 / 已配置参数，点击展开所属节点并滚动定位。组内沿用 2.8 的类型化控件与「只看常用 / 显示全部」；**排序限制在所属节点内**（跨节点顺序由工作流决定），`collectInputRows` / `collectInputOrder` 仍按全局 DOM 顺序读取，保存语义不变。Krea2 实测 38 项分属 15 个节点，常用视图下只展开 4 个节点。
+
+**中文备注（三处）**：
+
+| 位置 | 交互 | 存储 |
+|---|---|---|
+| 工作流档案名 | 行内「✎ 备注」或双击名称 | 库项 `name`（`PUT /api/comfyui/library`） |
+| 节点名 | 卡片头 ✎ → 就地输入 → Enter / 失焦保存 | 库项 `nodeNotes[节点id]` |
+| 参数名 | 参数行 ✎ → 就地输入 → Enter / 失焦保存 | 库项 `inputNotes['node::input']` |
+
+备注通过 `PUT /api/comfyui/interfaces/:id` 的 `{nodeNotes, inputNotes}` **全量表**提交（删键 = 清空，值 ≤ 60 字、最多 400 项，由 `normalizeNotes` 清洗），`GET /api/comfyui/interfaces/:id/schema` 随 `inputs` 一起下发。**备注独立于 `workflow` 本体**：改「✎ 接口 JSON」不会动备注；改名重新导入同一份工作流时 `addLibraryItems` 会把旧档案的备注继承给新档案。前端保存备注刻意不调 `applyConfig` 重绘工作流库（那会冲掉尚未保存的参数编辑），只更新对应文本与 chips。老配置缺这两个字段时补空对象，`_meta.title` 仍是节点名的默认回落。
+
+**试跑产物就地预览**：单项 / 批量测试完成后，结果面板内嵌 `<video controls>` 直接播放视频、图片缩略图点 `openAssetPreview` 页内放大、音频保持就地播放；批量试跑也逐项列出产物。后端零改动（产物本就随响应返回并落盘 `data/assets/`），试跑产物不登记资源库。
 
 ### 3. 两种最终产物
 
@@ -181,8 +220,8 @@ extra/manifest.json / README.md    来源信息与导入步骤
 | GET | `/api/projects/:id/film` | 下载拼接后的成片 MP4 |
 | GET | `/api/comfyui/interfaces` | 全部接口档案概览（含参数 / 节点覆盖 / 能力 / 板块绑定，不含工作流本体）+ 板块清单 |
 | POST | `/api/comfyui/interfaces` | 导入接口文件：`{kind, name, workflow, capability?, params?, nodeOverrides?, bindings?}` 或 `{kind, items:[...]}` |
-| PUT | `/api/comfyui/interfaces/:id` | 局部更新档案（改名 / 合并 params，传 null 清空某参数 / 节点覆盖 / 绑定 / 能力 / 输入参数表 `inputSchema` / 显示顺序 `inputOrder`；`active:true` 设为默认） |
-| GET | `/api/comfyui/interfaces/:id/schema` | 单份接口详情：工作流 JSON 本体 + 按 `inputOrder` 排好的全部输入清单 + 内置变量 + 已保存的参数表与顺序 |
+| PUT | `/api/comfyui/interfaces/:id` | 局部更新档案（改名 / 合并 params，传 null 清空某参数 / 节点覆盖 / 绑定 / 能力 / 输入参数表 `inputSchema` / 显示顺序 `inputOrder` / 中文备注 `nodeNotes` + `inputNotes` 全量表；`active:true` 设为默认） |
+| GET | `/api/comfyui/interfaces/:id/schema` | 单份接口详情：工作流 JSON 本体 + 按 `inputOrder` 排好的全部输入清单 + 内置变量 + 已保存的参数表、顺序与中文备注 |
 | PUT | `/api/comfyui/interfaces/:id/workflow` | 修改 / 替换该档案的接口 JSON（`parseWorkflow` 校验；选中项同步镜像；返回新输入清单与失效参数告警） |
 | POST | `/api/comfyui/interfaces/:id/media` | 参数表媒体槽位取值：`{asset}` 复用资源库 / `{dataUrl, name}` 本地上传；双写 `data/assets/` 与 ComfyUI 输入目录，返回 `{asset, url, comfyName, warning?}`。上限 32MB，类型必须与槽位一致 |
 | DELETE | `/api/comfyui/interfaces/:id` | 删除档案，自动清掉指向它的板块绑定；删的是选中项时同步清镜像 |
@@ -214,4 +253,4 @@ extra/manifest.json / README.md    来源信息与导入步骤
 
 > 有声样本的音色试听不再走浏览器合成：`POST /api/voices/sample` 检测到 `audio.url` 就直接返回 `{mode:'asset', url}`，前端用单例 `<audio>` 播放。`PUT /api/voices/:id` 会剔除 `audio/draw/source`，防止用户改备注把真实样本抹掉；`DELETE /api/voices/:id` 会清空引用该音色的角色字段，并在没有其它音色共用同一文件时回收音频。
 
-LLM 仍可独立配置：设置第一个 Tab 选「OpenAI 兼容接口」并填 Base URL / Key / Model，剧本与分镜规划改走 `/chat/completions`，解析失败自动回退 Mock。密钥只写本地 `data/projects/<id>.json`，不上传第三方。
+LLM 仍可独立配置：设置弹窗「Agent 设置」→ 全局模型库选「OpenAI 兼容接口」并填 Base URL / Key / Model，剧本与分镜规划改走 `/chat/completions`，解析失败自动回退 Mock。密钥只写本地 `data/projects/<id>.json`，不上传第三方。

@@ -4,6 +4,7 @@ import { MATCH } from './match.mjs';
 import {
   loadComfyConfig, saveComfyConfig, comfySummary, addLibraryItems, kindOf, WORKFLOW_KINDS,
   resolveInterface, findInterface, interfaceOverview, MEDIA_SCOPES, scopeKind, applyInputOrder,
+  normalizeNotes,
 } from '../../core/comfy-config.mjs';
 import {
   parseWorkflow, analyzeWorkflow, describeWorkflow, describeAudioWorkflow,
@@ -238,6 +239,9 @@ export async function handleComfy(req, res, url) {
       inputs: applyInputOrder(describeInterfaceInputs(entry.workflow), entry.inputOrder || []),
       inputSchema: entry.inputSchema || [],
       inputOrder: entry.inputOrder || [],
+      // 中文备注（节点 id / `node::input`）：独立于接口 JSON，前端节点分组与参数行据此显示中文名
+      nodeNotes: entry.nodeNotes || {},
+      inputNotes: entry.inputNotes || {},
       builtinVars: BUILTIN_INPUT_VARS,
     }), true;
   }
@@ -366,6 +370,9 @@ export async function handleComfy(req, res, url) {
       if (body.bindings !== undefined) next.bindings = body.bindings;
       if (body.inputSchema !== undefined) next.inputSchema = body.inputSchema;
       if (body.inputOrder !== undefined) next.inputOrder = body.inputOrder;
+      // 中文备注：前端传全量表，删掉某键即清空该备注；不提交时保持原值
+      if (body.nodeNotes !== undefined) next.nodeNotes = normalizeNotes(body.nodeNotes);
+      if (body.inputNotes !== undefined) next.inputNotes = normalizeNotes(body.inputNotes);
       if (body.capability !== undefined) next.capability = String(body.capability).trim().slice(0, 40);
       return next;
     });

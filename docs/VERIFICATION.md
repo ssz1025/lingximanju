@@ -357,3 +357,50 @@
 | 数据安全 | 测试写入已还原：4 份工作流 `inputSchema` 与 `inputOrder` 全空、`69.image` 回 `女主1_v1.png`、`data/assets` 中 `iface_` 残留 0 个；备份 `data/comfyui.json.bak-20261110-230903` |
 | 服务 | 全程在 45367 重启到新代码，不另起端口——上一轮的教训是「另起端口让用户自己换」等于没修 |
 | 边界 | 五来源语义 / 板块绑定 / 请求级 interfaceId / Agent 配参兜底 / 镜像字段 / 注入器 / 排序语义均未变；`editable`、`media`、`multiline` 是纯新增可选字段，老配置读取幂等 |
+
+## 2026-11-11 · 参数表默认只看常用，技术参数收进「显示全部」
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「是否可以只保存需要用户输入的参数，比如文本、图像、图片尺寸比例等常用信息，其他不需要展示」。按「规划先行」先给只读调研 + 书面方案（常用判定规则 / 交互细节 / 风险），用户拍板三条：**默认常用 + 可切换**（记住在浏览器）、**seed 保留显示**（steps / cfg / 模型名等隐藏）、**系统提示词模板不算常用** |
+| 常用归类 | `src/core/comfyui.mjs` 的 `describeInterfaceInputs` 新增 `common` 字段（`commonTagOf`）：`prompt`（角色 positive / negative、`{{prompt}}` 占位符、归不上链但确实多行的用户文本）、`media`（图片 / 视频 / 音频槽位）、`size`（输入名 width / height / aspect / ratio 且数字）、`seed`（角色或输入名命中 `noise_seed` 等）；**角色 `systemPrompt` 明确排除**（工作流内部 LLM 指令模板）；占位符判定用 `^占位符 prompt(,|$)` 精确命中，避免 `prompt_json` 误判 |
+| 前端切换 | `public/panels.js` 的 `paintInputTable`：表头「N 项 · 常用 K 项」+「只看常用 / 显示全部」按钮（`data-scope` 直接绑定，不走 `data-act`——库内联块会被 `prefixLibActions` 改名成 `lib-*`）；切换**只改行的显隐、不重渲染**（重渲染会丢未保存的编辑）；视图偏好记在 `localStorage.cc-inputs-scope`；每行带「常用·提示词 / 素材 / 尺寸 / 种子」标签 |
+| 配置优先 | **配置优先于过滤**：来源 ≠ 自动识别的行即使不常用也保持可见，且按**当前 DOM** 判断（初版按已保存的 `inputSchema` 判断，Playwright 验证抓到「常用视图把行切成固定值 → 切视图后被藏掉」的缺陷后改为 DOM 口径，初始渲染后统一走一次 `applyScope`）；非常用行仍渲染（`hidden` 收起），保持「自动识别」→ 保存时本来就不落盘，天然满足「只保存需要输入的参数」 |
+| CSS | `.mi-row[hidden] { display:none }` 必须显式声明——`.mi-row` 是 `display:grid`，作者样式会压过 `hidden` 属性的 UA 默认；新增 `.mi-common`（绿色标签）与 `.mi-scope`（切换按钮组），全部走设计令牌 |
+| 修复 | 初版「显示全部」下计数语义错误（变成「38 项 · 常用 38 项」）：`applyScope` 的计数改为「常用参数个数」（common 行 + 非 auto 配置行），与当前视图无关 |
+| 验证 | 新增 2 项测试（常用归类 15 个断言 + 占位符精确命中），`tests/interface-schema.test.mjs` **30/30**；**`npm test` 762/762**；`npm run check` 183 文件 |
+| 真实归类 | 45367 真实 schema：Krea2 38 项 → 常用 4（2 seed + 2 提示词，系统模板 `30:18.value` 已排除）；A1-3 40 项 → 常用 4（参考图 + 用户提示词 `30:19.value`（`text` 角色 + 多行）+ 2 seed）；视频 36 项 → 常用 6（参考图 + 2 个 `{{prompt}}` + seed + width + height，`timeline_data` 大 JSON 不误判） |
+| 真实页面 | Playwright 直连 45367：默认常用视图 **4/38 可见**（标签正确）、表头「38 项 · 常用 4 项」；切「显示全部」38 行全可见且计数仍为「常用 4 项」；给 `29.filename_prefix` 配固定值后切回常用**该行保持可见**（配置优先）；保存按钮正常（前缀机制未破坏）；撤销用 `evaluate` 强制清值（hidden 输入框点不到）；`docOverflowX=0`、**0 pageerror**。深色截图 `/tmp/pwtest/scope-common-dark.png`、`scope-all-dark.png`、浅色 `scope-common-light.png` |
+| 排坑 | ① `curl` 受会话 `HTTP_PROXY` 影响打到代理，之前「health 200」是代理答的——本机回环必须 `--noproxy '*'`；② 子 shell `( ... &)` 分离的服务进程随命令结束被回收，45367 必须用后台任务起；③ 探针值要匹配控件类型（数字框 fill 文本报错） |
+| 边界 | `common` 是纯新增字段，老配置读取幂等；保存语义 / 排序 / Agent 配参 / 媒体双写 / 注入器全部未变 |
+
+## 2026-11-11 · 测试后直接返回预览图片 / 视频资源
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「测试后直接返回预览图片、视频资源」。用户拍板：**图片页内放大**、**试跑产物不登记资源库** |
+| 改动 | `public/panels.js` 抽 `testAssetsHTML(assets)` 供单项 / 批量共用：视频改 `<video controls>` 内嵌直接播放（原来只是静音首帧缩略图，要跳新标签页）、图片缩略图改 button 走 `openAssetPreview` 页内放大、音频保持就地播放；`testBatch` 批量完成后用 `.wf-batch-assets` 逐项渲染产物（原来只显示「成功 N · 失败 N」）。后端零改动——产物本就随响应返回并落盘 `data/assets/` |
+| 验证 | fake ComfyUI（`/tmp/fake-comfy/server.mjs`，含 `/prompt` `/history` `/view` `/upload/image`）端到端：单项图片放大弹层 ✓、视频内嵌播放首帧真实渲染 ✓、批量 3 项产物 ✓、**0 pageerror**；`npm test` 762/762；截图 `/tmp/pwtest/test-preview-*.png` |
+| 排坑 | 本机 ComfyUI 未开且 `baseUrl` 指向 Tailscale 另一台机（100.105.39.90），临时改 `127.0.0.1:8188` 验证后还原；视频工作流要先上传参考图，fake 需补 `/upload/image`；ffmpeg 生成真实可播 mp4 |
+
+## 2026-11-11 · ⚠️ 误删历史产物与恢复
+
+| 项目 | 结果 |
+|---|---|
+| 事故 | 清理 fake 测试残留时执行 `rm -f data/assets/comfy_*`，通配符命中 **437 个文件**，其中 **425 个是历史真实生成产物**（分镜视频 / 角色立绘 / 封面都走同一 `comfy_` 前缀落盘），项目 JSON 里 2204 处引用、330 个唯一文件受影响 |
+| 恢复 | ① 项目 JSON 里 `promptId` + 产物 url 同对象 → ComfyUI `GET /history/{promptId}` 反查原始 filename → `/view` 重新下载；② 无 promptId 的用节点 `meta.startedAt/finishedAt` 与 history `execution_start` 时间窗（±150s）+ **index.json 的 bytes 精确匹配**；③ history 只保留最近 416 条。**366 / 425 已恢复，字节数与索引全部一致** |
+| 遗留 | 被项目引用的 330 个恢复 314 个，**仍缺 16 个 png**（14 个角色三视图 + 1 个分集海报 + 1 个项目封面，集中在 `prj_mw4g4qgyff65` / `prj_mw3ppmykf5t5`），生成历史已超出 ComfyUI 保留范围，需重新生成或用户本地找原图；本轮按用户决定**先不动** |
+| 规则 | 任何通配符删除前先 `ls <pattern> \| wc -l` 核对数量并列出目标；`comfy_*` 是正式产物与测试产物共用前缀，永远不当测试残留批量删；删除 `data/` 下任何内容前先查引用数 |
+
+## 2026-11-11 · 设置改弹窗分类导航 + 工作流按节点分组 + 中文备注
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「修改模型设置为弹窗设置，样式参考图中方式；导入的图片或者视频服务是，导入本地comfyui的工作流接口json文件，分类展示，可以修改中文备注」。按「规划先行」先只读调研 + 书面方案，用户拍板四条：**服务分类 + 节点分组**、**三类中文备注全要**（档案名 / 节点名 / 参数名）、**备注单独存表**、**提交 + 补文档，16 张图先不动** |
+| 弹窗化 | `openSettings` 从 `showPage()`（整页宿主）换成 `showModal()`（浮层 + 遮罩，Escape / 点遮罩关闭）；body 改「左侧 6 类导航 + 右侧独立滚动内容区」：通用设置 / 工作空间 / Agent 设置 / 图片服务 / 音频服务 / 视频服务。切换只改 `.cf-section[hidden]`，**不重渲染**（保住未保存编辑）；`SECTION_PANES` 按静态模板顺序归类；`gotoComfyPane` 改为 `gotoPane(pane, selector)`；`.modal:has(.settings-shell)` 定宽定高、内部 flex 分区 |
+| 节点分组 | `paintInputTable` 的平铺表格改为 `.mi-node` 折叠卡片：卡片头为可编辑中文节点名 + `class_type` + `#节点id` +「已配置 / 可编辑输入数」，默认展开含常用或已配置参数的节点；顶部「已选」chips 点击展开所属节点并滚动定位；组内沿用 2.8 的类型化控件与「只看常用 / 显示全部」；`applyScope` 顺带隐藏整组无可见行的卡片并按当前 DOM 重算计数。**排序限制在所属节点内**（drop 时 `dragRow.parentNode !== row.parentNode` 直接拒绝并提示），`syncOrderBtns` 改按组内首末行计算；`collectInputRows` / `collectInputOrder` 仍按全局 DOM 顺序读取，保存语义不变 |
+| 备注读写 | `src/core/comfy-config.mjs` 新增 `normalizeNotes`（≤60 字、≤400 项、空值即删），库项新增 `nodeNotes` / `inputNotes` 并在 `normalize()` / 迁移分支 / `addLibraryItems` 全程保留；`PUT /api/comfyui/interfaces/:id` 接受全量表、`GET /schema` 下发；**备注与 `workflow` 解耦**——改接口 JSON 不动备注，改名重新导入同内容工作流时由 `addLibraryItems` 继承旧备注。前端 `saveNotes` 刻意不调 `applyConfig`（会重绘库、冲掉未保存的参数编辑），只 `cfg = d.config` + 局部更新文本与 chips；`startNoteEdit` 用事件委托 + 就地 input（Enter / 失焦提交、Escape 取消），工作流档案名另加显式「✎ 备注」按钮复用 `startRename` |
+| 验证 | 新增 3 项测试（备注清洗 / PUT→schema 落盘且不误清 / 改 JSON 与重新导入继承），`tests/interface-schema.test.mjs` **33/33**；**`npm test` 765/765**；`npm run check` **183 文件** |
+| 真实页面 | Playwright 直连 45367：**弹窗** 6 类导航切换正确（general 4 / workspace 2 / agent 2 / image 2 / video 1 / audio 1 个 section）、`isPageHost=0`（确实不再是整页）、Escape 关闭 ✓、Agent 设置两个跳转按钮都切到图片服务并露出目标区块 ✓、三类服务「导入 JSON / 测试全部」入口齐全 ✓；**节点分组** Krea2 38 项 → 15 个节点卡片，常用视图只展开 4 组、显示全部 15 组、表头「38 项 · 常用 4 项 · 15 个节点」、4 个已选 chips ✓；**备注** 节点名 / 参数名 / 档案名三处编辑后 `GET /schema` 均读回、chips 文本同步、折叠与 chip 定位生效、保存参数表 `inputOrder` 38 项 ✓；深浅主题 `rgb(238,241,246)`、`docOverflowX=0`、**0 pageerror**；截图 `/tmp/pwtest/settings-modal-dark.png`、`node-groups-dark.png`、`node-groups-light.png` |
+| 数据安全 | 验证写入全部还原：`nodeNotes` / `inputNotes` / `inputSchema` / `inputOrder` 归零、档案名回 `Krea2_turbo_00033.json`。页面另有 2 条 404（`comfy_mw53xodz3izi.png`、`comfy_mw7z29wi1j7x.png`）属上一轮事故遗留的缺失 png，与本轮改动无关 |
+| 边界 | 备注字段纯新增、老配置读取幂等；`_meta.title` 仍是节点名默认回落；接口绑定 / 板块绑定 / 请求级 interfaceId / Agent 配参 / 媒体双写 / 试跑产物预览全部未变 |
