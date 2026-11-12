@@ -19,7 +19,7 @@ import { assignVoices } from '../../agents/voice-agent.mjs';
 // 角色定妆业务层：路由只是薄壳，路由 / 智能体 / 导演能力共用同一口径
 import {
   generateCharacterView, generateCharacterSheet, ensureCharacterPortraits,
-  characterReadyForVideo, emitPortraitProgress,
+  characterReadyForVideo, emitPortraitProgress, normalizeInterfaceByView, normalizeViewsByChar,
 } from '../../core/character-portrait.mjs';
 // 角色定妆后台任务：长批量不再挂在一个 HTTP 请求上，逐张落盘 + SSE 进度 + 可查询/可暂停
 import {
@@ -32,6 +32,33 @@ import { resolveModelSettings } from '../../core/app-settings.mjs';
 // 分镜板业务 Agent：分镜画面设置 + 按版式重排每段分镜板（业务口径不散落在路由里）
 import { planStoryboardSheets, composeStoryboardSheets } from '../../agents/storyboard-agent.mjs';
 
+/** 从已上传的原著采样「可读节选」：书名 + 章节标题 + 开头 / 中段 / 结尾。
+ *  单项目原著可到 1000 万字，整本塞进模型上下文不可行，这里固定控制在 4000 字以内。
+ *  导出供回归测试直接验证采样范围与长度。 */
+export function buildNovelExcerpt(m) {
+  const src = m?.source || {};
+  const text = String(src.text || '').replace(/\r/g, '').trim();
+  if (!text) return '';
+  const heads = [...text.matchAll(/^[ \t]*(第[0-9一二三四五六七八九十百千零两]+[章节回集卷篇][^\n]{0,40}|Chapter\s+\d+[^\n]{0,40})/gmi)]
+    .map((x) => x[1].trim()).slice(0, 12);
+  const head = text.slice(0, 1200);
+  const tail = text.slice(-600);
+  const midBudget = Math.max(0, 4000 - head.length - tail.length - 500);
+  const seg = Math.floor(midBudget / 3);
+  const span = Math.max(1, text.length - head.length - tail.length);
+  const mids = [1, 2, 3].map((i) => text.slice(
+    head.length + Math.floor(span * i / 4),
+    head.length + Math.floor(span * i / 4) + seg,
+  ));
+  return [
+    `书名：${src.title || '未命名'}`,
+    heads.length ? `章节标题（节选）：${heads.join(' / ').slice(0, 360)}` : '',
+    '【原著开头】', head,
+    '【原著中段采样】', ...mids.filter(Boolean),
+    '【原著结尾】', tail,
+  ].filter(Boolean).join('\n').slice(0, 4000);
+}
+
 /**
  * 单视图生成的内联实现已抽到 core/character-portrait.mjs。
  * 保留此薄封装只为兼容旧调用点，逻辑与业务层完全一致（不维护第二套口径）。
@@ -41,6 +68,7 @@ async function generateView(project, m, character, viewKey, modelId = '', opts =
     project, m, character, viewKey, modelId,
     requireReal: opts.requireReal === true,
     interfaceId: String(opts.interfaceId || '').slice(0, 60),
+    interfaceByView: normalizeInterfaceByView(opts.interfaceByView),
     log: (level, msg) => emit('log', { projectId: project.id, level, message: `角色多视图 · ${msg}` }),
   });
   return out;
@@ -580,6 +608,7 @@ export async function handleManagement(req, res, url) {
           views: Array.isArray(body.views) && body.views.length ? body.views : null,
           requireReal: body.requireReal === true,
           interfaceId: String(body.interfaceId || '').slice(0, 60),
+          interfaceByView: normalizeInterfaceByView(body.interfaceByView),
           log: (level, msg) => emit('log', { projectId: id, level, message: `角色定妆板 · ${msg}` }),
         });
         saveProject(project);
@@ -591,7 +620,11 @@ export async function handleManagement(req, res, url) {
         }), true;
       }
       const out = await generateView(project, m, character, String(body.view || ''), body.modelId,
-        { requireReal: body.requireReal === true, interfaceId: body.interfaceId });
+        {
+          requireReal: body.requireReal === true,
+          interfaceId: body.interfaceId,
+          interfaceByView: body.interfaceByView,
+        });
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'characters' });
@@ -635,6 +668,9 @@ export async function handleManagement(req, res, url) {
       concurrency: Number(body.concurrency) || 2,
       modelId: body.modelId,
       interfaceId: String(body.interfaceId || '').slice(0, 60),
+      interfaceByView: body.interfaceByView,
+      // 一键重试失败任务：{角色ID: [失败视图]}，业务层只重出这些视图
+      viewsByChar: normalizeViewsByChar(body.viewsByChar),
     };
 
     if (body.sync !== true) {
@@ -671,6 +707,8 @@ export async function handleManagement(req, res, url) {
         regenerateMock: body.regenerateMock === true,
         requireReal: body.requireReal === true,
         interfaceId: String(body.interfaceId || '').slice(0, 60),
+        interfaceByView: normalizeInterfaceByView(body.interfaceByView),
+        viewsByChar: normalizeViewsByChar(body.viewsByChar),
         modelId: body.modelId,
         save: () => saveProject(project),
         log: (level, msg) => emit('log', { projectId: id, level, message: `角色定妆 · ${msg}` }),
@@ -837,14 +875,29 @@ export async function handleManagement(req, res, url) {
     if (!project) return json(res, { error: '项目不存在' }, 404), true;
     const m = ensureManagement(project);
     const body = await readBody(req);
-    // 一键生成不强制用户先写构想：没有构想时用项目名 / 原著标题作为题材依据
-    const idea = String(body.idea || m.bible?.logline || m.source?.title || project.name || '').trim().slice(0, 600);
-    if (!idea) return json(res, { error: '请先输入一句话故事构想或给项目命名，AI 才能据此补全项目信息' }, 400), true;
+    // 已上传小说时，一键生成改为「先读小说出故事概略 → 用概略当创作依据配置全部项目信息」；
+    // 没有小说 / 普通请求仍要求故事简介必填（不回退项目名 / 原著标题）。
+    const novelText = String(m.source?.text || '').trim();
+    const fromNovel = body.fromNovel === true && novelText.length >= 40;
+    let synopsis = '';
+    let idea = String(body.idea || '').trim().slice(0, 600);
+    if (!fromNovel && !idea) return json(res, { error: '请先填写故事简介，AI 一键生成会据此自动填写项目基础信息' }, 400), true;
     const providers = createProviders(resolveModelSettings(project, body.modelId),
       (level, msg) => emit('log', { projectId: id, level, message: `AI 项目信息 · ${msg}` }));
     try {
-      // 显式点「AI 一键生成」时允许整组重写（否则只补空字段，已有名称/设定永远改不动）
-      const overwrite = body.regenerate === true && providers.mode === 'openai';
+      if (fromNovel) {
+        const excerpt = buildNovelExcerpt(m);
+        const brief = await providers.generate('storySynopsis', {
+          novelExcerpt: excerpt, title: m.source?.title || project.name,
+        });
+        synopsis = String(brief?.synopsis || '').replace(/\s+/g, ' ').trim().slice(0, 600)
+          || idea || String(excerpt).replace(/\s+/g, ' ').trim().slice(0, 240);
+        idea = synopsis;   // 概略就是本次「故事简介」与全部项目信息的创作依据
+        emit('log', { projectId: id, level: 'info', message: `AI 项目信息 · 已按原著节选生成故事概略（${synopsis.length} 字）` });
+      }
+      // 显式点「AI 一键生成」时允许整组重写；按小说生成同理。
+      // 只有真实模型才重写：Mock 的 genre / tone / worldview 是内置模板，不能拿它覆盖用户设定。
+      const overwrite = (body.regenerate === true || fromNovel) && providers.mode === 'openai';
       const out = await providers.generate('storyIdea', {
         idea, title: overwrite ? undefined : project.name, style: project.settings?.style,
       });
@@ -852,7 +905,7 @@ export async function handleManagement(req, res, url) {
       // 真实模型调用失败时不再拿内置模板冒充 AI 结果写进项目（旧行为会让用户以为生成成功）
       if (providers.mode === 'openai' && out.__fallback) {
         return json(res, {
-          ok: true, bible: m.bible, filled: 0, name: project.name, source: 'fallback',
+          ok: true, bible: m.bible, filled: 0, name: project.name, source: 'fallback', synopsis,
           message: 'AI 调用失败（模型未返回有效内容，详见运行日志），已保留现有项目信息',
         }), true;
       }
@@ -872,10 +925,12 @@ export async function handleManagement(req, res, url) {
           patch[f] = v;
         }
       }
+      // 故事概略确实来自原著：即使 bible 其它字段已完整也要写回，刷新后简介框不丢
+      if (fromNovel && synopsis) patch.synopsis = synopsis;
       if (!Object.keys(patch).length) {
         const failed = providers.mode === 'openai' && fromMock;
         return json(res, {
-          ok: true, bible: m.bible, filled: 0, name: project.name,
+          ok: true, bible: m.bible, filled: 0, name: project.name, synopsis,
           source: fromMock ? (providers.mode === 'openai' ? 'fallback' : 'mock') : 'llm',
           message: failed ? 'AI 调用未返回有效内容，已保留现有项目信息，请稍后重试'
             : '项目信息已完整，无需补全（清空字段后可重新生成）',
@@ -894,12 +949,13 @@ export async function handleManagement(req, res, url) {
       saveProject(project);
       broadcastMeta(project);
       emit('state', { projectId: id, project, reason: 'bible' });
+      const baseMsg = providers.mode === 'openai'
+        ? (fromMock ? `LLM 未返回有效内容，已用内置模板补全 ${Object.keys(patch).length} 项` : `AI 已补全 ${Object.keys(patch).length} 项项目信息${renamedTo ? `，并命名为「${renamedTo}」` : ''}`)
+        : `未配置大模型，已用内置模板补全 ${Object.keys(patch).length} 项；配置后可由 AI 按构想生成`;
       return json(res, {
-        ok: true, bible: m.bible, filled: Object.keys(patch).length, renamedTo, name: project.name,
+        ok: true, bible: m.bible, filled: Object.keys(patch).length, renamedTo, name: project.name, synopsis,
         source: fromMock ? (providers.mode === 'openai' ? 'fallback' : 'mock') : 'llm',
-        message: providers.mode === 'openai'
-          ? (fromMock ? `LLM 未返回有效内容，已用内置模板补全 ${Object.keys(patch).length} 项` : `AI 已补全 ${Object.keys(patch).length} 项项目信息${renamedTo ? `，并命名为「${renamedTo}」` : ''}`)
-          : `未配置大模型，已用内置模板补全 ${Object.keys(patch).length} 项；配置后可由 AI 按构想生成`,
+        message: fromNovel ? `已读小说生成故事概略（${synopsis.length} 字）· ${baseMsg}` : baseMsg,
       }), true;
     } catch (err) {
       return json(res, { error: `AI 补全项目信息失败：${err.message}` }, 502), true;

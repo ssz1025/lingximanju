@@ -22,7 +22,7 @@
 | 1 | `screenwriter` | 编剧 | `idea.text` + 分集梗概与原文 + 项目角色 | `script`（v2，契约见 `core/screenplay.mjs`）：标题 / 类型 / 梗概 / 基调 / 角色表（动机·秘密·弧光）/ 幕结构 / 分集映射 / 场次表（内外景·地点·时间·时长·人物·目标·冲突·转折·节拍·道具·转场 + 可拍摄正文行） | 论文式(1) |
 | 2 | `decomposer` | 叙事分解 | `script` / `idea.text` | `events[]`：`{title, summary, processChain}`；运行中生成 `event` 节点与下游 `scene` 节点 | 式(5) |
 | 3 | `rag` | 全局上下文 | 原文 + 各节点描述 | `context`: 检索片段、角色动机、伏笔；把增强描述写回目标节点 | 式(6) |
-| 4 | `character` | 角色造型 | `script.characters` | `characters[]`：`{name, appearance, palette, portraitUrl}`；生成三视图 SVG | ViMax 角色抽取 |
+| 4 | `character` | 角色造型 | `script.characters` + `management.characters[].views.front` | `characters[]`：`{name, appearance, palette, portraitUrl}`；已有多视图定妆时优先复用真实正面基准图，零 Key 才自绘 SVG 占位 | ViMax 角色抽取 |
 | 5 | `storyboard` | 分镜规划 | `scene` + `script` + 分镜画面设置（格数 / 画幅） | `shots[]`：`{shotNo, size, angle, movement, ffDesc, motionDesc, duration, panel}`；`panel` 是镜头在分镜板里的格位（见 §12），逐镜头建 `shot` 节点 | 式(2) |
 | 6 | `camera-graph` | 机位依赖图 | 同场景 `shots[]` | `cameras[]`：`{id, shots, parent, anchorFrom}`；建立 `anchor` 虚线边 | 式(7) |
 | 7 | `keyframe` | 关键帧生成 | 镜头规格 + 角色资产 + 锚点图 + 分镜画面设置（提示词公式 / 画幅 / 格位） | `candidates[]`：`{url, prompt, refs}`（k 个） | 式(3) 上半 |
@@ -34,7 +34,7 @@
 | 13 | `voice-assigner` | 音色分配 | `management.characters` + 全局音色库 | 角色对象的 `voiceId / voiceName / voiceReason`；LLM 优先，零 Key 启发式兜底 | 项目级业务 Agent |
 
 > `voice-assigner` 只负责「从已有音色库里挑一个最合适的」。若要库里**没有**合适的音色，走音色抽卡（`POST /api/projects/:id/voices/draw`）：调用本地 ComfyUI TTS 工作流跑 N 次产出候选音频，进 `data/voice-drafts.json` 候选池（24h TTL）。抽卡不经过 Agent——它是用户驱动的交互动作，不是自动化决策；候选转正后（`/voices/[drafts/:id/]save`）才成为 Agent 可选的库内音色。
-| 14 | `character-extractor` | 角色提取 | 原著全文检索片段（BM25 + 原文证据窗口） | 候选角色（含 `evidence` / 静态动态特征），证据校验后合并进 `management.characters` | 项目级业务 Agent |
+| 14 | `character-extractor` | 角色提取 | 原著全文检索片段（BM25 + 原文证据窗口）；分集制作时另接 `ep` 的本集原文 / 剧本 | 候选角色（含 `evidence` / 静态动态特征），证据校验后合并进 `management.characters`；本集模式额外回写 `ep.characterIds` 并返回 `added / matched / source / notes` | 项目级业务 Agent |
 | 15 | `director` | 导演智能体（流程型） | 项目选择的导演技能 + 一句话构想 | 不产出单个节点：编排能力 Agent → `executeSteps()` 六步 → 导演包 → `management.director.lastRun` 验收报告 | 项目级流程 Agent |
 | 16 | `storyboard-sheets` | 分镜板智能体 | `management.storyboard`（分镜画面设置）+ 全项目真实分镜图 | 不产出节点：按版式重排 `segments[].gridUrl / gridLayout / gridCells`，返回 `{grids, cells, layout, description, message}` | 项目级业务 Agent |
 
@@ -264,6 +264,35 @@ ctx.patch({ film, directorPack, runtime, deliverables: { outputMode, video, dire
 **底层两套业务函数**（职责不变，各自单测锁死）：
 - `step-chat`（`core/step-chat.mjs`）：六步各一个会话 + 项目总助理；长任务互斥、归档式清空；`exportStepChat` 输出含**一键复刻命令串**的 Markdown。
 - `production-chat`（`core/production-chat.mjs`）：跨步单会话，17 类意图，长意图转后台任务（SSE `production:chat`，统一面板已接该事件把结果补回线程），`exportChat` 输出全流程复刻记录。
+
+### 11.7 角色 / 定妆 Agent 的串行口径（本轮）
+
+**① 本集角色补齐 `ensureProjectCharactersForEpisode()`**（`agents/character-agent.mjs`，纯逻辑在 `core/episode-cast.mjs`）：
+
+```
+ep.text + ep.script（场次 / 角色表 / 说话人）
+  → collectEpisodeCastCandidates()      候选人名 + 出现次数 + 出处
+  → isLikelyPersonName / sanitizeCharacterList / verifyEvidence   只留本集原文能定位的名字
+  → diffEpisodeCast()                    与 management.characters 按 name / alias 对账
+  → 缺失者：LLM 优先 / 零 Key 带证据启发式（可显式 mode:'heuristic' 完全离线）
+  → mergeExtracted() 写全局角色库（不挤掉手改 / LLM 角色，库满 12 只提示）
+  → applyEpisodeCast() 回写 ep.characterIds（手动关联过的名单只追加）
+```
+
+`runEpisodeContext()` 每集都跑一次本集对账，**但不重抽全书、不为每集建库**；返回值 `added / addedNames / matched / skipped / source / notes` 如实写进本步 note 与 UI。REST：`POST /api/projects/:id/episodes/:no/characters/ensure`。
+
+**② 定妆 Agent 严格串行**（`agents/character-portrait-agent.mjs` → `core/character-portrait.mjs`）：
+
+```
+front（FRONT_BODY_RULES + 统一光照/背景 + 强负向词）
+  → 校验真实出图与风格锁  ──失败即停，不产漂移图
+  → threeQuarter / side / back / closeup（一律回引 front，refs 落盘）
+  → character-sheet（要求 core 视图齐全且真实出图，不重述文字人设）
+```
+
+节点 `data` 与日志新增 `interfaceByView` / `styleLock` / 参考链校验结果；`characterConsistencyReport()` 汇总「同一正面基准 / 同一风格锁 / 同一出图通道」，`refsWarning` 记录 ComfyUI 实际参考图数为 0 的异常。导演能力 `runPortraitsCapability()` 与画布 `character` 节点同步这套参数，**14 项导演技能清单不变**。
+
+**③ 按视图接口**：`interfaceForView(interfaceByView, viewKey, interfaceId)` 是唯一取用点，优先按视图、其次单个 `interfaceId`，兼容旧调用；`front → character-front`、`sheet → character-sheet`、其余 → `character-view`，新板块未绑定时逐级回退，老配置零回归。
 
 ---
 

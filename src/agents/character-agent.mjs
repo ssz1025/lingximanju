@@ -12,9 +12,15 @@ import { createProviders } from '../core/providers.mjs';
 import { resolveModelSettings } from '../core/app-settings.mjs';
 import { extractCharacters } from '../core/novel.mjs';
 import {
-  MAX_CHARACTERS, buildExtractVars, mergeExtracted, supplementMainCharacters, verifyEvidence,
+  MAX_CHARACTERS, buildExtractVars, mergeExtracted, supplementMainCharacters,
+  verifyEvidence, charNameKey,
 } from '../core/characters.mjs';
 import { sanitizeCharacterList } from '../core/character-names.mjs';
+import {
+  episodeCastSources, episodeCastVars, collectEpisodeCastCandidates, diffEpisodeCast,
+  buildCastCards, applyEpisodeCast,
+} from '../core/episode-cast.mjs';
+import { matchEpisodeCharacters } from '../core/episode-model.mjs';
 
 export const MAX_EXTRACT_LIMIT = MAX_CHARACTERS;
 
@@ -113,6 +119,108 @@ export async function extractProjectCharacters({
 
   return { ok: true, extracted, source, fellBack, message, stats };
 }
+
+/**
+ * 第⑤步「角色和上下文」的每集补齐：检查本集出场人物是否都在项目角色库里，
+ * 缺的直接在本集局部证据上生成角色卡并写入全局角色库，再回写本集 characterIds。
+ *
+ * 与 extractProjectCharacters 的关系：
+ *   - 全书提取仍是项目级手动动作，这里**不重抽全书、不为每集建库**；
+ *   - 只对「本集出现但全局库没有」的名字做增量补齐，语料仅限本集原文 + 剧本；
+ *   - 沿用同一套 LLM intent（charExtract）、证据校验、人名清洗与 mergeExtracted 合并口径。
+ *
+ * 零 Key / 模型失败 / 模型漏人：统一用「带本集原文证据的启发式角色卡」兜底，
+ * 只写可溯源依据不编造人设，并标记 source=heuristic 供后续真实 LLM 覆盖。
+ *
+ * @param {object} opts { project, m, ep, modelId?, log?, signal?, minHits?, mode?:'llm'|'heuristic' }
+ * @returns {Promise<{ok:boolean, added:number, addedNames:string[], skipped:string[],
+ *                    matched:number, cast:string[], source:string, message:string, notes:string[]}>}
+ */
+export async function ensureProjectCharactersForEpisode({
+  project, m, ep, modelId = '', log = () => {}, signal, minHits, mode = 'llm',
+} = {}) {
+  const src = episodeCastSources(ep);
+  const base = { added: 0, addedNames: [], skipped: [], cast: Array.isArray(ep?.characterIds) ? ep.characterIds.slice() : [] };
+  if (!src.hasBody) {
+    return { ok: true, ...base, matched: 0, source: 'none',
+      message: '本集没有原文 / 剧本，未做角色对账', notes: ['本集没有原文或剧本，跳过角色补齐'] };
+  }
+  const existing = Array.isArray(m?.characters) ? m.characters : [];
+  const candidates = collectEpisodeCastCandidates(ep, { minHits });
+  const { matched, missing } = diffEpisodeCast(candidates, existing);
+  // 姓名/别名直匹配是另一条更保守的口径：低频但确实登记过的角色（如只出现一次的
+  // 「沈砚」）也要进本集名单，与候选抽取取并集，避免新逻辑让旧行为倒退。
+  const nameMatched = matchEpisodeCharacters(ep, existing);
+  const matchedIds = [...new Set([...matched.map((x) => x.id), ...nameMatched])];
+  const free = Math.max(0, MAX_CHARACTERS - existing.length);
+  const notes = [];
+
+  if (!missing.length) {
+    const applied = applyEpisodeCast({ m, ep, cards: [], source: 'heuristic', matchedIds });
+    return { ok: true, ...applied, matched: matchedIds.length, source: 'existing',
+      message: `本集识别到 ${applied.cast.length} 位出场角色，均已在项目角色库中（无需新增）`, notes };
+  }
+  if (free <= 0) {
+    const names = missing.map((c) => c.name);
+    const applied = applyEpisodeCast({ m, ep, cards: [], source: 'heuristic', matchedIds });
+    notes.push(`角色库已满 ${MAX_CHARACTERS} 位，未自动挤掉任何已有角色`);
+    return { ok: true, ...applied, matched: matchedIds.length, skipped: names, source: 'full',
+      message: `本集新识别 ${names.length} 位角色（${names.slice(0, 4).join('、')}${names.length > 4 ? '…' : ''}）：项目角色库已满 ${MAX_CHARACTERS} 位，未自动入库，请在角色管理里手动取舍`,
+      notes };
+  }
+
+  const wanted = new Set(missing.slice(0, free).map((c) => charNameKey(c.name)));
+  let cards = [];
+  let source = 'heuristic';
+  if (mode === 'heuristic') {
+    // 显式「只用本集原文证据」：不发起任何模型请求（离线 / 测试 / 批量快速对账）
+    notes.push('按调用方指定：直接用本集原文证据建卡，不调用大模型');
+  } else {
+    try {
+      const providers = createProviders(
+        resolveModelSettings(project, modelId),
+        (level, msg) => log(level, `本集角色补齐 · ${msg}`),
+      );
+      const vars = episodeCastVars(ep, missing.slice(0, free), { title: m?.source?.title || project?.name });
+      log('info', `本集角色补齐 · 第 ${ep?.no} 集缺 ${wanted.size} 位，召回 ${vars.fragments.length} 段本集原文`);
+      const out = await providers.generate('charExtract', vars, signal);
+      if (out?.__fallback || out?.__mock || !Array.isArray(out?.characters) || !out.characters.length) {
+        throw new Error(out?.__mock ? '未配置文本模型' : '模型未返回有效角色');
+      }
+      const checked = verifyEvidence(out.characters, src.text);
+      if (checked.dropped) notes.push(`${checked.dropped} 条无法在本集原文定位的引用已丢弃`);
+      const onlyMissing = checked.characters.filter((c) => wanted.has(charNameKey(c?.name)));
+      const cleaned = sanitizeCharacterList(onlyMissing, { text: src.text, max: free });
+      cards = cleaned.characters.map((c) => ({ ...c, source: 'llm' }));
+      if (!cards.length) throw new Error('模型未返回任何本集缺失角色');
+      source = 'llm';
+      notes.push(`大模型依据本集原文生成 ${cards.length} 位角色设定`);
+    } catch (err) {
+      notes.push(`未用大模型生成（${err.message}），已改用带原文证据的启发式角色卡`);
+      log('warn', `本集角色补齐 · ${err.message}，回退启发式占位设定`);
+      cards = [];
+      source = 'heuristic';
+    }
+  }
+
+  // 模型可能只覆盖了部分缺失者：剩下的一律用启发式占位补齐，保证「本集出现即入库」
+  const covered = new Set(cards.map((c) => charNameKey(c.name)));
+  const rest = missing.slice(0, free).filter((c) => !covered.has(charNameKey(c.name)));
+  if (rest.length) {
+    cards = [...cards, ...buildCastCards(rest, src.text, { cap: free - cards.length })];
+    notes.push(`${rest.length} 位由本集原文证据自动建卡（人设待完善）`);
+  }
+  const applied = applyEpisodeCast({ m, ep, cards, source, matchedIds });
+  const sourceLabel = source === 'llm' ? '大模型生成' : '原文证据占位';
+  return {
+    ok: true, ...applied, matched: matchedIds.length, source,
+    message: `本集新识别 ${applied.added} 位角色已入库全局角色库（${sourceLabel}：${applied.addedNames.slice(0, 4).join('、')}${applied.addedNames.length > 4 ? '…' : ''}）`
+      + `${applied.skipped.length ? ` · ${applied.skipped.length} 位因角色库满 12 位未入库` : ''}`
+      + ` · 本集出场 ${applied.cast.length} 位`,
+    notes,
+  };
+}
+
 // 注册为智能体列表 / 画布节点：可在画布作为「角色提取」节点运行
 defineAgent({
   id: 'character-extractor',

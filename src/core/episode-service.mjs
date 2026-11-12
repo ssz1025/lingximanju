@@ -35,7 +35,8 @@ export function ensureEpisodeBody(project, ep) {
 export async function generateEpisodeScript(project, m, ep, opts = {}) {
   ensureEpisodeBody(project, ep);
   const log = opts.log || (() => {});
-  const providers = createProviders(resolveModelSettings(project, opts.modelId), log);
+  const cfg = resolveModelSettings(project, opts.modelId);
+  const providers = createProviders(cfg, log);
   // 上下文里带上一集结尾、本集钩子、下一集走向与时长预算：
   // 单集独立生成最容易出现「每集都像第一集」，这些字段让编剧智能体知道自己在整部剧的哪一格。
   const vars = buildScriptVars(project, m, ep, opts);
@@ -44,6 +45,13 @@ export async function generateEpisodeScript(project, m, ep, opts = {}) {
     out = await providers.generate('screenplay', vars);
   } catch (err) {
     throw new Error(`剧本生成失败：${err.message}`);
+  }
+  // 真实模型调用失败时会带上模板兜底结果（__fallbackError）。剧本是核心产物，
+  // 不能用内置模板冒充「生成成功」写回项目：直接判失败，由路由把原因交给前端弹窗。
+  // 零 Key / 未配置模型走的是 mock 模式，本来就没有真实调用，仍正常用内置模板。
+  if (providers.mode === 'openai' && out?.__fallbackError) {
+    const label = cut(cfg.model || cfg.provider, 48) || '所选模型';
+    throw new Error(`模型「${label}」调用失败：${cut(out.__fallbackError, 180)}。剧本未写入，请检查模型档案后重试，或在「本次剧本模型」里换一个模型`);
   }
   const source = providers.mode === 'openai' && !out?.__fallback ? 'llm' : 'mock';
   const script = normalizeEpisodeScript(out, { project, m, ep, vars, source, provider: providers.mode });

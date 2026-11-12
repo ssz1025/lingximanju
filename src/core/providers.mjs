@@ -15,6 +15,7 @@ import { aestheticPrompt } from './director-styles.mjs';
 import {
   SCREENPLAY_SCHEMA, SCREENPLAY_GUIDE, SCREENPLAY_PROJECT_GUIDE, SCREENPLAY_FORMAT_GUIDE,
   screenplayGuide, isEpisodeScreenplay, enrichScreenplay, guessInterior, parseScriptLine,
+  sceneCodeFor, continuityOf,
 } from './screenplay.mjs';
 
 // 剧本写作准则的单一来源在 core/screenplay.mjs；这里继续导出，
@@ -54,6 +55,8 @@ const SCHEMAS = {
   coverPromptDesign: '封面提示词设计师：把项目资料、用户画面要求与参考图，设计优化成一句完整、连贯、有画面感的中文封面描述（40~120 字，须涵盖主体、场景/动作、光影、构图、风格氛围，是一句通顺的话而不是关键词堆砌），prompt 末尾可追加少量英文质量词（如 cinematic movie poster, highly detailed, no text）。输出 {prompt:string(上述完整描述句), negative:string(负向提示词，含 text/watermark 等), style:string}（输出该 JSON 对象本身，不要加外层键名包裹）',
   // 封面创作助手对话：回复 + 可直接使用的提示词 + 用户可点击的下一步建议
   coverChat: '封面创作助手对话：{reply:string(对用户的自然回复，一两句话), prompt:string(可直接喂 SDXL 的完整正向提示词，融合项目资料、对话要求与参考图), negative:string(负向提示词), suggestions:[string,2~3条用户可直接点击的下一步建议]}（输出该 JSON 对象本身，不要加外层键名包裹）',
+  // 已上传小说时：先从原著采样节选概括出「故事概略」，再作为故事简介与项目信息的创作依据
+  storySynopsis: '故事概略：{synopsis:string(150~300 字，依据输入中的「原著节选」概括主线、主角、核心冲突与走向；只写节选中能找到的内容，不要编造人名与情节，简体中文，一段连贯文字，不要分点)}',
   // 项目信息 AI 补全：按一句话构想产出创作设定各字段（bible）
   storyIdea: '项目信息补全：{title, genre, audience, logline, tone, artStyle, firstEpisodeTheme, worldview}（logline 为一句话简介，worldview 200 字以内）',
   // AI 生成小说：先出分章大纲，再逐章写正文
@@ -332,9 +335,20 @@ function endSentence(t = '') {
   return /[。！？…」”!?]$/.test(s) ? s : `${s}。`;
 }
 
+/** v3 表演策略：必须是演员能立刻做出来的可见动作，不写「愤怒 / 低声」这类抽象情绪 */
+const MOCK_CUES = ['身体前倾', '停下手里的动作', '把视线移开', '转过身面对对方', '把手里的东西放下'];
+const INTERIOR_SHORT = { 内景: '内', 外景: '外', 内外景: '内外' };
+
+/** 一段只写一个可见变化：取第一个分句，太短时退回整句 */
+function oneVisibleChange(t = '') {
+  const s = String(t || '').replace(/[。！？…]+$/g, '').trim();
+  const first = s.split(/[，,、；;]/)[0].trim();
+  return endSentence(clip(first.length >= 4 ? first : s, 56));
+}
+
 /**
- * 零 Key 的单场生成：把 partText 转写成场次对象。
- * 行序遵循「场次头 → 动作 / 旁白 / 画面 → 对白」，原文引号内的句子直接当对白。
+ * 零 Key 的单场生成：把 partText 转写成场次对象（v3 可拍摄契约）。
+ * 行序遵循「场次头 → 圆括号动作 / [VO] → 带表演策略的对白 → [连续性]」。
  */
 function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fallbackLocation = '', theme }) {
   const sentences = splitSentences(partText);
@@ -351,6 +365,8 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
     return local;
   })();
   const location = detected || clip(cleanSourceLabel(fallbackLocation || ep.title), 24) || '未指定场景';
+  // 场次头用「·」分段，地点里的原名分隔符必须换掉，否则解析会把集名拆成地点 / 时间
+  const cleanLoc = location.replace(/\s*[·・]\s*/g, ' ').replace(/\s+/g, ' ').trim() || '未指定场景';
   // 时间：本场原文自己写了「夜里 / 午后」就以它为准（同一集本来就可以跨时间），
   // 没写才沿用本集统一结论，再没有才按集号轮换。
   const time = timeHint(source) || String(ep.timeLabel || '')
@@ -362,7 +378,8 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
   const speakers = (present.length ? present : [cast[index % Math.max(1, cast.length)]].filter(Boolean)).slice(0, 3);
   const lead = speakers[0]?.name || '旁白';
 
-  const lines = [`【${time} · ${location}】`];
+  const sceneCode = sceneCodeFor(Number(ep.no) || 1, index + 1);
+  const lines = [`## ${sceneCode} ${INTERIOR_SHORT[interior] || '内外'} · ${cleanLoc} · ${time}`];
   let dialogue = 0;
   sentences.slice(0, 10).forEach((s, si) => {
     // 引号里就是台词时用 pickQuotes；「说完就停住」这种句子（「埋了才好记。」）缺少问号 /
@@ -379,7 +396,10 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
         || speakerBefore(source, quotes[0], cast)
         || speakerBefore(episodeText, quotes[0], cast)
         || speakers.find((c) => s.includes(c.name))?.name || lead;
-      for (const q of quotes.slice(0, 2)) { lines.push(`${who}：「${clip(q, 60)}」`); dialogue += 1; }
+      for (const q of quotes.slice(0, 2)) {
+        lines.push(`${who}（${MOCK_CUES[dialogue % MOCK_CUES.length]}）：${clip(q, 60)}`);
+        dialogue += 1;
+      }
       // 去掉引号后剩下的动作描写：顺手清掉「低声说：」「刘左皱眉：」这类引导语残片
       const rest = s.replace(/[「“"][^」”"]*[」”"]/g, '')
         .replace(/[^，。；！？：]{0,10}[：:]/g, '')
@@ -387,12 +407,12 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
         .replace(/[，、；：]+(?=。)/g, '')
         .replace(/^[\s，。、；：!？—-]+|[\s，。、；：!？—-]+$/g, '')
         .trim();
-      if (rest.length >= 6) lines.push(`动作：${endSentence(clip(rest, 56))}`);
+      if (rest.length >= 6) lines.push(`（${oneVisibleChange(rest)}）`);
       return;
     }
-    if (si % 3 === 2) lines.push(`画面：${endSentence(clip(s, 56))}`);
-    else if (si % 3 === 1) lines.push(`旁白：${endSentence(clip(s, 56))}`);
-    else lines.push(`动作：${endSentence(clip(s, 56))}`);
+    // 只有少量句子用 [VO]（一集 ≤5 行），其余一律落成「一段一个可见变化」的动作行
+    if (si % 6 === 1 && s.length >= 8) lines.push(`[VO] 旁白：${endSentence(clip(s, 56))}`);
+    else lines.push(`（${oneVisibleChange(s)}）`);
   });
   // 场次收尾：本集最后一场落到 hook（有引号就写成台词，没有就当画面悬念）
   const isLastOfEpisode = index === total - 1;
@@ -407,7 +427,8 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
     const hq = pickQuotes(ep.hook);
     if (hq.length && !dup(hq[0])) {
       const who = speakerBefore(String(ep.hook), hq[0], cast) || lead;
-      lines.push(`${who}：「${clip(hq[0], 60)}」`); dialogue += 1;
+      lines.push(`${who}（${MOCK_CUES[dialogue % MOCK_CUES.length]}）：${clip(hq[0], 60)}`);
+      dialogue += 1;
     }
     else if (!hq.length) {
       // hook 可能被上游按字数硬截断，留下「」沈砚把……「那你告诉」这种断引号：
@@ -415,15 +436,14 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
       const h = String(ep.hook).replace(/[「」“”"]/g, '')
         .replace(/[^，。；！？：]{0,10}[：:]/g, '')
         .replace(/^[\s，。、；：!？—-]+/, '').trim();
-      if (h && !dup(h)) lines.push(`画面：${endSentence(clip(h, 56))}`);
+      if (h && !dup(h)) lines.push(`（${oneVisibleChange(h)}）`);
     }
   }
-  // 行数太少且没有画面行时补一条，保证「每场都能被拍出来」；已有画面就不重复堆。
-  // 首场可以用本集摘要起一个概述性画面；后面几场改用空镜，避免每场都写同一句摘要。
-  if (lines.length < 4 && !lines.some((l) => /^画面[:：]/.test(l))) {
+  // 正文太薄时补一条可见动作，保证「每场都能被拍出来」；与已有句子重复就改用空镜。
+  if (lines.length < 5) {
     const pic = index === 0 ? clip(ep.summary || source || '环境保持连续', 56) : '';
-    if (pic && !dup(pic)) lines.push(`画面：${endSentence(pic)}`);
-    else lines.push(`画面：${location}空镜 · ${time}，声音先入。`);
+    if (pic && !dup(pic)) lines.push(`（${oneVisibleChange(pic)}）`);
+    else lines.push(`（${cleanLoc}空镜，${time}的光先落进画面。）`);
   }
 
   const turnLine = sentences.find((s) => TURN_HINT.test(s));
@@ -474,10 +494,18 @@ function mockScene({ partText = '', ep = {}, index = 0, total = 1, cast = [], fa
     : index === 0 ? '建置 → 扰动'
       : isLastOfEpisode ? '逼到墙角 → 抛出钩子'
         : '试探 → 施压 → 揭示';
+  // 本集末场留一条跨集状态：只写可核对的空间 / 道具 / 时间，不编造剧情，
+  // buildScriptVars 会把它作为 prevContinuity 注入下一集。
+  if (isLastOfEpisode) {
+    const state = props.length ? `${props[0]}留在${cleanLoc}` : `人物仍留在${cleanLoc}`;
+    lines.push(`[连续性] ${state}（${time}）。`);
+  }
   return {
     id: `SC${String(index + 1).padStart(2, '0')}`,
     episodeNo: Number(ep.no) || 1,
     no: index + 1,
+    sceneCode,
+    continuity: continuityOf(lines),
     location, time, interior,
     durationSec: Math.max(12, Math.min(90, lines.length * 5)),
     characters: speakers.map((c) => c.name).filter(Boolean),
@@ -597,8 +625,17 @@ function mockEpisodeScreenplay(vars = {}, theme) {
     partText: part, ep, index: i, total: target, cast,
     fallbackLocation: clip(chapters[i] || ep.title || vars.logline, 24), theme,
   }));
-  // 首场承接上集结尾：把 prevRecap 写成一句旁白，避免每集都像第一集
-  if (vars.prevRecap && scenes[0]) scenes[0].script.splice(1, 0, `旁白：承接上集——${clip(vars.prevRecap, 50)}`);
+  // 首场承接上集结尾：prevRecap 写成 [VO]，prevContinuity 写成可核对的状态行，
+  // 避免每集都像第一集、也避免把上一集的道具 / 伤势弄丢。
+  if (scenes[0]) {
+    const lead = [];
+    if (vars.prevRecap) lead.push(`[VO] 旁白：承接上集——${clip(vars.prevRecap, 50)}`);
+    for (const state of (Array.isArray(vars.prevContinuity) ? vars.prevContinuity : []).slice(0, 3)) {
+      lead.push(`[连续性] ${clip(state, 60)}`);
+    }
+    scenes[0].script.splice(1, 0, ...lead);
+    scenes[0].continuity = continuityOf(scenes[0].script);
+  }
   return {
     title: clip(ep.title || `第 ${ep.no} 集`, 80),
     genre: clip(vars.project?.genre || theme.genre, 40),
@@ -957,6 +994,16 @@ function mockGenerate(intent, vars = {}) {
           : [`我想要${missing[0] || '主色'}：…`, '参考王家卫的都市暧昧感', '先看看已收集的内容'],
       };
     }
+    case 'storySynopsis': {
+      // 零 Key / 模型回退时也要给一段「真的来自原著」的概略：按开头 / 中段 / 结尾均匀取样，
+      // 而不是用主题模板编一个与用户小说无关的故事。
+      const units = splitSentences(String(vars.novelExcerpt || '').replace(/\s+/g, ' ').trim())
+        .map((x) => String(x || '').trim()).filter(Boolean);
+      const marks = [0, 0.2, 0.4, 0.6, 0.8, 0.98]
+        .map((r) => Math.min(units.length - 1, Math.floor(units.length * r)));
+      const picked = [...new Set([...new Set(marks)].map((i) => clip(units[i], 88)))];
+      return { synopsis: clip(picked.join('') || '', 300) || '原著节选内容过短，无法生成故事概略', __mock: true };
+    }
     case 'storyIdea': {
       // 项目信息 AI 补全：一句话构想 → 创作设定各字段；零 Key 时用主题模板确定性生成
       const name = String(vars.title || '').trim() || shortTitle(idea) || '未命名项目';
@@ -1216,7 +1263,9 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     // 单次调用没显式指定时，回落到路由层挂在 cfg 上的「本次接口」（body.interfaceId）。
     // 这样所有生成入口只需把请求级选择放进 config，不必逐层改业务函数签名。
     const interfaceId = scopeOpts.interfaceId || comfy?.requestInterfaceId || '';
-    const resolved = resolveInterface(comfy || {}, { kind, scope, interfaceId });
+    const resolved = resolveInterface(comfy || {}, {
+      kind, scope, interfaceId, fallbackScope: scopeOpts.fallbackScope || '',
+    });
     if (!resolved.workflow) throw new Error(`板块 ${scope} 没有可用的 ComfyUI 接口文件`);
     let workflow;
     try { workflow = parseWorkflow(resolved.workflow, `${kind} 工作流`); }
@@ -1370,6 +1419,9 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     // 式(6) 检索是确定性算法，不经过 LLM：既避免长篇原著撑爆上下文，也保证 Mock/真实模型行为一致
     if (intent === 'context') return localContext(vars);
     let fellBack = false;
+    // 真实模型失败的原始原因要随回退结果带出去：剧本链路据此判定「这不是一次成功的生成」，
+    // 而不是像以前那样静默写入模板剧本并回报成功。其它 intent 依旧照常消费 mock 结果。
+    let fallbackError = '';
     // 导演风格统一兜底：调用方（分镜 / 场景 / 事件）没显式传 aesthetic 时，
     // 用本项目生效的风格补上，避免「有的智能体吃到了风格、有的没吃到」。
     if (aesthetic && !vars.aesthetic) vars = { ...vars, aesthetic };
@@ -1428,6 +1480,7 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
           promptTokens: 0, completionTokens: 0, totalTokens: 0, calls: 1, estimated: false, fallback: true });
         log('warn', `模型调用失败，已回退 Mock：${err.message}`);
         fellBack = true;
+        fallbackError = String(err?.message || '未知错误');
       }
     }
     await delay(140 + (hash(intent + JSON.stringify(vars)) % 260), signal);
@@ -1439,8 +1492,9 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     // 显式打标让路由把 source 定为 heuristic，前端也能如实提示「配置模型后可重提」，
     // 避免把模板角色冒充 AI 提取结果写进项目（同时保证后续真实 LLM 可以覆盖占位值）。
     if (mode === 'mock' && intent === 'charExtract') return { ...shaped, __mock: true };
-    // 回退显式化：真实模型失败才打 __fallback（Mock 模式本身不算「失败回退」）
-    return fellBack ? { ...shaped, __fallback: true } : shaped;
+    // 回退显式化：真实模型失败才打 __fallback（Mock 模式本身不算「失败回退」）。
+    // __fallbackError 供调用方决定是否把这次生成判为失败并提示用户。
+    return fellBack ? { ...shaped, __fallback: true, __fallbackError: fallbackError } : shaped;
   }
 
   async function image(opts = {}, signal) {
@@ -1473,10 +1527,17 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
     // 主路径：本地 ComfyUI「导出(API)」工作流
     if (hasInterface('image')) {
       try {
-        // 角色多视图提示词已含视图角度与风格锁，不再叠加景别/机位默认值；海报（封面）同理
-        const fullPrompt = ['character-view', 'character-sheet', 'poster'].includes(kind)
-          ? `${finalPrompt}｜${styleName}`
-          : `${finalPrompt}｜${size}｜${angle}｜${movement}｜${styleName}`;
+        // 角色多视图提示词已含视图角度、完整四肢规约与全片风格锁，
+        // 不再叠加景别/机位默认值，也不再在末尾追加内部风格枚举名——
+        // 「cinematic」这类词会被工作流当成「电影场景」而把设定图带偏。
+        // 正面基准图单独走 character-front 板块，可配置专用工作流。
+        const isCharacterArt = kind === 'character-view' || kind === 'character-sheet';
+        const effectiveScope = (kind === 'character-view' && String(opts.view || '') === 'front')
+          ? 'character-front'
+          : (IMAGE_SCOPE_BY_KIND[kind] || 'keyframe');
+        const fullPrompt = isCharacterArt ? finalPrompt
+          : (kind === 'poster' ? `${finalPrompt}｜${styleName}`
+            : `${finalPrompt}｜${size}｜${angle}｜${movement}｜${styleName}`);
         const result = await runComfy('image', {
           prompt: fullPrompt, negative: finalNegative,
           seed: `${kind}-${seed}-${shotNo}`, style: styleName, shotNo,
@@ -1484,8 +1545,9 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
           imageRefs: refBuffers,
           imageBuffer: refBuffers[0]?.buffer, imageName: refBuffers[0]?.name,
         }, signal, { onPromptId: opts.onPromptId }, {
-          scope: IMAGE_SCOPE_BY_KIND[kind] || 'keyframe',
+          scope: effectiveScope,
           interfaceId: opts.interfaceId,
+          fallbackScope: effectiveScope === 'character-front' ? 'character-view' : '',
         });
         return {
           url: result.primary.url,
@@ -1493,7 +1555,7 @@ export function createProviders(settings = {}, log = () => {}, onUsage = null) {
           provider: 'comfyui', promptId: result.promptId,
           source: 'comfyui', isRealImage: true,
           workflow: String(result.interfaceName || comfy.imageWorkflowName || 'image'),
-          interfaceId: result.interfaceId, scope: IMAGE_SCOPE_BY_KIND[kind] || 'keyframe',
+          interfaceId: result.interfaceId, scope: effectiveScope,
           applied: result.applied.length, assets: result.assets,
           refsUsed: refBuffers.length, refsRequested: refUrls.length,
         };

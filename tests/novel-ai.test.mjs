@@ -85,11 +85,9 @@ test('AI 补全项目信息：只补空字段，不覆盖用户已填内容', as
   assert.equal(r2.body.filled, 0, '已补全的项目不会被 AI 覆盖');
 
   const r3 = await run(handleManagement, 'POST', `/api/projects/${p.id}/bible/ai`, { idea: '' });
-  // 一键生成不强制先写构想：为空时退回项目名 / 原著标题作为依据，仍可正常响应
-  assert.equal(r3.status, 200, '构想为空时回退项目名作为依据');
-  assert.equal(r3.body.filled, 0, '已完整的项目不再重复补全');
-  assert.equal(r3.body.name, '补全测试', '响应带项目当前名称，便于前端即时同步');
-  assert.ok(!r3.body.renamedTo, '模板补全不改用户起的项目名');
+  // 一键生成必须以故事简介为依据：空简介直接拒绝，不再拿项目名 / 原著标题凑数
+  assert.equal(r3.status, 400, '故事简介为空时拒绝生成');
+  assert.match(r3.body.error, /故事简介/, '错误文案要指明缺的是故事简介');
 
   // 显式「一键生成」（regenerate）在无真实模型产出时仍然不得覆盖用户内容 / 改项目名
   const r4 = await run(handleManagement, 'POST', `/api/projects/${p.id}/bible/ai`, { idea: '雨夜里的侦探', regenerate: true });
@@ -133,4 +131,28 @@ test('AI 生成小说：标准项目与非创作项目被拒绝', async () => {
   const r = await run(handleManagement, 'POST', `/api/projects/${p.id}/novel/ai`, { mode: 'outline', idea: 'x' });
   assert.equal(r.status, 400);
   assert.match(r.body.error, /创作项目/);
+});
+
+test('按小说一键生成：空简介放行，Mock 只补空字段而故事概略照常写入', async () => {
+  const { body: p } = await createProject({ kind: 'novel', name: '小说补全测试' });
+  const { loadProject, saveProject } = await import('../src/core/store.mjs');
+  const proj = loadProject(p.id);
+  const text = '第1章 开端。雨夜里的侦探收到匿名信，追查一桩被遗忘的旧案。'.repeat(20)
+    + '第2章 尾声。天亮时真相浮出水面。';
+  proj.management.source = { title: '雨夜来信', text, chapterCount: 2, totalChars: text.length };
+  saveProject(proj);
+
+  // 先按普通简介补全，让 bible 各字段都有值
+  const r1 = await run(handleManagement, 'POST', `/api/projects/${p.id}/bible/ai`, { idea: '雨夜里的侦探收到匿名信' });
+  assert.ok(r1.body.filled >= 5);
+  const before = { ...loadProject(p.id).management.bible };
+
+  const r2 = await run(handleManagement, 'POST', `/api/projects/${p.id}/bible/ai`, { idea: '', fromNovel: true });
+  assert.equal(r2.status, 200, '有小说时不再因空简介拒绝');
+  assert.ok(String(r2.body.synopsis || '').length > 30, '按原著生成了故事概略');
+  const after = loadProject(p.id).management.bible;
+  for (const k of ['genre', 'audience', 'logline', 'tone', 'artStyle', 'worldview']) {
+    assert.equal(after[k], before[k], `Mock 模板不得覆盖已有 ${k}`);
+  }
+  assert.equal(after.synopsis, r2.body.synopsis, '新字段 synopsis 仍写入');
 });

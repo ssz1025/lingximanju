@@ -5,10 +5,12 @@
  *   ① 全工作台只有一个「当前剧集」，顶部条 / 流水线 / 区头都对齐它；
  *   ② 切换剧集时按集存档界面状态，不把上一集的草稿串过来；
  *   ③ ④ 之后的步骤只看当前剧集，其余集收进折叠列表；
- *   ④ 角色库是唯一例外：已存在就沿用，切集不重抽、不每集另建。
+ *   ④ 角色库是唯一例外：已存在就沿用，切集不重抽、不每集另建；
+ *   ⑤ 第 ⑤ 步默认只展示正在处理的剧集，点「展示全部剧集」才列出其它集。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 const store = new Map();
 globalThis.localStorage = {
@@ -19,7 +21,7 @@ globalThis.localStorage = {
 const {
   activeEpisodeNo, setActiveEpisode, episodeScopeState, activeEpisodeBarHTML,
   sharedCharactersHTML, scriptConsoleHTML, episodeFlowHTML, episodeFlowIntroHTML,
-  stepSectionHTML, WORKSHOP_STEPS,
+  stepSectionHTML, WORKSHOP_STEPS, setFlowShowAll, flowScopeState,
 } = await import('../public/project-view.js');
 
 const script = (n) => ({ source: 'llm', stats: { sceneCount: n }, scenes: Array.from({ length: n }, () => ({})) });
@@ -151,4 +153,88 @@ test('没有分集时不渲染当前剧集条，也不报错', () => {
   p.management.episodes = [];
   assert.equal(activeEpisodeBarHTML(p, p.management), '');
   assert.equal(activeEpisodeNo(p.management), 0);
+});
+
+/* ---- 第 ⑤ 步「角色与上下文」：默认只看正在处理的剧集 ---- */
+const rowTags = (html) => html.match(/<div class="fl-row[^>]*>/g) || [];
+const visibleRows = (html) => rowTags(html).filter((tag) => !/\shidden/.test(tag));
+
+function twoSeasonProject() {
+  const p = project();
+  p.management.episodes[2].season = 2; // 第 3 集归入第 2 季，验证其它季整组隐藏
+  return p;
+}
+
+test('⑤ 默认只显示正在处理的剧集：其它集与其它季组都隐藏', () => {
+  const p = twoSeasonProject();
+  setActiveEpisode(p, 2);
+  setFlowShowAll(false);
+  const html = episodeFlowHTML(p, p.management, 'context', { onlyActive: true });
+  assert.equal(rowTags(html).length, 3, '所有行仍在 DOM，只是不展示');
+  assert.equal(visibleRows(html).length, 1);
+  assert.match(visibleRows(html)[0], /data-ep-row="2"/);
+  assert.equal((html.match(/class="fl-panel"/g) || []).length, 1, '本集任务面板仍展开');
+  assert.match(html, /当前只显示正在处理的 第 1 季 第 2 集/);
+  assert.match(html, /▤ 展示全部剧集（另有 2 集）/);
+  assert.match(html, /<div class="fl-season-group" data-fl-other hidden>[\s\S]*?第 2 季/);
+  assert.equal(flowScopeState().showAll, false);
+  assert.ok(!/undefined|NaN/.test(html));
+});
+
+test('⑤ 点「展示全部剧集」后全部集可见，文案切到收起态且跨渲染保留', () => {
+  const p = twoSeasonProject();
+  setActiveEpisode(p, 2);
+  setFlowShowAll(true);
+  const html = episodeFlowHTML(p, p.management, 'context', { onlyActive: true });
+  assert.equal(visibleRows(html).length, 3);
+  assert.equal((html.match(/data-fl-other hidden/g) || []).length, 0);
+  assert.match(html, /▴ 收起其它剧集/);
+  assert.match(html, /已展开全部剧集/);
+  assert.match(html, /aria-pressed="true"/);
+  assert.equal(flowScopeState().showAll, true);
+  // 再渲染一次（等价于 SSE 触发的重绘）仍是展开态
+  assert.equal(visibleRows(episodeFlowHTML(p, p.management, 'context', { onlyActive: true })).length, 3);
+  setFlowShowAll(false);
+});
+
+test('⑥⑦ 不传 onlyActive：整表照旧全量展示，也不出现切换按钮', () => {
+  const p = twoSeasonProject();
+  setActiveEpisode(p, 1);
+  const html = episodeFlowHTML(p, p.management, 'storyboard');
+  assert.equal(visibleRows(html).length, 3);
+  assert.ok(!/data-fl-other|data-fl="toggle-all"|data-fl-text/.test(html));
+});
+
+test('切换按钮不占 data-act 命名空间；只有一集时不出现', () => {
+  const p = twoSeasonProject();
+  setActiveEpisode(p, 1);
+  setFlowShowAll(false);
+  const html = episodeFlowHTML(p, p.management, 'context', { onlyActive: true });
+  const btn = html.match(/<button[^>]*data-fl="toggle-all"[^>]*>/)?.[0] || '';
+  assert.ok(btn);
+  assert.ok(!/data-act/.test(btn), '新入口必须用 data-fl，避免改动 63 个 data-act 基线');
+  assert.match(btn, /aria-pressed="false"/);
+  const one = project();
+  one.management.episodes = [one.management.episodes[0]];
+  const single = episodeFlowHTML(one, one.management, 'context', { onlyActive: true });
+  assert.ok(!/data-fl="toggle-all"/.test(single));
+  assert.equal(visibleRows(single).length, 1);
+});
+
+test('切到另一集后，可见的仍只有新的当前集', () => {
+  const p = twoSeasonProject();
+  setFlowShowAll(false);
+  setActiveEpisode(p, 3);
+  const html = episodeFlowHTML(p, p.management, 'context', { onlyActive: true });
+  assert.equal(visibleRows(html).length, 1);
+  assert.match(visibleRows(html)[0], /data-ep-row="3"/);
+  assert.equal(flowScopeState().activeNo, 3);
+});
+
+test('⑤ 装配确实启用 onlyActive；CSS 显式覆盖 flex 行上的 hidden', () => {
+  const src = readFileSync(new URL('../public/project-view.js', import.meta.url), 'utf8');
+  assert.match(src, /episodeFlowHTML\(p, m, 'context', \{ onlyActive: true \}\)/);
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.fl-row\[hidden\][^{]*\{[^}]*display:\s*none/,
+    '.fl-row 是 display:flex，漏掉这条会让 hidden 完全失效');
 });

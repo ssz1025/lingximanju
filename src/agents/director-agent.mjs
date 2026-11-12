@@ -200,13 +200,13 @@ async function runCharactersCapability({ project, m, settings, modelId, log, sig
  * 默认 scope='all'（5 视图）+ 定妆板：一次把视频需要的角度备齐，避免下游取不到脸部参考。
  * 单张失败不阻断能力整体：MOCK/缺失的图由完整度如实汇总，导演报告里能看出缺什么。
  */
-async function runPortraitsCapability({ project, m, settings, modelId, log, signal }) {
+async function runPortraitsCapability({ project, m, settings, modelId, log, signal, interfaceByView = null }) {
   const chars = m.characters || [];
   if (!chars.length) return { status: 'skipped', reason: '还没有角色，跳过定妆生成' };
   const r = await ensureProjectPortraits({
     project, m,
     scope: 'all', onlyMissing: true, sheet: true,
-    modelId,
+    modelId, interfaceByView,
     signal,
     log: (level, msg) => log(level, `导演 · ${msg}`),
     save: () => {},
@@ -231,6 +231,8 @@ async function runPortraitsCapability({ project, m, settings, modelId, log, sign
     styleLock: r.styleLock?.label || '',
     videoReady: ready,
     portraitStatus: r.portraitStatus,
+    consistencyLabel: r.consistencyLabel || '',
+    inconsistentCount: Object.values(r.consistency || {}).filter((x) => !x?.ok).length,
     reason: r.error || reason,
   };
 }
@@ -375,7 +377,10 @@ export async function runDirector({
       if (capId === 'bible') r = await runBibleCapability({ project, m: m2, idea, settings, providers, log, signal });
       else if (capId === 'treatment') r = await runTreatmentCapability({ project, m: m2, settings, providers, log, signal, force });
       else if (capId === 'characters') r = await runCharactersCapability({ project, m: m2, settings, modelId, log, signal });
-      else if (capId === 'portraits') r = await runPortraitsCapability({ project, m: m2, settings, modelId, log, signal });
+      else if (capId === 'portraits') r = await runPortraitsCapability({
+        project, m: m2, settings, modelId, log, signal,
+        interfaceByView: settings?.portraitInterfaceByView || null,
+      });
       else if (capId === 'voices') r = await runVoicesCapability({ project, m: m2, settings, modelId, log, signal });
       else r = { status: 'skipped', reason: '未实现的能力' };
       capabilities.push({ id: capId, label: cap.label, ...r });

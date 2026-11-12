@@ -64,12 +64,16 @@ export const kindOf = (v) => (WORKFLOW_KINDS.includes(v) ? v : 'image');
  * 例如封面用文生图、角色定妆用多参考生图、关键帧用图生图。
  */
 export const MEDIA_SCOPES = [
-  'cover', 'character', 'character-view', 'character-sheet',
+  'cover', 'character',
+  // character-front 单独成板块：正面全身基准图是其余视图与定妆板的身份锚点，
+  // 经常需要一份「完整四肢 / 全身 / 不裁切」专用工作流，不能与其它视图共用一个档案。
+  'character-front', 'character-view', 'character-sheet',
   'keyframe', 'storyboard', 'transition', 'poster', 'grid',
   'video', 'voice',
 ];
 export const SCOPE_KIND = {
-  cover: 'image', character: 'image', 'character-view': 'image', 'character-sheet': 'image',
+  cover: 'image', character: 'image', 'character-front': 'image',
+  'character-view': 'image', 'character-sheet': 'image',
   keyframe: 'image', storyboard: 'image', transition: 'image', poster: 'image', grid: 'image',
   video: 'video', voice: 'audio',
 };
@@ -500,6 +504,15 @@ export function resolveInterface(cfg = {}, opts = {}) {
     entry = byId(cfg.scopeBindings[scope]);
     if (entry) via = 'scope';
     else warnings.push(`板块 ${scope} 绑定的接口档案不存在，已回退默认接口`);
+  }
+  // 新拆出来的细分板块（如「角色正面基准图」）未单独绑定时，沿用其父板块的绑定：
+  // 老项目零配置升级后仍能走原来那份角色多视图工作流，不会突然退回类别默认。
+  if (!entry && opts.fallbackScope && cfg?.scopeBindings?.[opts.fallbackScope]) {
+    entry = byId(cfg.scopeBindings[opts.fallbackScope]);
+    if (entry) {
+      via = 'scope-fallback';
+      warnings.push(`板块 ${scope} 未单独绑定接口，已沿用「${opts.fallbackScope}」的绑定`);
+    }
   }
   if (!entry) {
     entry = byId(cfg?.[`${kind}ActiveId`]);

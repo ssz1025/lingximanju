@@ -10,8 +10,10 @@
  * 画布视图仍保留，顶栏一键切换（高级编辑）。
  * 零第三方依赖，原生 ESM。
  * ==========================================================================*/
-import { ensureModelPicker, withModelId } from './model-picker.js';
-import { ensureInterfacePicker, withInterfaceId } from './interface-picker.js';
+import { ensureModelPicker, withModelId, modelRoster } from './model-picker.js';
+import { mountScriptModelBar } from './script-model-bar.js';
+import { showScriptError } from './script-error-dialog.js';
+import { ensureInterfacePicker, withInterfaceId, withCharacterInterface } from './interface-picker.js';
 import * as SV from './source-view.js';
 import * as PMODEL from './project-model.js';
 import { collectProjectAssets } from './project-sidebar.js';
@@ -27,10 +29,11 @@ import { filmTimelineHTML, stepStatsTableHTML } from './deliver-panel.js';
 import { esc, cut, num, fmtNum } from './utils.js';
 import { chatCount } from './chat-counts.js';
 
-/** 角色出图请求：并上「本次使用的接口」，定妆板单独按 character-sheet 记忆 */
-const withCharImage = (body = {}) => withInterfaceId(
-  body?.view === 'sheet' ? 'character-sheet' : 'character-view',
+/** 角色出图请求：正面基准图有独立工作流板块，批量生成时按视图分别下发接口 */
+const withCharImage = (body = {}) => withCharacterInterface(
   withModelId('chars', body),
+  body?.view === 'sheet' ? 'character-sheet'
+    : body?.view === 'front' ? 'character-front' : 'character-view',
 );
 const withCoverImage = (body = {}) => withInterfaceId('cover', withModelId('cover', body));
 
@@ -43,7 +46,13 @@ async function api(path, body, method) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || data.message || `HTTP ${res.status}`);
+    // 批量剧本全失败会带 results 明细，交给失败弹窗逐集展示
+    err.status = res.status;
+    err.results = Array.isArray(data.results) ? data.results : [];
+    throw err;
+  }
   return data;
 }
 
@@ -105,8 +114,13 @@ const ui = {
   navCollapsed: readNavPref(),    // 制作步骤窄栏：收起为 40px 状态轨 / 展开为 190px 步骤栏
   scrollTo: null,                 // 导航点击后滚动锚点（渲染后消费并清空）
   info: {},                       // 项目信息编辑稿（bible 字段）
+  // ① 故事简介草稿：AI 一键生成的必填依据。独立存档，不与第②步「AI 生成小说」的
+  // ui.ai.idea 共用——两个输入框会同时存在于 DOM，共用会让用户写的内容互相覆盖。
+  synopsis: null,                 // null = 跟随 bible.logline
   projectName: null,              // 项目名称编辑稿（null = 未改动，跟随项目名）
   skipCapture: false,             // AI 补全等服务端改写场景：跳过一次 DOM 捕获，避免旧输入框值盖回新数据
+  // ② 故事来源二选一：同一时刻只展示一种来源表单（'upload' | 'ai'），默认推荐上传小说
+  storySource: 'upload',
   upload: { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 },
   ai: { open: false, idea: '', chapterCount: 3, chapterChars: 800, outline: null, source: '', message: '', busy: false, busyText: '' },
   // 导演 Agent：技能选择、一句话构想、SSE 阶段进度（busy 由 app.js 的 state.directorBusy 统一持有）
@@ -117,6 +131,9 @@ const ui = {
   epStep: { busyNo: null, busyStep: '', batchBusy: '' },
   // 当前剧集（跨步骤共享）：第④步之后所有任务都挂在这一集上，换集 = 换一套任务
   activeNo: 0,
+  // ⑤ 角色与上下文：默认只显示正在处理的剧集，点「展示全部剧集」才列出其它集。
+  // 跨渲染保留但不写 localStorage —— 刷新回到聚焦本集的默认态；切项目由 resetUi 归零。
+  flowShowAll: false,
   // 每集独立的界面状态（剧本展开 / 编辑草稿 / 倍速）：切集时存档、切回时还原，
   // 保证「后续步骤完全独立」——上一集的草稿不会串到下一集，切回来也还在
   epUI: {},
@@ -129,6 +146,9 @@ const ui = {
   api: null,
   // 单张视图重生成中的状态 { characterId, view }：让缩略图立刻进入扫光态
   viewRegen: null,
+  // ⑤ 角色定妆任务明细：默认收起，只显示汇总条；展开后才铺开全部生成任务与重试入口。
+  // 模块态跨 SSE 局部重绘保留（不写 localStorage，刷新回到默认收起），切项目复位。
+  portraitTasksOpen: false,
   // 第⑦步成片倍速（跨渲染保留；暂不进 localStorage，刷新回到 1×）
   filmRate: 1,
 };
@@ -141,7 +161,9 @@ function resetUi(p) {
   ui.sourceOpen = false;
   ui.scrollTo = null;
   ui.info = {};
+  ui.synopsis = null;
   ui.projectName = null;
+  ui.storySource = 'upload';
   ui.upload = { open: false, filename: '', text: '', msg: '', err: false, files: [], strategy: '', targetChars: 0, maxEpisodes: 0 };
   ui.ai = { open: false, idea: String(m.bible?.logline || ''), chapterCount: 3, chapterChars: 800, outline: null, source: '', message: '', busy: false, busyText: '' };
   ui.director = { skillId: null, idea: '', progress: null };
@@ -149,6 +171,8 @@ function resetUi(p) {
   ui.epStep = { busyNo: null, busyStep: '', batchBusy: '' };
   // 当前剧集按项目记忆：从分集卡 / 流水线选过哪一集，回到工作台还停在那集
   ui.activeNo = readActiveNo(p.id);
+  // ⑤「展示全部剧集」属于临时查看偏好：切项目一律回到「只看正在处理的剧集」
+  ui.flowShowAll = false;
   // 按集界面状态属于项目：切项目时清空，避免把上一个项目的草稿画到新项目上
   ui.epUI = {};
   ui.epFilter = { query: '', status: 'all' };
@@ -157,7 +181,15 @@ function resetUi(p) {
   // 回到有任务的项目会由 restorePortraitJob() 从服务端恢复。
   ui.portraitJob = null;
   ui.viewRegen = null;
+  ui.portraitTasksOpen = false;
 }
+
+/** ⑤ 任务明细展开态（供测试与事件绑定）：默认 false = 收起 */
+export function setPortraitTasksOpen(open) {
+  ui.portraitTasksOpen = Boolean(open);
+  return ui.portraitTasksOpen;
+}
+export function portraitTasksOpenState() { return Boolean(ui.portraitTasksOpen); }
 
 /** 重绘前把用户正在编辑的 DOM 值收进 ui，避免 SSE 刷新吃掉输入 */
 function captureState(host) {
@@ -165,6 +197,8 @@ function captureState(host) {
   const q = (sel) => host.querySelector(sel);
   if (q('#pv-up-text')) ui.upload.text = q('#pv-up-text').value;
   if (q('#pv-ai-idea')) ui.ai.idea = q('#pv-ai-idea').value;
+  // ① 故事简介：独立存档，SSE 触发的重绘不能吃掉用户刚写的简介
+  if (q('#pv-bi-idea')) ui.synopsis = q('#pv-bi-idea').value;
   if (q('#pv-ai-count')) ui.ai.chapterCount = Number(q('#pv-ai-count').value) || 3;
   if (q('#pv-ai-charsel')) ui.ai.chapterChars = Number(q('#pv-ai-charsel').value) || 800;
   if (ui.ai.outline) {
@@ -239,20 +273,23 @@ function roadmapHTML(m, steps, busy) {
 }
 
 /* ------------------------------------------------------------------ 左侧：故事来源 */
-function sourceCardHTML(m) {
+/** 导出供回归测试：② 故事来源卡。「上传小说 / AI 生成小说」是二选一的切换项，
+ *  同一时刻只展开一种表单（由 ui.storySource 决定），四个既有 data-act 入口全部保留。 */
+export function sourceCardHTML(m, opts = {}) {
   const s = m.source || {};
+  const active = (opts.source || ui.storySource) === 'ai' ? 'ai' : 'upload';
   return `<div class="pv-card pv-source">
-    <div class="pv-card-head"><span>📖 故事来源</span></div>
+    <div class="pv-card-head"><span>📖 故事来源</span><span class="pv-story-choice-label">二选一</span></div>
     ${s.text
       ? `<div class="pv-source-info">
           <strong>《${esc(cut(s.title || '未命名', 18))}》</strong>
           <span>${s.chapterCount || 0} 章 · ${(s.totalChars || 0).toLocaleString()} 字 · ${(m.episodes || []).length} 集</span>
         </div>`
       : `<div class="pv-source-empty">还没有故事。上传你的小说，或让 AI 按一句话构想生成一部。</div>`}
-    <div class="pv-source-acts">
-      ${s.text ? `<button class="btn sm primary" data-act="view-source">📖 查看原著与统计</button>` : ''}
-      <button class="btn sm" data-act="goto-upload">⇧ 上传小说</button>
-      <button class="btn sm accent-mini" data-act="goto-ai">✦ AI 生成小说</button>
+    <div class="pv-source-acts pv-story-choice">
+      <button class="btn sm pv-story-opt ${active === 'upload' ? 'selected' : ''}" data-act="goto-upload" data-story-source="upload" aria-pressed="${active === 'upload'}">⇧ 上传小说</button>
+      <button class="btn sm pv-story-opt ${active === 'ai' ? 'selected' : ''}" data-act="goto-ai" data-story-source="ai" aria-pressed="${active === 'ai'}">✦ AI 生成小说</button>
+      ${s.text ? `<button class="btn sm" data-act="view-source">📖 查看原著与统计</button>` : ''}
     </div>
   </div>`;
 }
@@ -300,7 +337,42 @@ function resourceCardHTML(p, m, stats) {
 }
 
 /* ------------------------------------------------------------------ 右侧：项目信息卡 */
-function infoCardHTML(p, m) {
+/** ①「AI 一键生成」的前置引导：项目还没有故事时弹窗说明，并直达 ② 准备故事。
+ *  复用全局 #modal-root + .modal-backdrop/.modal（与新建项目向导同一套视觉）。
+ *  按钮一律用 data-ns 而非 data-act：避免改动工作台 63 个功能入口基线。 */
+function openNoStoryDialog({ onGoUpload } = {}) {
+  const root = document.getElementById('modal-root');
+  if (!root) { onGoUpload?.(); return null; }
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal pv-nostory-modal" role="dialog" aria-modal="true" aria-label="还没有生成故事">
+    <div class="wz-head">
+      <div><h2>还没有生成故事</h2><div class="sub">「✦ AI 一键生成」需要依据你的故事来填写项目名称、简介、类型、受众、基调等基础信息。</div></div>
+      <button class="icon-btn" data-ns="close" title="关闭">✕</button>
+    </div>
+    <div class="pv-nostory-body">
+      <p>请先到 <b>② 准备故事</b> 提供故事。推荐用 <b>⇧ 上传小说</b>：把 .txt / .md 文件直接拖进去即可，支持多个分卷，上传后自动分集。</p>
+      <p class="pv-nostory-tip">也可以在 ② 里选「✦ AI 生成小说」，由一句话构想生成整本故事。故事来源二者选一。</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn sm" data-ns="later">稍后再说</button>
+      <button class="btn primary sm" data-ns="go">去第 ② 步 · 上传小说</button>
+    </div>
+  </div>`;
+  root.appendChild(backdrop);
+  const close = () => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector('[data-ns="close"]').addEventListener('click', close);
+  backdrop.querySelector('[data-ns="later"]').addEventListener('click', close);
+  backdrop.querySelector('[data-ns="go"]').addEventListener('click', () => { close(); onGoUpload?.(); });
+  backdrop.querySelector('[data-ns="go"]')?.focus();
+  return { close };
+}
+
+/** 导出供回归测试直接渲染：① 设置基础信息卡的布局与必填约束 */
+export function infoCardHTML(p, m) {
   const b = m.bible || {};
   const raw = (k) => String(ui.info[k] !== undefined ? ui.info[k] : (b[k] || ''));
   const v = (k) => esc(raw(k));
@@ -311,8 +383,18 @@ function infoCardHTML(p, m) {
   const coverHtml = cover.url
     ? `<img src="${esc(cover.url)}" alt="封面">`
     : `<span class="pv-cover-name">${esc((p.name || '未')[0])}</span>`;
+  // 已上传小说时，故事简介可留空：AI 会先读原著生成概略写进 bible.synopsis 并回填这里。
+  // 一句话简介（bible.logline）是 AI 自动填写的结果字段之一，只在概略缺失时作为兜底显示。
+  const hasNovel = !!String(m.source?.text || '').trim();
+  const synopsis = ui.synopsis === null ? (b.synopsis || b.logline || '') : ui.synopsis;
   return `<div class="pv-card pv-hero">
-    <button class="pv-cover" data-act="cover" title="设置项目封面">${coverHtml}<span class="pv-cover-edit">🖼 封面</span></button>
+    <div class="pv-cover-col">
+      <button class="pv-cover" data-act="cover" title="设置项目封面">${coverHtml}<span class="pv-cover-edit">🖼 封面</span></button>
+      <div class="pv-cover-acts">
+        <button class="btn xs" data-act="ai-cover" title="根据故事简介生成项目封面">✦ AI 生成封面</button>
+        <button class="btn xs" data-act="cover" title="上传参考图或换一张项目封面">⇧ 上传 / 换封面</button>
+      </div>
+    </div>
     <div class="pv-hero-main">
       <div class="pv-hero-title">
         <h1>${esc(p.name)}</h1>
@@ -321,14 +403,14 @@ function infoCardHTML(p, m) {
         <span class="pv-tag">${esc(settings.aspect || '16:9')}</span>
         <span class="pv-tag">${d.video && d.pack ? '视频 + 导演包' : d.video ? '成片视频' : '导演包'}</span>
       </div>
-      <div class="pv-hero-sub">创建于 ${fmtTime(m.createdAt)} · 「AI 一键生成」会按构想重写项目名称、简介、类型等设定并生成封面</div>
-      <div class="pv-ai-fill">
-        <input id="pv-bi-idea" placeholder="一句话故事构想（AI 据此生成项目名称、简介与封面；留空则按当前项目名生成）" value="${esc(ui.ai.idea || b.logline || '')}">
-        <button class="btn sm primary" data-act="ai-fill">✦ AI 一键生成</button>
+      <div class="pv-hero-sub">创建于 ${fmtTime(m.createdAt)} · ${hasNovel ? '已上传小说：「✦ AI 一键生成」会先读小说生成故事概略，再自动填写项目基础信息并生成封面' : '先写「故事简介」，再用「✦ AI 一键生成」自动填写项目基础信息并生成封面'}</div>
+      <div class="pv-synopsis">
+        <label for="pv-bi-idea">故事简介 <b class="pv-req ${hasNovel ? 'optional' : ''}">${hasNovel ? '可留空 · AI 读小说生成' : '必填'}</b><small>AI 一键生成据此自动填写项目名称、一句话简介、类型、受众、基调、美术风格等基础信息</small></label>
+        <textarea id="pv-bi-idea" rows="3" placeholder="例如：退役刑警收到一封来自十年前的信，由此揭开一桩被遗忘的旧案……">${esc(synopsis)}</textarea>
       </div>
       <div class="pv-info-grid">
         <div class="field"><label>项目名称</label><input id="pv-name" value="${esc(nameVal)}" maxlength="80" placeholder="如：雨夜来信" title="修改后按回车即可保存名称"></div>
-        <div class="field"><label>一句话简介</label><textarea data-bi="logline" rows="2" placeholder="这个故事讲了什么…">${v('logline')}</textarea></div>
+        <div class="field"><label>一句话简介</label><textarea data-bi="logline" rows="2" placeholder="由故事简介自动生成，也可手动修改…">${v('logline')}</textarea></div>
         <div class="pv-info-row">
           <div class="field"><label>类型</label><select data-bi="genre">${selectOptions(raw('genre'), GENRES)}</select></div>
           <div class="field"><label>受众</label><select data-bi="audience">${selectOptions(raw('audience'), AUDIENCES)}</select></div>
@@ -340,10 +422,22 @@ function infoCardHTML(p, m) {
           <div class="field"><label>美术风格</label><select data-bi="artStyle">${selectOptions(raw('artStyle'), ART_STYLES)}</select></div>
         </div>
       </div>
+      <div class="pv-model-row">
+        <div class="field"><label>项目默认模型 <small>项目信息 / 剧本 / 角色等文本生成</small></label>
+          <div class="pv-model-slot" id="pv-model-text">
+            <div class="pv-model-box" data-cap="文本模型" id="pv-text-model"></div>
+          </div>
+          <span class="pv-model-hint">按本项目单独记忆 · 留空跟随全局默认模型</span></div>
+        <div class="field"><label>多媒体模型 <small>封面 / 角色图 / 分镜 / 视频</small></label>
+          <div class="pv-model-slot" id="pv-model-media">
+            <div class="pv-model-box" data-cap="出图接口" id="pv-media-iface"></div>
+            <div class="pv-model-box" data-cap="提示词模型" id="pv-media-prompt"></div>
+          </div>
+          <span class="pv-model-hint">留空跟随板块绑定 / 全局默认模型</span></div>
+      </div>
       <div class="pv-hero-acts">
         <button class="btn sm primary" data-act="save-info">保存项目信息</button>
-        <button class="btn sm" data-act="ai-cover">🖼 AI 生成封面</button>
-        <button class="btn sm" data-act="cover">🖼 上传 / 换封面</button>
+        <button class="btn sm" data-act="ai-fill">✦ AI 一键生成</button>
         <span class="pv-hero-msg" id="pv-info-msg">${m.basicInfo?.confirmedAt ? `✓ 基础信息已确认 · ${fmtTime(m.basicInfo.confirmedAt)}` : ''}</span>
       </div>
     </div>
@@ -373,8 +467,10 @@ function fileChipHTML(f, i, n) {
   return `<span class="pv-file-chip" title="${esc(f.name)}">📄 ${esc(cut(f.name, 22))}<small>${(f.text || '').length} 字</small>${nav}<button data-up-remove="${i}" title="移除">✕</button></span>`;
 }
 
-/** ① 准备故事：上传 / AI 生成双入口 */
-function uploadConsoleHTML(m) {
+/** ② 准备故事：上传小说 / AI 生成小说二选一（同一时刻只展开一种表单）。
+ *  上传卡支持拖拽投放；精简了说明文字，把拆分规则收进折叠区，但所有按钮、字段与提交链路不变。
+ *  导出供回归测试直接渲染。 */
+export function uploadConsoleHTML(m, opts = {}) {
   const s = m.source || {};
   const has = !!s.text;
   const sp = m.split || { strategy: 'chapter', targetChars: 1200, maxEpisodes: 4 };
@@ -382,8 +478,12 @@ function uploadConsoleHTML(m) {
   const target = ui.upload.targetChars || sp.targetChars || 1200;
   const max = ui.upload.maxEpisodes || sp.maxEpisodes || 4;
   const seasonSize = ui.upload.seasonSize || sp.seasonSize || 12;
-  return `
-  ${has ? `<div class="pv-src-card">
+  // opts 只用于回归测试显式指定来源 / 展开态；运行时始终读 ui
+  const active = (opts.source || ui.storySource) === 'ai' ? 'ai' : 'upload';
+  // 已有故事时默认收起表单，只留「故事已就绪」卡；点来源按钮 / 重新上传才展开
+  const formOpen = opts.open !== undefined ? opts.open
+    : (!has || (active === 'upload' ? ui.upload.open : ui.ai.open));
+  const readyCard = has ? `<div class="pv-src-card">
       <div class="pv-src-badge ok">✓ 故事已就绪</div>
       <strong>《${esc(s.title || '未命名')}》</strong>
       <span>${s.chapterCount || 0} 章 · ${(s.totalChars || 0).toLocaleString()} 字 · 已拆为 ${(m.episodes || []).length} 集${s.filename ? ` · ${esc(cut(s.filename, 24))}` : ''}</span>
@@ -391,34 +491,38 @@ function uploadConsoleHTML(m) {
         <button class="btn sm" data-act="toggle-upload">⇧ 重新上传</button>
         <button class="btn sm" data-act="toggle-ai">✦ AI 重新生成</button>
       </div>
-    </div>` : ''}
-  ${!has || ui.upload.open ? `<div class="pv-sub-card" id="pv-upload-card">
-      <div class="pv-sub-head"><strong>⇧ 上传小说（支持超长 · 多文件）</strong><span>.txt / .md · 可一次选上百个分卷文件 · 单项目最高 1000 万字 · 至少 40 字 · 多文件自动按文件名排序，可手动微调</span></div>
+    </div>` : '';
+  const uploadCard = active === 'upload' && formOpen ? `<div class="pv-sub-card pv-upload-card" id="pv-upload-card" data-drop-zone="upload">
+      <div class="pv-sub-head"><strong>⇧ 上传小说</strong><span>.txt / .md · 多文件 · 至少 40 字 · 上传后自动分集</span></div>
+      <div class="pv-drop-zone" data-drop-hint="1">
+        <span class="pv-drop-ico">⇧</span>
+        <span class="pv-drop-title">把小说文件拖到这里</span>
+        <span class="pv-drop-sub">多个分卷自动按文件名排序 · 或 <button class="btn xs" data-up="file">＋ 选择文件（可多选）</button></span>
+      </div>
       <div class="pv-up-actions">
-        <button class="btn sm" data-up="file">＋ 选择文件（可多选）</button>
         <button class="btn sm" data-up="sample">载入示例小说</button>
         <button class="btn sm" data-up="clear" ${ui.upload.files.length ? '' : 'disabled'}>清空文件</button>
       </div>
       <div class="pv-up-files" id="pv-up-files">${ui.upload.files.length
     ? ui.upload.files.map((f, i) => fileChipHTML(f, i, ui.upload.files.length)).join('')
     : '<span class="pv-up-files-hint">未选择文件 · 也可直接在下方粘贴正文</span>'}</div>
-      <textarea id="pv-up-text" rows="4" placeholder="雨夜来信&#10;&#10;第一章 没有署名的信&#10;雨下了整夜……">${esc(ui.upload.text)}</textarea>
-      <div class="pv-up-rules">
-        <span class="pv-up-rules-title">拆分规则（上传时即按此自动分集）</span>
-        <div class="pv-up-split">${SPLIT_STRATEGIES.map((s) => `<button class="pv-split-card ${strategy === s.id ? 'selected' : ''}" data-up-split="${s.id}"><strong>${s.name}</strong><small>${s.hint}</small></button>`).join('')}</div>
+      <textarea id="pv-up-text" rows="3" placeholder="雨夜来信&#10;&#10;第一章 没有署名的信&#10;雨下了整夜……">${esc(ui.upload.text)}</textarea>
+      <details class="pv-up-rules">
+        <summary>拆分规则（可选 · 上传时即按此自动分集）</summary>
+        <div class="pv-up-split">${SPLIT_STRATEGIES.map((x) => `<button class="pv-split-card ${strategy === x.id ? 'selected' : ''}" data-up-split="${x.id}"><strong>${x.name}</strong><small>${x.hint}</small></button>`).join('')}</div>
         <div class="pv-up-rule-nums">
           <label>每集目标字数 <input type="number" id="pv-up-target" min="300" max="8000" step="100" value="${target}"></label>
           <label>最多集数 <input type="number" id="pv-up-max" min="1" max="600" value="${max}"></label>
           <label>每季集数 <input type="number" id="pv-up-season" min="1" max="600" value="${seasonSize}"></label>
         </div>
         <div class="pv-hint">超过「每季集数」自动分季 · 分季之后仍可在「分季分集」里把任意一集移到别的季</div>
-      </div>
+      </details>
       <div class="pv-up-foot">
         <span class="pv-up-msg ${ui.upload.err ? 'err' : ''}">${esc(ui.upload.msg || '上传后自动合并文件、解析章节并按规则关联到对应剧集')}</span>
         <button class="btn primary sm" data-up="submit">⇧ 上传并自动分集</button>
       </div>
-    </div>` : ''}
-  ${!has || ui.ai.open ? `<div class="pv-sub-card" id="pv-ai-card">
+    </div>` : '';
+  const aiCard = active === 'ai' && formOpen ? `<div class="pv-sub-card" id="pv-ai-card">
       <div class="pv-sub-head"><strong>✦ AI 生成小说</strong><span>一句话构想 → 分章大纲 → 整本正文 → 自动分集 · 未配置模型时用内置模板演示</span></div>
       <div class="pv-ai-form">
         <textarea id="pv-ai-idea" rows="2" placeholder="例如：退役刑警收到一封来自十年前的信，揭开一桩被遗忘的旧案">${esc(ui.ai.idea)}</textarea>
@@ -440,7 +544,8 @@ function uploadConsoleHTML(m) {
           <button class="btn primary sm" data-ai="full" ${ui.ai.busy ? 'disabled' : ''}>${ui.ai.busy ? esc(ui.ai.busyText || '生成中…') : '② 生成全文并注入项目'}</button>
         </div>
       </div>` : `<div class="pv-ai-foot"><span class="pv-up-msg">${esc(ui.ai.message || '先生成大纲，确认或编辑后再生成全文')}</span></div>`}
-    </div>` : ''}`;
+    </div>` : '';
+  return `${readyCard}${uploadCard}${aiCard}`;
 }
 
 /** ② 分集拆解 */
@@ -474,6 +579,24 @@ function scriptIssuesHTML(sc) {
   return `<div class="sw-issues ${level}">${list.slice(0, 4).map((x) => `<span>${x.level === 'error' ? '✕' : x.level === 'warn' ? '⚠' : 'ⓘ'} ${esc(x.message)}</span>`).join('')}</div>`;
 }
 
+/**
+ * v3 可拍摄契约：按行首标记给剧本正文分行上色。
+ * 旧格式（【夜 · 仓库】/ 动作：/ 角色：「台词」）仍然兼容，不会被标成普通文本。
+ */
+export function scriptLineClass(line = '') {
+  const s = String(line || '');
+  if (/^#{1,2}\s*EP\d{3}/.test(s) || /^【.*】$/.test(s)) return 'head';
+  if (/^[\[［]OS[\]］]/.test(s)) return 'dlg os';
+  if (/^[\[［]VO[\]］]/.test(s)) return 'vo';
+  if (/^[\[［]SFX[\]］]/.test(s)) return 'sfx';
+  if (/^[\[［]画面文字[\]］]/.test(s)) return 'screen';
+  if (/^[\[［]连续性[\]］]/.test(s)) return 'cont';
+  if (/^[（(]/.test(s)) return 'act';
+  if (/^(动作|画面|镜头|旁白|画外音|内心|音效|声音|环境声|字幕|备注|注|场景|时间|地点|转场)[：:]/.test(s)) return 'act';
+  if (/^[^：:\s【】]{1,12}(?:（[^）]*）|\([^)]*\))?\s*[：:]/.test(s)) return 'dlg';
+  return '';
+}
+
 function scriptReaderHTML(ep, sc) {
   const no = num(ep.no);
   const chars = Array.isArray(sc.characters) ? sc.characters : [];
@@ -483,13 +606,11 @@ function scriptReaderHTML(ep, sc) {
     ${chars.length ? `<div class="sw-cast">${chars.slice(0, 8).map((c) => `<span class="sw-cast-chip">${esc(c.name)}${c.role ? `<small>${esc(c.role)}</small>` : ''}</span>`).join('')}</div>` : ''}
     ${scriptIssuesHTML(sc)}
     <div class="sw-scenes">${(sc.scenes || []).map((s, i) => `<div class="sw-scene">
-      <div class="sw-scene-head"><span class="sw-scene-no">${String(i + 1).padStart(2, '0')}</span>
+      <div class="sw-scene-head" title="${esc(s.sceneCode || `第 ${i + 1} 场`)}"><span class="sw-scene-no">${String(i + 1).padStart(2, '0')}</span>
         <strong>${esc(s.location || '未指定场景')}</strong>${s.time ? `<small>${esc(s.time)}</small>` : ''}</div>
       ${s.summary ? `<p>${esc(s.summary)}</p>` : ''}
-      <div class="sw-lines">${(s.script || []).map((line) => {
-        const dlg = /^[^：:\s【】]{1,10}\s*[：:]/.test(line) && !/^(动作|画面|字幕|备注|场景|时间|地点)[:：]/.test(line);
-        return `<div class="sw-line ${dlg ? 'dlg' : /^动作[:：]/.test(line) ? 'act' : ''}">${esc(line)}</div>`;
-      }).join('')}</div>
+      <div class="sw-lines">${(s.script || []).map((line) =>
+        `<div class="sw-line ${scriptLineClass(line)}">${esc(line)}</div>`).join('')}</div>
     </div>`).join('')}</div>
     <div class="sw-foot">
       <button class="btn sm" data-act="edit-script" data-no="${no}">✎ 编辑剧本</button>
@@ -502,7 +623,7 @@ function scriptReaderHTML(ep, sc) {
 function scriptEditorHTML(ep, sc) {
   const no = num(ep.no);
   return `<div class="sw-editor" id="sw-editor" data-no="${no}">
-    <div class="sw-editor-head"><strong>编辑第 ${no} 集剧本</strong><span>每行一句：对白写「角色：「台词」」，动作写「动作：…」</span></div>
+    <div class="sw-editor-head"><strong>编辑第 ${no} 集剧本</strong><span>每行一条：场次头「## EP001-SC001 内 · 地点 · 时间」、动作「（一个可见变化）」、对白「角色（表演策略）：台词」，[OS] / [VO] / [SFX] / [画面文字] / [连续性] 按需</span></div>
     <div class="sw-edit-meta">
       <label>片名<input data-scr="title" value="${esc(sc.title || '')}"></label>
       <label>梗概<textarea data-scr="logline" rows="2">${esc(sc.logline || '')}</textarea></label>
@@ -513,7 +634,7 @@ function scriptEditorHTML(ep, sc) {
         <label>时间<input data-scr-time value="${esc(s.time || '')}"></label>
       </div>
       <label>场次概述<textarea data-scr-sum rows="2">${esc(s.summary || '')}</textarea></label>
-      <label>正文 / 对白<textarea data-scr-lines rows="6" placeholder="角色名：「台词」">${esc((s.script || []).join('\n'))}</textarea></label>
+      <label>正文 / 对白<textarea data-scr-lines rows="6" placeholder="角色名（把照片推过桌面）：台词">${esc((s.script || []).join('\n'))}</textarea></label>
     </section>`).join('')}
     <div class="sw-edit-foot">
       <button class="btn primary sm" data-act="save-script" data-no="${no}">✓ 保存剧本</button>
@@ -580,6 +701,7 @@ export function scriptConsoleHTML(p, m, st) {
       <div class="sw-stat"><b>${cov.bySource.mock}</b><span>模板</span></div>
       <div class="sw-stat"><b>${cov.bySource.manual}</b><span>人工</span></div>
     </div>
+    <div class="sw-model-bar" data-script-model-slot></div>
     <div class="sw-toolbar">
       <div class="sw-tip">${openMissing
         ? `还有 ${openMissing} 集（未定稿）没有剧本：第 ${openNos.filter((e) => !e.script).map((e) => num(e.no)).slice(0, 8).join('、')} 集${openMissing > 8 ? '…' : ''}`
@@ -616,6 +738,31 @@ const PVIEWS = [
   { key: 'closeup', label: '特写' },
 ];
 const isRealShotFE = (v) => Boolean(v?.url) && String(v?.provider || '') !== 'mock';
+
+/** 一致性静态自检：与后端 characterConsistencyReport 同口径，只读已落盘的元信息。
+ *  正面缺失 / 出图通道不同 / 风格锁不同 / 其余视图没回引正面，都说明这组定妆图
+ *  可能不是同一个人，卡片上要如实提示，而不是让用户以为「有图就一致」。 */
+function charConsistencyWarn(c) {
+  const views = c?.views || {};
+  const shots = PVIEWS.map((v) => views[v.key]).filter((v) => v?.url);
+  if (!shots.length) return '';
+  const providers = new Set(shots.map((v) => String(v.provider || '')).filter(Boolean));
+  const locks = new Set(shots.map((v) => String(v.styleLock || '')).filter(Boolean));
+  const issues = [];
+  if (!views.front?.url) issues.push('缺正面基准图');
+  else if (!isRealShotFE(views.front)) issues.push('正面为占位图');
+  if (providers.size > 1) issues.push('视图来自不同出图通道');
+  if (locks.size > 1) issues.push('视图用了不同风格锁');
+  const noRefs = PVIEWS.filter((v) => v.key !== 'front' && views[v.key]?.url
+    && (!Array.isArray(views[v.key].refs) || !views[v.key].refs.length));
+  if (noRefs.length) issues.push(`${noRefs.length} 张视图未回引正面`);
+  const refWarning = PVIEWS.find((v) => views[v.key]?.refsWarning);
+  if (refWarning) issues.push('工作流未接收参考图');
+  if (c?.sheet?.url && c.sheet.styleLock && locks.size && !locks.has(String(c.sheet.styleLock))) {
+    issues.push('定妆板风格锁不同源');
+  }
+  return issues.length ? `⚠ 来源不一致：${issues.join('、')}；建议「只重出正面」后整组重出` : '';
+}
 
 /** 角色任务状态：优先用后台任务的实时状态，其次按真实出图数量判定 */
 function charTaskState(c, jobChar) {
@@ -712,7 +859,84 @@ function portraitJobBarHTML(job) {
   return `<div class="pvt-job ${tone}">${label} ${job.done || 0}/${job.total || 0}${jobWhen(job) ? ` · ${esc(jobWhen(job))}` : ''}：${esc(job.message || job.error || '')}${job.failedCount ? ` · 失败 ${job.failedCount} 张` : ''}</div>`;
 }
 
-function portraitAreaHTML(p, m) {
+/* ---------------- ⑤ 生成任务明细（默认收起 / 展开看全部 / 一键重试失败） ---------------- */
+
+const TASK_VIEW_KEYS = [...PVIEWS.map((v) => v.key), 'sheet'];
+const TASK_STATUS = {
+  done: { icon: '✓', label: '已生成', cls: 'ok' },
+  skip: { icon: '↷', label: '已跳过', cls: 'skip' },
+  error: { icon: '✗', label: '失败', cls: 'err' },
+  running: { icon: '▶', label: '生成中', cls: 'run' },
+  placeholder: { icon: '◑', label: '占位图', cls: 'mock' },
+  pending: { icon: '○', label: '待生成', cls: 'idle' },
+};
+
+/**
+ * 从最近一次后台任务里收集「要重试的视图」：{角色ID: [视图key]}。
+ *  - 只认任务明细里 status=error 的视图（精确重试，不整组覆盖已成功的图）；
+ *  - 该角色若因「正面失败 → 其余视图没跑」而留下无图视图，一并列入，
+ *    让重试把整位角色恢复到可进视频，而不是只补一张又留一堆空洞；
+ *  - 定妆板仅在原任务包含定妆板时纳入。
+ */
+export function collectFailedViewsForRetry(job, chars = []) {
+  const byChar = job?.byChar || {};
+  const wantSheet = job?.sheet === true;
+  const out = {};
+  for (const c of chars) {
+    const id = String(c?.id || '');
+    if (!id) continue;
+    const views = byChar[id]?.views || {};
+    const keys = new Set(TASK_VIEW_KEYS.filter((k) => views[k]?.status === 'error'));
+    if (!keys.size) continue;
+    for (const k of TASK_VIEW_KEYS) {
+      if (keys.has(k) || (k === 'sheet' && !wantSheet && !views[k])) continue;
+      const shot = k === 'sheet' ? c.sheet : c.views?.[k];
+      const js = views[k];
+      if (!shot?.url && js?.status !== 'done' && js?.status !== 'skip') keys.add(k);
+    }
+    out[id] = TASK_VIEW_KEYS.filter((k) => keys.has(k));
+  }
+  return out;
+}
+
+/** 展开后的「全部生成任务」明细表：每位角色 × 5 视图 + 定妆板，逐张给状态与失败原因 */
+export function portraitTasksHTML(job, chars = []) {
+  if (!chars.length) return '';
+  const byChar = job?.byChar || {};
+  const groups = chars.map((c) => {
+    const id = String(c.id);
+    const views = byChar[id]?.views || {};
+    const rows = TASK_VIEW_KEYS.map((key) => {
+      const label = key === 'sheet' ? '定妆板' : (PVIEWS.find((v) => v.key === key)?.label || key);
+      const js = views[key];
+      const shot = key === 'sheet' ? c.sheet : c.views?.[key];
+      const status = js?.status
+        || (shot?.url ? (isRealShotFE(shot) ? 'done' : 'placeholder') : 'pending');
+      const st = TASK_STATUS[status] || TASK_STATUS.pending;
+      const provider = js?.provider || shot?.provider || '';
+      const error = js?.error || (status === 'error' ? '生成失败（详情见任务日志）' : '');
+      return `<div class="pvt-task-row st-${st.cls}">
+        <span class="pvt-task-view">${esc(label)}</span>
+        <span class="pvt-task-state">${st.icon} ${st.label}</span>
+        <span class="pvt-task-prov">${esc(provider || '—')}</span>
+        <span class="pvt-task-msg">${esc(error)}</span>
+      </div>`;
+    });
+    const errs = Object.values(views).filter((v) => v?.status === 'error').length;
+    return `<div class="pvt-task-group">
+      <div class="pvt-task-group-head"><b>${esc(c.name || id)}</b>
+        <span>${TASK_VIEW_KEYS.length} 项任务${errs ? ` · <em class="err">失败 ${errs}</em>` : ''}</span></div>
+      ${rows.join('')}
+    </div>`;
+  });
+  return `<div class="pvt-tasks">
+    <div class="pvt-task-thead"><span>视图</span><span>状态</span><span>出图通道</span><span>失败原因 / 备注</span></div>
+    ${groups.join('')}
+  </div>`;
+}
+
+/** 第⑤步项目级角色资产面板（导出供单元测试断言收起 / 展开 / 重试入口） */
+export function portraitAreaHTML(p, m) {
   const chars = Array.isArray(m.characters) ? m.characters : [];
   const stale = apiStale();
   const comfyReady = Boolean(ui.comfy?.imageWorkflow) && !stale;
@@ -723,26 +947,45 @@ function portraitAreaHTML(p, m) {
   const totalViews = chars.length * PVIEWS.length;
   const sheetCount = chars.filter((c) => isRealShotFE(c.sheet)).length;
   const pending = totalViews - totalReal;
-  return `<div class="pvt-head">
+  const failedViews = collectFailedViewsForRetry(job, chars);
+  const retryN = Object.values(failedViews).reduce((n, keys) => n + keys.length, 0);
+  // 展示用真实失败张数；重试清单会额外含「正面失败导致没跑」的空洞视图，
+  // 两者分开计数，避免面板写「失败 7」而任务日志写「失败 2 张」自相矛盾。
+  const errorN = Object.values(job?.byChar || {}).reduce(
+    (n, one) => n + Object.values(one?.views || {}).filter((v) => v?.status === 'error').length, 0,
+  ) || Number(job?.failedCount || 0);
+  const open = Boolean(ui.portraitTasksOpen);
+  const taskCount = chars.length * TASK_VIEW_KEYS.length;
+  const pct = job?.total
+    ? Math.min(100, Math.round((Number(job.done || 0) / job.total) * 100))
+    : (totalViews ? Math.round((totalReal / totalViews) * 100) : 0);
+
+  // 收起态也能直接开工：主行动按钮常驻，不必先展开
+  const headActs = `<button class="btn sm primary" data-act="char-gen-all" ${!chars.length || !comfyReady || running || !pending ? 'disabled' : ''}
+      title="${comfyReady ? `补齐缺失的角色图：调用本地 ComfyUI 生成 ${pending} 张（后台任务，可关闭页面）` : '请先到「设置 → 本地 ComfyUI」导入「导出(API)」图像工作流'}">✦ 补齐缺失图${pending ? `（${pending}）` : ''}</button>
+    <button class="btn sm" data-act="char-regen-all" ${!chars.length || !comfyReady || running ? 'disabled' : ''}
+      title="${comfyReady ? `覆盖重生成全部 ${totalViews} 张角色图 + 定妆板，会覆盖现有图片` : '未配置 ComfyUI 出图工作流'}">↻ 全部重新生成</button>
+    ${retryN ? `<button class="btn sm" data-se="portrait-retry-failed" ${!comfyReady || running ? 'disabled' : ''}
+      title="只重出失败的 ${errorN} 项；因失败而中断、还没出图的视图会一并补齐，共 ${retryN} 项任务">↻ 重试失败任务（${errorN}）</button>` : ''}
+    <button class="btn sm ghost" data-se="portrait-tasks-toggle" data-open="${open ? '1' : '0'}" aria-expanded="${open}"
+      title="${open ? '收起任务明细' : `展开 ${taskCount} 项生成任务，可查看每张图的状态与失败原因`}">${open ? '▴ 收起任务明细' : `▤ 展开生成任务（${taskCount} 项）`}</button>
+    ${comfyReady ? '' : '<span class="cf-note">未配置 ComfyUI 出图工作流</span>'}`;
+
+  const statsHTML = `<div class="pvt-head">
       <div class="pvt-stat"><b>${chars.length}</b><span>位角色</span></div>
       <div class="pvt-stat ok"><b>${totalReal}<em>/${totalViews}</em></b><span>真实定妆</span></div>
       <div class="pvt-stat warn"><b>${pending}</b><span>待生成${totalMock ? `（占位 ${totalMock}）` : ''}</span></div>
       <div class="pvt-stat"><b>${sheetCount}</b><span>定妆板</span></div>
-      <div class="pvt-head-acts">
-        <button class="btn sm primary" data-act="char-gen-all" ${!chars.length || !comfyReady || running || !pending ? 'disabled' : ''}
-          title="${comfyReady ? `补齐缺失的角色图：调用本地 ComfyUI 生成 ${pending} 张（后台任务，可关闭页面）` : '请先到「设置 → 本地 ComfyUI」导入「导出(API)」图像工作流'}">✦ 补齐缺失图${pending ? `（${pending}）` : ''}</button>
-        <button class="btn sm" data-act="char-regen-all" ${!chars.length || !comfyReady || running ? 'disabled' : ''}
-          title="${comfyReady ? `覆盖重生成全部 ${totalViews} 张角色图 + 定妆板，会覆盖现有图片` : '未配置 ComfyUI 出图工作流'}">↻ 全部重新生成</button>
-        ${comfyReady ? '' : '<span class="cf-note">未配置 ComfyUI 出图工作流</span>'}
-      </div>
-    </div>
-    ${stale ? `<div class="pvt-job err">⚠ 服务端仍在运行旧版本（缺少角色出图任务接口），生成会退回占位图。请重启服务：终端 Ctrl+C 后重新执行 <b>npm start</b>，再刷新本页。</div>` : ''}
-    ${job
-      ? portraitJobBarHTML(job)
-      : (chars.length
-        ? `<div class="pvt-job pvt-job-none">尚无批量生成记录 · 按真实出图统计：${totalReal}/${totalViews} 张已生成${pending ? `（还差 ${pending} 张）` : ''}；点上方「补齐缺失图」开始生成后，这里会显示逐张任务进度</div>`
-        : '')}
-    ${chars.length ? `<div class="pvt-grid">${chars.map((c) => {
+      ${errorN ? `<div class="pvt-stat err"><b>${errorN}</b><span>失败任务</span></div>` : ''}
+    </div>`;
+
+  const jobBarHTML = job
+    ? portraitJobBarHTML(job)
+    : (chars.length
+      ? `<div class="pvt-job pvt-job-none">尚无批量生成记录 · 按真实出图统计：${totalReal}/${totalViews} 张已生成${pending ? `（还差 ${pending} 张）` : ''}；点上方「补齐缺失图」开始生成后，这里会显示逐张任务进度</div>`
+      : '');
+
+  const gridHTML = chars.length ? `<div class="pvt-grid">${chars.map((c) => {
     const jobChar = job?.byChar?.[c.id];
     const st = charTaskState(c, jobChar);
     const real = st.real;
@@ -750,6 +993,7 @@ function portraitAreaHTML(p, m) {
     const front = c.views?.front;
     const avatar = jobChar?.views?.front?.url || (front?.url ? front.url : '');
     const srcLabel = { llm: 'LLM 提取', heuristic: '启发式', manual: '手动' }[c.source] || c.source || '手动';
+    const consistency = charConsistencyWarn(c);
     return `<article class="pvt-card state-${st.id}" data-char-detail="${esc(c.id)}" title="点击查看角色详情">
         <header class="pvt-card-head">
           <span class="pvt-avatar">${avatar ? `<img src="${esc(avatar)}" alt="">` : '<i></i>'}</span>
@@ -762,16 +1006,36 @@ function portraitAreaHTML(p, m) {
           ${c.sheet?.url ? `<span class="pvt-sheet ${isRealShotFE(c.sheet) ? 'ok' : 'mock'}" title="${isRealShotFE(c.sheet) ? '定妆板已生成' : '定妆板为占位图'}">▦ 定妆板</span>` : '<span class="pvt-sheet">定妆板 —</span>'}
           <span class="pvt-sub">${esc(st.sub)}</span>
         </div>
+        ${consistency ? `<div class="pvt-cons warn" title="${esc(consistency)}">⚠ 来源不一致</div>` : ''}
         <div class="pvt-bar"><i style="width:${pct}%"></i></div>
         <footer class="pvt-foot">
           <button class="btn sm" data-act="char-gen-one" data-char="${esc(c.id)}" data-force="${real === PVIEWS.length ? '1' : '0'}" ${!comfyReady || running ? 'disabled' : ''}
             title="${real === PVIEWS.length ? '覆盖重生成这位角色的全部视图与定妆板' : '补齐这位角色缺失 / 占位的视图'}">${real === PVIEWS.length ? '↻ 重出本角色' : '✦ 生成此人'}</button>
           <button class="btn sm ghost" data-act="char-detail" data-char="${esc(c.id)}">详情</button>
+          <button class="btn sm ghost" data-se="regen-front" data-char="${esc(c.id)}" ${!comfyReady || running ? 'disabled' : ''}
+            title="只重出正面全身基准图（用 character-front 板块的工作流）；重出后建议整组重出其余视图以保持一致">↻ 正面</button>
         </footer>
       </article>`;
   }).join('')}</div>`
-    : '<div class="pv-hint">还没有角色：先「从原著提取角色」，再一键生成定妆图。</div>'}
-    <div class="pv-hint">点击卡片查看完整属性 / 原文证据 / 多视图大图；「一键生成全部角色图」在后台逐张调用本地 ComfyUI（可关闭页面，回来继续看进度）。</div>`;
+    : '<div class="pv-hint">还没有角色：先「从原著提取角色」，再一键生成定妆图。</div>';
+
+  return `<section class="pvt-panel${open ? ' open' : ''}" data-portrait-panel>
+    <div class="pvt-panel-head">
+      <div class="pvt-panel-title"><b>角色定妆 · 生成任务</b>
+        <span class="pvt-panel-sub">${chars.length} 位角色 · 真实 ${totalReal}/${totalViews} · 待生成 ${pending}${errorN ? ` · <em class="err">失败 ${errorN}</em>` : ''}${running ? ' · 生成中' : ''}</span>
+      </div>
+      <div class="pvt-panel-bar" title="最近一次任务进度 ${pct}%"><i style="width:${pct}%"></i></div>
+      <div class="pvt-panel-acts">${headActs}</div>
+    </div>
+    ${stale ? `<div class="pvt-job err">⚠ 服务端仍在运行旧版本（缺少角色出图任务接口），生成会退回占位图。请重启服务：终端 Ctrl+C 后重新执行 <b>npm start</b>，再刷新本页。</div>` : ''}
+    ${jobBarHTML}
+    <div class="pvt-panel-body" data-portrait-body${open ? '' : ' hidden'}>
+      ${statsHTML}
+      ${portraitTasksHTML(job, chars)}
+      ${gridHTML}
+      <div class="pv-hint">点击卡片查看完整属性 / 原文证据 / 多视图大图；任务明细里每张图的状态与失败原因来自最近一次后台任务，失败项可一键精确重试（不覆盖已成功的图）。</div>
+    </div>
+  </section>`;
 }
 
 /* ------------------------------------------------------------------ 分集制作
@@ -902,6 +1166,12 @@ export function episodeScopeState() {
   };
 }
 
+/** ⑤「只看正在处理的剧集」开关：渲染、点击切换、单元测试读同一份状态 */
+export function setFlowShowAll(on) { ui.flowShowAll = Boolean(on); }
+export function flowScopeState() {
+  return { showAll: Boolean(ui.flowShowAll), activeNo: num(ui.activeNo) };
+}
+
 /** 第③步「分季 · 分集」卡片内嵌的「当前剧集」控制区（非悬浮）：季 + 集两级、四段进度、顺序制作位与定稿入口。
  *  身份展示已移到中间导航条（navHTML 的 pv-nav-ep / pv-rail-ep），这里只承载切换与推进操作。 */
 export function activeEpisodeBarHTML(p, m) {
@@ -970,10 +1240,11 @@ export function activeEpisodeBarHTML(p, m) {
   </div>`;
 }
 
-/** 角色是唯一跨集共享的资源：存在就沿用，不存在才在首次执行时提取一次 */
+/** 角色是唯一跨集共享的资源：存在就沿用；每集独立的是「出场名单」，缺人时增量补进全局库 */
 export function sharedCharactersHTML(m, ep) {
   const chars = Array.isArray(m?.characters) ? m.characters : [];
   const cast = (ep?.characterIds || []).length;
+  const full = chars.length >= 12;
   const note = chars.length
     ? `已沿用 <b>${chars.length}</b> 位角色（本集出场 ${cast} 位）：切换剧集不会重新提取，也不会为每集另建一套角色库。`
     : '尚未建立：首次执行「角色·上下文」会提取全书角色一次，之后所有剧集沿用同一份角色库。';
@@ -981,7 +1252,10 @@ export function sharedCharactersHTML(m, ep) {
     <div class="pv-card-head"><span>👤 角色库 · 全项目共享（唯一例外）</span>
       <span class="pv-hint-inline">切集不重置 · 不重抽 · 定稿不重建</span></div>
     <div class="epb-shared-body"><span>${note}</span>
-      <span>剧本 / 上下文 / 分镜 / 成片按集独立；只有角色设定与定妆图是全书共用——不同集出现同一角色时按角色 ID 直接复用，不重复提取、不重复出定妆图。下方「从原著提取角色」是项目级手动重提，通常不需要。</span></div>
+      <span>剧本 / 上下文 / 分镜 / 成片按集独立；只有角色设定与定妆图是全书共用——不同集出现同一角色时按角色 ID 直接复用，不重复提取、不重复出定妆图。下方「从原著提取角色」是项目级手动重提，通常不需要。</span>
+      <span class="pv-hint-inline">✦ 每集仍会做一次「出场角色对账」：本集新出现、全书角色库没有的人物会就地建卡并补进全局库${full ? '；当前角色库已满 12 位，新人物只会提示、不会挤掉已有角色' : ''}。</span>
+      <button class="btn sm" data-se="ensure-cast" data-no="${Number(ep?.no) || ''}" title="检查本集出现但全局角色库缺少的人物，并补齐入库">✦ 检查并补齐本集角色</button>
+    </div>
   </div>`;
 }
 
@@ -1123,12 +1397,26 @@ function flowPanelHTML(ep, focusKey, busyAny, m) {
   </div>`;
 }
 
-/** 剧集流水线主卡：按季分组、每集一行四段；已定稿集锁定并只读 */
-export function episodeFlowHTML(p, m, focusKey) {
+/** 两态文案：收起态显示 collapsed，展开态显示 all；hidden 在渲染时按当前开关定好，
+ *  点击切换时只需统一翻转，不必在事件里重新拼字符串（SSE 重绘也不会串态）。 */
+function flTextSpan(which, text, collapsed) {
+  const hidden = (which === 'all') === collapsed ? ' hidden' : '';
+  return `<span data-fl-text="${which}"${hidden}>${text}</span>`;
+}
+
+/** 剧集流水线主卡：按季分组、每集一行四段；已定稿集锁定并只读
+ *  opts.onlyActive（仅 ⑤ 角色与上下文使用）：默认只显示正在处理的剧集，
+ *  其它集 / 其它季组渲染进 DOM 但 hidden；点「展示全部剧集」只翻 hidden，不重绘。 */
+export function episodeFlowHTML(p, m, focusKey, opts = {}) {
   const eps = m.episodes || [];
   if (!eps.length) return '<div class="pv-hint">还没有分集：先在第 ③ 步完成「分集拆解」，这里才会出现按集任务。</div>';
   // 全工作台只认一个当前集：顶部切换条 / 流水线 / 区头都通过 activeEpisodeNo 对齐
   ui.activeNo = activeEpisodeNo(m);
+  const onlyActive = Boolean(opts.onlyActive) && eps.length > 1;
+  const collapsed = onlyActive && !ui.flowShowAll;
+  const otherN = eps.length - 1;
+  const activeEp = eps.find((e) => num(e.no) === num(ui.activeNo)) || eps[0];
+  const activeLabel = esc(PMODEL.episodeLabelFull(PMODEL.seasonOf(activeEp), num(activeEp.no)));
   const busyAny = Boolean(ui.epStep.busyNo || ui.epStep.batchBusy || ui.script.busyNo || ui.script.batchBusy);
   const focus = FLOW_STAGES.find((s) => s.key === focusKey) || null;
   const groups = PMODEL.seasonGroups(p);
@@ -1167,7 +1455,8 @@ export function episodeFlowHTML(p, m, focusKey) {
           ? `data-act="gen-ep-script" data-force="${flowStage(ep, 'script').force}"`
           : `data-act="run-ep-step" data-step="${next.key}" data-force="${flowStage(ep, next.key).force}"`} data-no="${no}" ${busyAny || nextRunning ? 'disabled' : ''}>${nextRunning ? `进行中 · ${esc(next.label)}` : `下一步 · ${esc(next.label)}`}</button>`
         : '<span class="fl-alldone">✓ 四段已完成</span>';
-    return `<div class="fl-row ${active ? 'on' : ''}${locked ? ' locked' : ''}" data-ep-row="${no}">
+    const otherAttr = active || !onlyActive ? '' : ` data-fl-other${collapsed ? ' hidden' : ''}`;
+    return `<div class="fl-row ${active ? 'on' : ''}${locked ? ' locked' : ''}" data-ep-row="${no}"${otherAttr}>
       <button class="fl-pick" data-act="pick-ep" data-no="${no}" aria-pressed="${active}" title="选中第 ${no} 集：下方只展开这一集的任务">
         <span class="fl-no">${PMODEL.episodeLabelFull(PMODEL.seasonOf(ep), no)}</span>
         <span class="fl-title">${esc(cut(ep.title || `第 ${no} 集`, 22))}</span>
@@ -1181,15 +1470,26 @@ export function episodeFlowHTML(p, m, focusKey) {
   };
   const rows = groups.map((g) => {
     const pr = progress.find((x) => x.no === g.no) || { finalized: 0, total: g.episodes.length };
-    return `<div class="fl-season-group">
+    // 不含当前集的季整组隐藏（连同季头）；含当前集的季保留季头，只隐藏组内其它集
+    const hasActive = g.episodes.some((e) => num(e.no) === num(ui.activeNo));
+    const groupAttr = !hasActive && onlyActive ? ` data-fl-other${collapsed ? ' hidden' : ''}` : '';
+    return `<div class="fl-season-group"${groupAttr}>
       <div class="fl-season-head"><span class="fl-season-mark">${PMODEL.seasonLabel(g.no)}</span>
         ${g.title === PMODEL.seasonLabel(g.no) ? '' : `<b>${esc(g.title)}</b>`}<span>${g.episodes.length} 集 · 已定稿 <b>${pr.finalized}</b>/${pr.total}${pr.allDone ? ' ✓ 全季完成' : ''}</span></div>
       ${g.episodes.map(rowHTML).join('')}
     </div>`;
   }).join('');
-  return `<div class="pv-card pv-flow">
+  const toggleBtn = onlyActive
+    ? `<button class="btn sm fl-all-toggle" data-fl="toggle-all" aria-pressed="${!collapsed}"
+        title="默认只显示正在处理的剧集；点击后在本卡内列出全部剧集">${flTextSpan('collapsed', `▤ 展示全部剧集（另有 ${otherN} 集）`, collapsed)}${flTextSpan('all', '▴ 收起其它剧集', collapsed)}</button>`
+    : '';
+  const focusLine = onlyActive
+    ? `<div class="fl-scope fl-focus-line"><span class="fl-scope-k on">范围</span><span class="fl-scope-v">${flTextSpan('collapsed', `当前只显示正在处理的 ${activeLabel}；点「展示全部剧集」查看其它 ${otherN} 集与跨季进度。`, collapsed)}${flTextSpan('all', '已展开全部剧集；点「收起其它剧集」回到只显示正在处理的一集。', collapsed)}</span></div>`
+    : '';
+  return `<div class="pv-card pv-flow${onlyActive ? ' fl-focus' : ''}">
     <div class="pv-card-head"><span>▥ 剧集流水线 · 按季顺序 · 每集四段任务</span>
-      <span class="pv-hint-inline">${groups.length} 季 / ${eps.length} 集 · 已定稿 ${finalizedN}/${eps.length} · 四段全完成 ${allDone}/${eps.length}${focus ? ` · 当前在第 ${focus.stepNo} 步「${focus.label}」` : ''}</span></div>
+      <div class="fl-head-acts"><span class="pv-hint-inline">${groups.length} 季 / ${eps.length} 集 · 已定稿 ${finalizedN}/${eps.length} · 四段全完成 ${allDone}/${eps.length}${focus ? ` · 当前在第 ${focus.stepNo} 步「${focus.label}」` : ''}</span>${toggleBtn}</div></div>
+    ${focusLine}
     <div class="fl-scope"><span class="fl-scope-k">项目级</span><span class="fl-scope-v">准备故事 · 分集拆解 · 角色库 —— 一次作用于全书，与集无关；角色已存在则沿用，切集不重抽</span></div>
     <div class="fl-scope"><span class="fl-scope-k on">剧集级</span><span class="fl-scope-v">剧本 → 角色·上下文 → 分镜 → 视频·成片 —— 选中哪一集，下面四段就作用在哪一集；各集任务与产物完全独立</span></div>
     <div class="fl-scope"><span class="fl-scope-k on">顺序</span><span class="fl-scope-v">默认第一季第一集；四段全完成 → 定稿 → 自动进入同季下一集；本季全部定稿 → 进入下一季第一集。已定稿集锁定，撤销后才可重做。</span></div>
@@ -1207,7 +1507,9 @@ function contextConsoleHTML(p, m, st, busy) {
   const has = !!m.source?.text;
   const no = activeEpisodeNo(m);
   const ep = (m.episodes || []).find((e) => num(e.no) === no) || null;
-  return `${episodeFlowHTML(p, m, 'context')}
+  // ⑤ 默认只显示正在处理的剧集：其它集要点「展示全部剧集」才出现；
+  // 下方的共享角色库 / 定妆任务卡是项目级资产，不属于任何一集，始终常驻。
+  return `${episodeFlowHTML(p, m, 'context', { onlyActive: true })}
     ${sharedCharactersHTML(m, ep)}
     <div class="epb-proj-label">↓ 以下是项目级角色资产（全项目共用，不属于任何一集）</div>
     <div class="pv-char-acts">
@@ -2083,7 +2385,8 @@ export function stepSectionHTML(s, no, m, body, busy) {
       mainAct = '<button class="btn sm" disabled title="还没有分集：先完成第 ③ 步">▶ 先分集</button>';
     } else if (s.id === 'script') {
       const force = actEp?.script ? '1' : '0';
-      mainAct = `<button class="btn primary sm" data-act="gen-ep-script" data-no="${actNo}" data-force="${force}" ${busy ? 'disabled' : ''} title="只生成${PMODEL.episodeLabelFull(seasonNo, actNo)}的剧本；换集用顶部「当前剧集」条">▶ ${force === '1' ? '重写本集剧本' : '生成本集剧本'}</button>`;
+      mainAct = `<button class="btn primary sm" data-act="gen-ep-script" data-no="${actNo}" data-force="${force}" ${busy ? 'disabled' : ''} title="只生成${PMODEL.episodeLabelFull(seasonNo, actNo)}的剧本；换集用顶部「当前剧集」条">▶ ${force === '1' ? '重写本集剧本' : '生成本集剧本'}</button>
+        <button class="btn sm pv-step-model" data-smb="switch" title="切换本次剧本使用的模型，跳到「本次剧本模型」选择条">⚙ 本次剧本模型 · 切换</button>`;
     } else {
       const force = epStepDoneLocal(actEp, s.id) ? '1' : '0';
       mainAct = `<button class="btn primary sm" data-act="run-ep-step" data-step="${s.id}" data-no="${actNo}" data-force="${force}" ${busy ? 'disabled' : ''} title="只执行${PMODEL.episodeLabelFull(seasonNo, actNo)}的本步；换集用顶部「当前剧集」条">▶ 执行本集（${PMODEL.episodeNoLabel(actNo)}）</button>`;
@@ -2281,6 +2584,21 @@ function bindPortraitActs(root, ctx) {
   const p = liveCtx?.p;
   if (!p) return;
   const toast = ctx?.toast || (() => {});
+  // 任务明细折叠：只翻模块态 + 局部重绘，不发请求、不整页重建（SSE 重绘后仍保持展开态）
+  root.querySelectorAll('[data-se="portrait-tasks-toggle"]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setPortraitTasksOpen(!portraitTasksOpenState());
+    paintPortraitArea();
+  }));
+  // 一键重试失败任务：只把失败的视图送给后端（后端精确重出，不覆盖已成功的图）
+  root.querySelectorAll('[data-se="portrait-retry-failed"]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const chars = p.management?.characters || [];
+    const viewsByChar = collectFailedViewsForRetry(ui.portraitJob, chars);
+    const n = Object.values(viewsByChar).reduce((s, keys) => s + keys.length, 0);
+    if (!n) { toast('没有可重试的失败任务', 'warn'); return; }
+    startPortraitJob({ toast, ctx, p, characterIds: Object.keys(viewsByChar), viewsByChar, retryCount: n });
+  }));
   root.querySelectorAll('[data-act="char-gen-all"]').forEach((b) => b.addEventListener('click', () => startPortraitJob({ toast, ctx, p })));
   root.querySelectorAll('[data-act="char-regen-all"]').forEach((b) => b.addEventListener('click', () => {
     const chars = p.management?.characters || [];
@@ -2308,6 +2626,15 @@ function bindPortraitActs(root, ctx) {
       if (d.job) applyPortraitJob(d.job);
       toast('已请求暂停：当前这张生成结束后停止', 'ok');
     } catch (e2) { toast(e2.message, 'err'); b.disabled = false; }
+  }));
+  // 只重出正面：正面是其余视图的身份基准，修好基准后应整组重出，避免新旧混用
+  root.querySelectorAll('[data-se="regen-front"]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const c = (p.management?.characters || []).find((x) => x.id === b.dataset.char);
+    if (!c) return;
+    if (!window.confirm(`只重出「${c.name}」的正面基准图？\n新的正面会替换现有图；为了让侧面/特写/定妆板仍是同一个人，建议随后点「↻ 重出本角色」整组重出。`)) return;
+    regenCharView({ toast, ctx, p, c, key: 'front' });
   }));
   root.querySelectorAll('[data-act="char-detail"]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -2357,7 +2684,7 @@ function rerenderLive() {
 
 /** 启动后台任务：POST 立即返回 jobId，之后用 SSE + 轮询双通道更新卡片。
  *  force=true：忽略「只补缺失」，已生成的真实图也覆盖重出（全部重新生成）。 */
-async function startPortraitJob({ toast = () => {}, ctx, p, characterIds = null, force = false } = {}) {
+async function startPortraitJob({ toast = () => {}, ctx, p, characterIds = null, force = false, viewsByChar = null, retryCount = 0 } = {}) {
   if (apiStale()) {
     toast('服务端仍在运行旧版本：请重启服务（终端 Ctrl+C 后重新 npm start）再生成，否则只会得到占位图', 'err');
     return;
@@ -2372,6 +2699,7 @@ async function startPortraitJob({ toast = () => {}, ctx, p, characterIds = null,
       onlyMissing: !force, regenerateMock: true, requireReal: true,
       concurrency: 2,
       ...(characterIds ? { characterIds } : {}),
+      ...(viewsByChar && Object.keys(viewsByChar).length ? { viewsByChar, onlyMissing: true } : {}),
     }));
     if (!d.jobId) {
       // 旧服务端没有任务接口：立即给出可执行的修复动作，而不是让用户等一个挂住的同步请求
@@ -2379,7 +2707,9 @@ async function startPortraitJob({ toast = () => {}, ctx, p, characterIds = null,
     }
     if (d.job) applyPortraitJob(d.job);
     if (d.jobId) watchPortraitJob(d.jobId, { toast, ctx, p });
-    toast(d.message || '已开始生成角色图', 'ok');
+    toast(retryCount
+      ? `已开始重试失败任务：共 ${retryCount} 项（只重出失败视图，并补齐因失败中断而未出图的视图，不覆盖已成功的图）`
+      : (d.message || '已开始生成角色图'), 'ok');
     paintPortraitArea();
   } catch (e) {
     toast(`启动生成失败：${e.message}`, 'err');
@@ -2541,20 +2871,29 @@ function bindEvents(host, ctx, { m }) {
   };
   /** 各 AI 入口旁的模型下拉（rerender 会重建 DOM，每次重挂；选择由 localStorage 记忆） */
   const mountModelPickers = () => {
-    const aiFill = q('[data-act="ai-fill"]');
-    if (aiFill && !host.querySelector('[data-model-pick="bible"]')) ensureModelPicker('bible', aiFill.parentElement, aiFill);
-    const aiCover = q('[data-act="ai-cover"]');
-    if (aiCover && !host.querySelector('[data-model-pick="cover"]')) ensureModelPicker('cover', aiCover.parentElement, aiCover);
+    // ① 模型设置收拢到独立一行：项目默认模型（文本）+ 多媒体模型（出图接口 / 提示词模型）。
+    // entry key 仍是 bible / cover，记忆与 withModelId / withInterfaceId 的请求透传语义不变。
+    // 固定子槽而非往同一个容器 append：两个下拉都是异步插入，共用容器会让先后顺序随网络响应漂移
+    const textBox = q('#pv-text-model');
+    if (textBox && !host.querySelector('[data-model-pick="bible"]')) ensureModelPicker('bible', textBox);
+    const promptBox = q('#pv-media-prompt');
+    if (promptBox && !host.querySelector('[data-model-pick="cover"]')) ensureModelPicker('cover', promptBox);
     const novelBtn = host.querySelector('[data-ai="outline"]');
     if (novelBtn && !host.querySelector('[data-model-pick="novel"]')) ensureModelPicker('novel', novelBtn.parentElement, novelBtn);
     const charBtn = host.querySelector('[data-act="char-extract"]');
     if (charBtn && !host.querySelector('[data-model-pick="chars"]')) ensureModelPicker('chars', charBtn.parentElement, charBtn);
-    // 剧本台：单集 / 批量生成都按「项目 + episode 入口」记忆模型选择
-    const scriptBtn = q('[data-act="gen-scripts"][data-missing="1"]');
-    if (scriptBtn && !host.querySelector('[data-model-pick="episode"]')) ensureModelPicker('episode', scriptBtn.parentElement, scriptBtn);
-    // 本次使用的 ComfyUI 接口：角色与封面入口（同类档案少于 2 份时不插入）
-    if (charBtn) ensureInterfacePicker('character-view', charBtn.parentElement, charBtn);
-    if (aiCover) ensureInterfacePicker('cover', aiCover.parentElement, aiCover);
+    // 剧本台固定选择条：单集 / 批量 / 分季 / 流水线所有剧本生成请求共用同一个 episode 入口。
+    // 库为空也保留可见状态（未配置 → 内置模板），不再让控件整个消失。
+    const scriptSlot = q('[data-script-model-slot]');
+    if (scriptSlot) mountScriptModelBar('episode', scriptSlot, { onSettings: () => ctx.onSettings?.() });
+    // 本次使用的 ComfyUI 接口：正面基准图可单独指定工作流，其余视图 / 定妆板各有板块记忆
+    if (charBtn) {
+      ensureInterfacePicker('character-front', charBtn.parentElement, charBtn);
+      ensureInterfacePicker('character-view', charBtn.parentElement, charBtn);
+      ensureInterfacePicker('character-sheet', charBtn.parentElement, charBtn);
+    }
+    const ifaceBox = q('#pv-media-iface');
+    if (ifaceBox && !host.querySelector('[data-iface-pick="cover"]')) ensureInterfacePicker('cover', ifaceBox);
   };
   const manage = async (action, value, silent = false) => {
     try {
@@ -2656,7 +2995,16 @@ function bindEvents(host, ctx, { m }) {
       rerender();
     } catch (err) {
       ui.script.busyNo = null;
-      toast(err.message, 'err');
+      // 请求报错才弹窗；批量「部分成功」仍用原来的 toast 汇总。
+      // 强制刷一次模型库，让弹窗里能直接换档案重试，而不是让用户关掉弹窗去找选择条。
+      const models = await modelRoster(true).then((r) => r.models).catch(() => []);
+      showScriptError({
+        message: err.message,
+        results: err.results,
+        models,
+        onRetry: () => generateEpisode(no),
+        onSettings: () => ctx.onSettings?.(),
+      });
       rerender();
     }
   };
@@ -2674,10 +3022,30 @@ function bindEvents(host, ctx, { m }) {
       rerender();
     } catch (err) {
       ui.script.batchBusy = '';
-      toast(err.message, 'err');
+      const models = await modelRoster(true).then((r) => r.models).catch(() => []);
+      showScriptError({
+        message: err.message,
+        results: err.results,
+        models,
+        onRetry: () => generateBatch(onlyMissing, nos),
+        onSettings: () => ctx.onSettings?.(),
+      });
       rerender();
     }
   };
+  // 流水线卡片「重写本集剧本」旁：就地跳到「本次剧本模型」选择条并聚焦下拉
+  host.querySelectorAll('[data-smb="switch"]').forEach((b) => b.addEventListener('click', () => {
+    const focusBar = () => {
+      const slot = host.querySelector('[data-script-model-slot]');
+      if (!slot) return;
+      slot.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      slot.querySelector?.('select')?.focus?.();
+      slot.classList.add('smb-flash');
+      setTimeout(() => slot.classList.remove('smb-flash'), 1600);
+    };
+    if (host.querySelector('[data-script-model-slot]')) focusBar();
+    else { gotoStep('script', { rerender: true }); setTimeout(focusBar, 0); }
+  }));
   host.querySelectorAll('[data-act="gen-ep-script"]').forEach((b) => b.addEventListener('click', () => {
     const no = Number(b.dataset.no);
     const ep = (p.management?.episodes || []).find((e) => Number(e.no) === no);
@@ -2712,6 +3080,16 @@ function bindEvents(host, ctx, { m }) {
     rerender();
   };
   host.querySelectorAll('[data-act="pick-ep"]').forEach((b) => b.addEventListener('click', () => selectEp(b.dataset.no)));
+  // ⑤「展示全部剧集」：只翻本卡内 [data-fl-other] / [data-fl-text] 的 hidden，
+  // 不重绘、不发请求 —— 本集任务面板、其它输入草稿与滚动位置都不会被冲掉。
+  host.querySelectorAll('[data-fl="toggle-all"]').forEach((b) => b.addEventListener('click', () => {
+    const card = b.closest('.pv-flow') || host;
+    const on = !ui.flowShowAll;
+    ui.flowShowAll = on;
+    card.querySelectorAll('[data-fl-other]').forEach((el) => { el.hidden = !on; });
+    card.querySelectorAll('[data-fl-text]').forEach((el) => { el.hidden = (el.dataset.flText === 'all') !== on; });
+    card.querySelectorAll('[data-fl="toggle-all"]').forEach((x) => x.setAttribute('aria-pressed', String(on)));
+  }));
   host.querySelectorAll('[data-act="ep-prev"], [data-act="ep-next"]').forEach((b) => b.addEventListener('click', () => selectEp(b.dataset.no)));
   host.querySelectorAll('[data-ep-select]').forEach((sel) => sel.addEventListener('change', () => selectEp(sel.value)));
   // 季下拉：选季 = 选中该季顺序上的第一集（空季给明确提示）
@@ -2757,6 +3135,28 @@ function bindEvents(host, ctx, { m }) {
     } else {
       toast(`第 ${no} 集已撤销定稿，可继续修改`, 'ok');
     }
+  }));
+
+  // 每集出场角色对账：只补本集新出现、全局角色库缺少的人物（data-se 不新增 data-act 基线）
+  host.querySelectorAll('[data-se="ensure-cast"]').forEach((b) => b.addEventListener('click', async () => {
+    const no = Number(b.dataset.no) || activeEpisodeNo(p.management || {});
+    if (!no) { toast('请先选择当前剧集', 'err'); return; }
+    b.disabled = true;
+    const old = b.textContent;
+    b.textContent = '正在检查本集角色…';
+    try {
+      const d = await api(`/api/projects/${p.id}/episodes/${no}/characters/ensure`, {});
+      if (Array.isArray(d.characters)) p.management.characters = d.characters;
+      const ep = (p.management.episodes || []).find((e) => Number(e.no) === no);
+      if (ep && Array.isArray(d.characterIds)) ep.characterIds = d.characterIds;
+      toast(d.message || '本集角色检查完成', d.ok ? 'ok' : 'err');
+      await ctx.onChanged?.();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+    b.disabled = false;
+    b.textContent = old;
+    rerender();
   }));
 
   // 分集制作：单集执行第⑤⑥⑦步（后端 episode-runner，状态记 ep.steps）
@@ -2969,10 +3369,17 @@ function bindEvents(host, ctx, { m }) {
   }));
   host.querySelectorAll('[data-act="cover"]').forEach((b) => b.addEventListener('click', () => ctx.onOpenCover?.()));
   q('[data-act="open-canvas"]')?.addEventListener('click', () => ctx.onOpenCanvas?.());
-  q('[data-act="goto-upload"]')?.addEventListener('click', () => { ui.upload.open = true; gotoStep('upload', { rerender: true }); });
-  q('[data-act="goto-ai"]')?.addEventListener('click', () => { ui.ai.open = true; gotoStep('upload', { rerender: true }); });
-  q('[data-act="toggle-upload"]')?.addEventListener('click', () => { ui.upload.open = !ui.upload.open; rerender(); });
-  q('[data-act="toggle-ai"]')?.addEventListener('click', () => { ui.ai.open = !ui.ai.open; rerender(); });
+  // ② 故事来源二选一：切到另一个来源时关掉前一个表单，避免两张大卡同时铺开
+  const selectStorySource = (which) => {
+    ui.storySource = which;
+    ui.upload.open = which === 'upload';
+    ui.ai.open = which === 'ai';
+    rerender();
+  };
+  q('[data-act="goto-upload"]')?.addEventListener('click', () => selectStorySource('upload'));
+  q('[data-act="goto-ai"]')?.addEventListener('click', () => selectStorySource('ai'));
+  q('[data-act="toggle-upload"]')?.addEventListener('click', () => { ui.storySource = 'upload'; ui.upload.open = !ui.upload.open; ui.ai.open = false; rerender(); });
+  q('[data-act="toggle-ai"]')?.addEventListener('click', () => { ui.storySource = 'ai'; ui.ai.open = !ui.ai.open; ui.upload.open = false; rerender(); });
 
   // 项目信息：保存（含项目名称）+ AI 一键生成（信息 + 封面）
   const aiBtns = () => [q('[data-act="ai-fill"]'), q('[data-act="ai-cover"]')].filter(Boolean);
@@ -3016,16 +3423,40 @@ function bindEvents(host, ctx, { m }) {
   });
   q('[data-act="ai-fill"]')?.addEventListener('click', async () => {
     captureState(host);
+    // 前置：项目还没有故事时，弹窗说明并直达 ② 准备故事（默认推荐「上传小说」），零请求。
+    const novelText = String(m.source?.text || p.management?.source?.text || '').trim();
+    if (!novelText) {
+      openNoStoryDialog({
+        onGoUpload: () => {
+          ui.storySource = 'upload';
+          ui.upload.open = true; ui.ai.open = false;
+          gotoStep('upload', { rerender: true });
+        },
+      });
+      return;
+    }
+    // 已上传小说：AI 先读原著生成「故事概略」，再用概略配置全部项目信息 —— 简介可留空。
+    // 原著过短（<40 字，与后端一致）时退回既有的「故事简介必填」约束。
+    const fromNovel = novelText.length >= 40;
     const idea = String(q('#pv-bi-idea')?.value || '').trim();
-    setAiBusy(true);
+    if (!fromNovel && !idea) {
+      toast('请先填写故事简介，AI 才会据此自动填写项目基础信息', 'err');
+      q('#pv-bi-idea')?.focus();
+      return;
+    }
+    setAiBusy(true, fromNovel ? '✦ 正在读小说生成概略…' : undefined);
     try {
-      const d = await api(`/api/projects/${p.id}/bible/ai`, withModelId('bible', { idea, regenerate: true }));
+      const d = await api(`/api/projects/${p.id}/bible/ai`, withModelId('bible', {
+        idea, fromNovel, regenerate: true,
+      }));
+      const gist = String(d.synopsis || idea || '').trim();
       toast(d.message || '已补全', 'ok');
       // AI 可能会重新命名项目：本地立即同步，避免标题栏/列表看起来「没改」
       if (d.name) { p.name = d.name; ui.projectName = d.name; }
       ui.info = {};
-      ui.skipCapture = true;   // 服务端已改写 bible：丢弃 DOM 里的旧编辑稿，直接渲染新数据
-      try { await generateCover(idea); } catch (err) { toast(err.message, 'err'); }
+      ui.synopsis = gist || null;   // 服务端已把概略写进 bible.synopsis，null 时渲染会读它
+      ui.skipCapture = true;        // 服务端改写 bible：丢弃 DOM 里的旧编辑稿
+      try { await generateCover(gist || idea); } catch (err) { toast(err.message, 'err'); }
       await ctx.onChanged?.();
       rerender();
     } catch (err) { toast(err.message, 'err'); setAiBusy(false); }
@@ -3092,6 +3523,36 @@ function bindEvents(host, ctx, { m }) {
       reader.readAsText(file, 'utf-8');
     }
   };
+  // 拖拽投放：与「选择文件」共用 readFiles —— 自然排序、200 文件 / 1000 万字上限、
+  // 文件 chips 排序删除、提交链路完全不变，只是多一个把文件放进来的入口。
+  const dropCard = q('[data-drop-zone="upload"]');
+  if (dropCard) {
+    const stopDrag = (e) => { e.preventDefault(); e.stopPropagation(); };
+    dropCard.addEventListener('dragenter', (e) => { stopDrag(e); dropCard.classList.add('is-dragover'); });
+    dropCard.addEventListener('dragover', (e) => {
+      stopDrag(e);
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      dropCard.classList.add('is-dragover');
+    });
+    dropCard.addEventListener('dragleave', (e) => {
+      stopDrag(e);
+      if (!dropCard.contains(e.relatedTarget)) dropCard.classList.remove('is-dragover');
+    });
+    dropCard.addEventListener('drop', (e) => {
+      stopDrag(e);
+      dropCard.classList.remove('is-dragover');
+      readFiles(e.dataTransfer?.files);
+    });
+  }
+  // 拖到工作台别处时阻止浏览器直接打开文件（会导致离开页面）；只装一次，避免重绘重复绑定
+  if (!host.dataset.dropGuard) {
+    host.dataset.dropGuard = '1';
+    const guard = (e) => {
+      if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault();
+    };
+    host.addEventListener('dragover', guard);
+    host.addEventListener('drop', guard);
+  }
   const readSplit = () => ({
     strategy: q('[data-up-split].selected')?.dataset.upSplit || m.split?.strategy || 'chapter',
     targetChars: Number(q('#pv-up-target')?.value) || m.split?.targetChars || 1200,
@@ -3289,6 +3750,8 @@ function bindEvents(host, ctx, { m }) {
   host.querySelectorAll('[data-dir="manage"]').forEach((b) => b.addEventListener('click', () => {
     if (directorBusy()) return;
     openDirectorManager({
+      projectId: p?.id || '',
+      onOpenChat: (scope) => ctx.onChatStep?.(scope),
       onChanged: async () => { await ctx.onChanged?.(); rerender(); },
     });
   }));

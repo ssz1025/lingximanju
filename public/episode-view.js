@@ -5,7 +5,9 @@
  * 所有动作都打到 /api/projects/:id/episodes/:no/*，成功后重新拉详情，状态自动联动。
  * ==========================================================================*/
 import { mountEpisodeCanvas } from './episode-canvas.js';
-import { ensureModelPicker, withModelId } from './model-picker.js';
+import { withModelId, modelRoster } from './model-picker.js';
+import { mountScriptModelBar } from './script-model-bar.js';
+import { showScriptError } from './script-error-dialog.js';
 import { ensureInterfacePicker, withInterfaceId } from './interface-picker.js';
 import { storyboardDescription } from './project-options.js';
 import { esc, cut } from './utils.js';
@@ -22,7 +24,7 @@ const ui = {
   host: null, ctx: null, projectId: null, no: null,
   tab: 'source', data: null, busy: '', msg: '', msgErr: false,
   charEdit: false, selected: [], lightbox: null,
-  scriptEdit: false, scriptDraft: null,
+  scriptEdit: false, scriptDraft: null, castResult: null,
 };
 
 async function get(path) {
@@ -36,7 +38,12 @@ async function post(path, body = {}, method = 'POST') {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error(d.error || `HTTP ${r.status}`);
+    err.status = r.status;
+    err.results = Array.isArray(d.results) ? d.results : [];
+    throw err;
+  }
   return d;
 }
 
@@ -97,13 +104,18 @@ function fmtDur(sec) {
   return n < 60 ? `${n}″` : `${Math.floor(n / 60)}′${String(n % 60).padStart(2, '0')}″`;
 }
 
-/** 一行正文的类型：对白 / 动作画面 / 旁白音效 / 场次头 */
+/** 一行正文的类型：v3 标记 / 对白 / 动作 / 旁白音效 / 场次头（旧格式仍兼容） */
 function lineKind(line) {
   const t = String(line || '').trim();
-  if (/^【.*】$/.test(t)) return 'head';
+  if (/^#{1,2}\s*EP\d{3}/.test(t) || /^【.*】$/.test(t)) return 'head';
+  if (/^[\[［]OS[\]］]/.test(t)) return 'dlg';
+  if (/^[\[［](VO|SFX)[\]］]/.test(t)) return 'vo';
+  if (/^[\[［]画面文字[\]］]/.test(t)) return 'screen';
+  if (/^[\[［]连续性[\]］]/.test(t)) return 'cont';
+  if (/^[（(]/.test(t)) return 'act';
   if (/^(动作|画面|镜头)[:：]/.test(t)) return 'act';
-  if (/^(旁白|画外音|音效|声音)[:：]/.test(t)) return 'vo';
-  if (/^[^：:\s【】]{1,12}\s*[：:]/.test(t)) return 'dlg';
+  if (/^(旁白|画外音|音效|声音|字幕|备注|注)[:：]/.test(t)) return 'vo';
+  if (isScriptDialogueLine(t)) return 'dlg';
   return '';
 }
 
@@ -116,6 +128,18 @@ function sceneCraftHTML(s) {
   if (!rows.length && !tags.length) return '';
   return `${rows.length ? `<div class="ev-scene-craft">${rows.map(([k, v]) => `<span><b>${k}</b>${esc(v)}</span>`).join('')}</div>` : ''}
     ${tags.length ? `<div class="ev-scene-tags">${tags.map((t) => `<em>${esc(t)}</em>`).join('')}</div>` : ''}`;
+}
+
+/** v3 对白口径（与后端一致）：现场对白与 [OS] 算对白，其余标记 / 场次头 / 动作都不算 */
+export function isScriptDialogueLine(line = '') {
+  const s = String(line || '').trim();
+  if (!s) return false;
+  if (/^#{1,2}\s*EP\d{3}/.test(s) || /^【.*】$/.test(s) || /^[（(]/.test(s)) return false;
+  if (/^[\[［]OS[\]］]/.test(s)) return /^[\[［]OS[\]］]\s*[^：:\s]{1,12}\s*[：:]/.test(s);
+  if (/^[\[［](VO|SFX|画面文字|连续性)[\]］]/.test(s)) return false;
+  const m = s.match(/^([^：:\s【】]{1,12})(?:（[^）]*）|\([^)]*\))?\s*[：:]/);
+  if (!m) return false;
+  return !/^(动作|画面|镜头|字幕|备注|场景|时间|地点|注|旁白|画外音|内心|音效|声音|环境声|转场)$/.test(m[1]);
 }
 
 /** 剧本统计（与后端 episode-script.mjs 同口径的轻量前端版，用于展示） */
@@ -131,8 +155,7 @@ function scriptStats(sc = {}) {
       if (!line) continue;
       lines += 1;
       chars += line.length;
-      const m = line.match(/^([^：:\s【】]{1,12})(?:（[^）]*）|\([^)]*\))?\s*[：:]/);
-      if (m && !/^(动作|画面|镜头|字幕|备注|场景|时间|地点|注|旁白|画外音|音效|声音)$/.test(m[1])) dialogue += 1;
+      if (isScriptDialogueLine(line)) dialogue += 1;
     }
   }
   return { scenes: scenes.length, lines, dialogue, chars, characters: (sc.characters || []).length };
@@ -158,7 +181,7 @@ function readScriptDraft() {
 
 function scriptEditorHTML(sc) {
   return `<div class="ev-script-editor" id="ev-script-editor">
-    <div class="ev-editor-tip">每行一句：对白写「角色：「台词」」，动作写「动作：…」。保存后来源标记为「人工编辑」，分镜 / 导演包读取最新版本。</div>
+    <div class="ev-editor-tip">每行一条可拍摄信息：场次头「## EP001-SC001 内 · 地点 · 时间」、动作「（一个可见变化）」、对白「角色（表演策略）：台词」，[OS] / [VO] / [SFX] / [画面文字] / [连续性] 按需。保存后来源标记为「人工编辑」，分镜 / 导演包读取最新版本。</div>
     <label class="ev-edit-wide">片名<input data-scr="title" value="${esc(sc.title || '')}"></label>
     <label class="ev-edit-wide">梗概<textarea data-scr="logline" rows="2">${esc(sc.logline || '')}</textarea></label>
     ${(sc.scenes || []).map((s, i) => `<section class="ev-edit-scene" data-scr-scene="${esc(s.id || `S${i + 1}`)}">
@@ -188,11 +211,12 @@ function scriptHTML(d) {
     const next = d.neighbors?.next;
     return `<div class="ev-card ev-blank">
     <div class="ev-blank-ico">✎</div><h3>这一集还没有剧本</h3>
-    <p>调用大模型把本集拆分原文写成统一格式剧本（场景 / 人物 / 对白）。生成时会带上上一集结尾与本集钩子，避免每集都像第一集。未配置模型时使用内置模板，内容仍取自本集原文与真实角色。</p>
+    <p>调用大模型把本集拆分原文写成统一格式剧本（场景 / 人物 / 对白）。生成时会带上上一集结尾与本集钩子，避免每集都像第一集。没有可用文本模型时使用内置模板，内容仍取自本集原文与真实角色。</p>
     <div class="ev-blank-acts"><button class="btn primary" data-act="gen-script">✦ 生成本集剧本</button>
       <button class="btn" data-act="gen-all-scripts">✦ 生成全部缺失剧本</button></div>
+    <div class="ev-model-bar" data-script-model-slot></div>
     ${prev?.hasScript || next?.hasScript ? `<div class="ev-note">相邻集：${prev ? `第 ${prev.no} 集${prev.hasScript ? ' 已有剧本' : ' 无剧本'} · ` : ''}${next ? `第 ${next.no} 集${next.hasScript ? ' 已有剧本' : ' 无剧本'}` : ''}${next?.hasScript ? ' — 可先读下一集保持衔接' : ''}</div>` : ''}
-    ${d.config?.llmConfigured ? '' : '<div class="ev-warn">⚠ 文本大模型未配置，将使用内置模板。<button class="btn sm" data-act="settings">去配置模型</button></div>'}
+    ${d.config?.llmConfigured ? '' : '<div class="ev-warn">⚠ 当前没有可用的文本模型档案，本次会用内置模板；可在下方「本次剧本模型」里选择，或到设置新增档案。<button class="btn sm" data-act="settings">去配置模型</button></div>'}
   </div>`;
   }
   const st = scriptStats(sc);
@@ -207,6 +231,7 @@ function scriptHTML(d) {
         <a class="btn sm" href="/api/projects/${esc(d.project.id)}/episodes/${ep.no}/script/export" download>⇩ 导出 .md</a>
         <button class="btn sm" data-act="${editing ? 'cancel-script' : 'edit-script'}">${editing ? '取消编辑' : '✎ 编辑'}</button>
         <button class="btn sm" data-act="gen-script">↻ 重新生成</button></span></div>
+    <div class="ev-model-bar" data-script-model-slot></div>
     <div class="ev-script-stats">
       <span><b>${st.scenes}</b>场</span><span><b>${st.lines}</b>行</span><span><b>${st.dialogue}</b>句对白</span>
       <span><b>${st.chars.toLocaleString()}</b>字</span><span><b>${st.characters}</b>角色</span>
@@ -231,15 +256,10 @@ function scriptHTML(d) {
   </div>`;
 }
 
-/** 剧本区的模型下拉（空态与重新生成两处都可能挂；库为空 / 已挂过则跳过） */
+/** 剧本区固定「本次剧本模型」选择条：空态与已生成两处共用同一入口记忆 */
 function mountScriptPicker(host) {
-  const blank = host.querySelector('.ev-blank-acts');
-  if (blank && !blank.querySelector('[data-model-pick]')) {
-    ensureModelPicker('episode', blank, blank.firstElementChild);
-    return;
-  }
-  const head = host.querySelector('.ev-card-head span');
-  if (head && !head.querySelector('[data-model-pick]')) ensureModelPicker('episode', head, head.firstElementChild);
+  const slot = host.querySelector('[data-script-model-slot]');
+  if (slot) mountScriptModelBar('episode', slot, { onSettings: () => ui.ctx?.onSettings?.() });
 }
 
 function charactersHTML(d) {
@@ -249,10 +269,16 @@ function charactersHTML(d) {
   return `<div class="ev-card">
     <div class="ev-card-head"><strong>👤 本集出场角色</strong><span>${picked.length} 位 · 按姓名 / 别名在本集原文中自动识别</span></div>
     <div class="ev-card-acts">
+      <button class="btn sm primary" data-se="ensure-cast" title="检查本集出现、但项目角色库里没有的人物，并就地补进全局角色库">✦ 检查并补齐本集角色</button>
       <button class="btn sm" data-act="redetect-chars">↻ 重新识别</button>
       <button class="btn sm" data-act="toggle-char-edit">${ui.charEdit ? '✓ 完成关联' : '✎ 手动关联角色'}</button>
       <button class="btn sm" data-act="open-char-manager">▦ 打开角色管理</button>
     </div>
+    ${ui.castResult ? `<div class="ev-note ev-cast-result">
+      ${ui.castResult.addedNames?.length ? `<span>本次新入库：<b>${esc(ui.castResult.addedNames.join('、'))}</b>（可在角色管理里完善人设与定妆）</span>` : '<span>本集出场角色均已登记，没有新增。</span>'}
+      ${ui.castResult.skipped?.length ? `<span class="warn">角色库已满 12 位，未自动入库：${esc(ui.castResult.skipped.join('、'))}，请在角色管理里手动取舍。</span>` : ''}
+      ${(ui.castResult.notes || []).map((n) => `<span>${esc(n)}</span>`).join('')}
+    </div>` : ''}
     ${ui.charEdit ? `<div class="ev-char-picker">${all.length ? all.map((c) => `<label class="ev-char-check">
         <input type="checkbox" data-char="${esc(c.id)}" ${ids.includes(c.id) ? 'checked' : ''}>
         <span><strong>${esc(c.name)}</strong><small>${esc(c.role || '未设定')}</small></span></label>`).join('') : '<div class="ev-empty-inline">项目还没有角色，先到角色管理里提取。</div>'}
@@ -488,10 +514,25 @@ function bind(d, ctx) {
     const hit = calls[act];
     if (!hit) return;
     b.disabled = true;
-    const out = await run(hit[0], hit[1]);
+    const out = await run(hit[0], hit[1], {
+      scriptError: act === 'gen-script' || act === 'gen-all-scripts',
+    });
     b.disabled = false;
     if (act === 'gen-pack' && out?.ok) {
       window.location.href = `${base}/director-pack`;
+    }
+  }));
+
+  // 本集角色对账：新按钮一律用 data-se + 事件委托，不动 data-act 基线集合
+  host.querySelectorAll('[data-se="ensure-cast"]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    const out = await run(() => post(`${base}/characters/ensure`, withModelId('episode', {})), '正在检查并补齐本集出场角色…');
+    b.disabled = false;
+    if (out) {
+      ui.castResult = {
+        addedNames: out.addedNames || [], skipped: out.skipped || [], notes: out.notes || [],
+      };
+      paint();
     }
   }));
 
@@ -524,7 +565,7 @@ function showLightbox() {
     <p>${esc(box.caption || '')}</p></div>`;
 }
 
-async function run(fn, busyText) {
+async function run(fn, busyText, opts = {}) {
   ui.busy = busyText;
   ui.msg = '';
   paint();
@@ -539,7 +580,18 @@ async function run(fn, busyText) {
     ui.busy = '';
     ui.msg = err.message;
     ui.msgErr = true;
-    ui.ctx?.toast?.(err.message, 'err');
+    // 剧本生成请求报错用弹窗给出模型名 / 原因 / 失败明细；其它动作保持原来的 toast
+    if (opts.scriptError) {
+      // 强制刷一次模型库，让报错弹窗里就能直接换档案重试
+      const models = await modelRoster(true).then((r) => r.models).catch(() => []);
+      showScriptError({
+        message: err.message,
+        results: err.results,
+        models,
+        onRetry: () => run(fn, busyText, opts),
+        onSettings: () => ui.ctx?.onSettings?.(),
+      });
+    } else ui.ctx?.toast?.(err.message, 'err');
     paint();
     return null;
   }

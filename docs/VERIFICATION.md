@@ -416,3 +416,101 @@
 | 验证 | `tests/ui-style.test.mjs` 新增 1 项静态回归（容器声明 / 主断点 / 7 条格位规则 / 表头不隐藏 / 620 断点 / 兜底 / 两个分组 / flex:none）→ **8/8**；**`npm test` 766/766**；`npm run check` **183 文件** |
 | 真实页面 | Playwright 四档 1440 / 1000 / 900 / 800 × 深浅主题：1440 保持 5 列，其余为 3 列两行且表头可见、5 个单元格格位 `(1,1)(2,1)(1,2)(2,2)(3,1~2)` 全部可见、操作按钮 4 个同一行、绑定表仅 800 单列、`docOverflowX=0` / `mainOverflowX=0`、**0 pageerror**；交互回归：JSON 展开折叠、常用 4 ↔ 全部 38、节点折叠、chip 定位、保存档案与试跑（**写请求全部拦截，不落盘**）、视频分类切换、Escape 全部通过；截图 `/tmp/pwtest/final-iface-*.png`、`final-cells-800.png` |
 | 边界 | 只动前端样式 + 2 个 wrapper，后端 / 数据 / 接口绑定 / 分类过滤均未改。档案列表仍按全部接口显示（视频接口会出现在图片服务里），板块绑定仍需滚动——用户选择本轮不处理 |
+
+## 2026-11-11 · 工作台「① 设置基础信息」重排 + AI 一键生成必填故事简介
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「AI 生成封面 / 上传参考图换封面按钮应在项目封面下面；AI 一键生成与保存项目信息放一起；项目默认模型和多媒体模型独立一行展示选择；AI 一键生成必须有故事简介，根据故事简介自动填写项目基础信息」。按「规划先行」先只读调研 + 书面方案，用户回「继续完成未完成的任务」后落地 |
+| 布局 | `public/project-view.js` 的 `infoCardHTML`：左侧封面改 `.pv-cover-col` 竖列，缩略图下新增 `.pv-cover-acts`（`ai-cover` / `cover` 两个 `btn.xs`）；`ai-fill` 从构想输入框旁移入 `.pv-hero-acts`，与 `save-info` 同行；新增 `.pv-model-row` 两列（项目默认模型 = 文本模型 / 多媒体模型 = 出图接口 + 封面提示词模型），三个下拉各占**固定子槽** `pv-text-model` / `pv-media-iface` / `pv-media-prompt` 并带 `data-cap` 小标签（避免两个异步下拉共用容器导致顺序漂移、且都显示「本项目默认模型」看不出区别）。`data-act` 集合保持 63 个不变 |
+| 故事简介 | 构想输入框改「故事简介（必填）」多行 `textarea`，独立状态 `ui.synopsis`（不再和第②步 AI 写小说共用 `ui.ai.idea`，两个输入框同时存在会互相覆盖）；`captureState` 同步存档；点击 `ai-fill` 空简介直接 toast + focus + return，零请求；成功后保留简介原文 |
+| 后端 | `src/api/routes/management.mjs` 的 `POST /api/projects/:id/bible/ai` 去掉「idea 为空回退 logline / 原著标题 / 项目名」，只读请求里的故事简介，空则 400「请先填写故事简介…」；仍按 `storyIdea` 产出写回 `title / genre / audience / logline / tone / artStyle / firstEpisodeTheme / worldview`。`/novel/ai` 的兜底链保留不动 |
+| 兼容 | 三个下拉的 entry key 仍是 `bible` / `cover` / `cover`，localStorage 按项目记忆与 `withModelId` / `withInterfaceId` 请求透传语义不变；Mock / 未配大模型仍只补空字段、不覆盖用户内容，配真实模型且 `regenerate:true` 才整组重写 |
+| 验证 | 新增 `tests/basic-info.test.mjs` **6/6**（封面按钮归属 / 保存行 / 模型行子槽与标签 / 必填与后端拒绝回退 / 简介独立存档 / 渲染无脏值）；更新 `tests/novel-ai.test.mjs` 空构想断言为 400；**`npm test` 772/772**、`npm run check` **184 文件**、`node --check` 两个改动文件通过 |
+| 真实页面 | 服务 45367 重启到新代码后 Playwright 直连（生成请求全部 route 拦截、不落盘）：封面两按钮 `below=true` 且文案正确、`.pv-hero-acts` 只剩 `save-info` + `ai-fill`、模型行 `grid-template-columns: 406.5px 406.5px` / 文本槽 1 个下拉 / 媒体槽 2 个下拉 / 位于保存行上方、故事简介是 3 行 textarea 且带「必填」；空简介点击 **0 请求**，填入简介后 **1 请求**且 body 为 `{"idea":"…","regenerate":true,"modelId":""}`；`docOverflowX=0`、**0 pageerror**（2 条 404 是上一轮事故遗留的缺失 png）；深浅主题截图 `/tmp/pwtest/basic-info-dark.png`、`basic-info-light.png`，模型行标签「文本模型 / 出图接口 / 提示词模型」清晰可读 |
+| 边界 | 只动前端布局 + 一处后端校验；`data-act` 零删减；真实大模型的整组重写策略、封面弹窗、导演面板、接口绑定均未改 |
+
+## 2026-11-11 · ① 无故事引导弹窗 + ② 故事来源二选一 / 精简拖拽上传
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「设置基础信息 AI 一键生成，弹窗提示没有生成故事并跳转到 2 准备故事，提示用上传小说；故事来源中上传小说或 AI 生成小说二选一；精简界面，上传小说可以拖拽放入，功能不变」。按「规划先行」给书面方案，用户拍板 **保留故事简介必填 + 新增无故事弹窗**、**四条一起落地** |
+| ① 拦截 | `ai-fill` 事件在简介校验**之前**新增前置判断 `hasStory = !!(m.source?.text \|\| p.management?.source?.text)`；无故事走 `openNoStoryDialog()`（挂 `#modal-root`，复用 `.modal-backdrop/.modal`），标题「还没有生成故事」、正文推荐「⇧ 上传小说」、主按钮「去第 ② 步 · 上传小说」→ 设 `ui.storySource='upload'` + `ui.upload.open=true` + `gotoStep('upload',{rerender:true})`；**零生成请求**。有故事后仍按既有「故事简介必填」执行，后端 `/bible/ai` 未改 |
+| ② 二选一 | 新增 `ui.storySource`（`'upload' \| 'ai'`，默认 upload，`resetUi` 重置）；`sourceCardHTML` 两个入口改为带 `aria-pressed` / `.selected` 的分段按钮；`uploadConsoleHTML` 由 `active` + `formOpen` **互斥渲染**，同一时刻只有一张表单；已有故事时默认收起两张表单，只留「✓ 故事已就绪」卡。`selectStorySource()` 切换时关掉另一来源的 open 态。两函数加 `export` 与可选 `opts`（仅测试显式指定来源/展开态），运行时签名不变 |
+| 精简 + 拖拽 | 上传卡长说明压成一行；拆分规则（3 张策略卡 + 3 个数字框 + 提示）收进 `<details class="pv-up-rules">` 默认折叠，**DOM 仍在 → `readSplit()` 照常读得到**；选择文件 / 示例 / 清空 / 粘贴 / files chips / 提交按钮与提交链路一行未改。新增 `.pv-drop-zone`，`dragenter/dragover/dragleave/drop` 统一走既有 `readFiles()`（自然排序、200 文件、1000 万字上限、chips 排序删除全部复用）；`host.dataset.dropGuard` 一次性守卫防止拖到别处时浏览器直接打开文件 |
+| 基线保护 | 弹窗按钮一律用 `data-ns`（不用 `data-act`），切换项复用既有 `goto-upload` / `goto-ai` / `toggle-upload` / `toggle-ai`：`data-act` 集合仍精确 **63 个**，`ui-style.test.mjs` 基线无需改 |
+| 验证 | 新增 `tests/story-source.test.mjs` **6/6**（二选一选中态 / 互斥渲染 / 精简不删入口 / 拖拽复用 readFiles / 状态默认值与重置 / 63 基线）；`tests/basic-info.test.mjs` 补 1 项（无故事拦截早于简介校验、弹窗文案与跳转、弹窗内无 data-act）→ **7/7**；**`npm test` 779/779**、`npm run check` **185 文件**、`node --check public/project-view.js` 通过 |
+| 真实页面 | 45367 重启到新代码后 Playwright 直连（`GET /api/projects/:id` 注入无故事 / 有故事两种状态，生成请求全部 route 拦截，**不落盘**）：无故事点一键生成 → 弹窗显示、文案与主按钮正确、**0 请求**；点主按钮 → 弹窗关闭、`#step-upload` 进入视口、nav 高亮 upload、只显示上传卡且选中态为 upload；切 AI → 只剩 `pv-ai-card`，切回 → 只剩 `pv-upload-card`；`<details>` 默认 `open=false` 但 `#pv-up-target` 与 3 张策略卡仍在 DOM、4 个 `data-up` 按钮齐全；模拟拖入 2 个 txt → 高亮出现/消除、2 个 chips、提示含合计 30 字；已有故事 → 默认收起两张表单、不弹窗、**1 请求**且 body 带 `idea`。`docOverflowX=0`、**0 pageerror**；深浅主题截图 `/tmp/pwtest/story-source-{dark,light}.png`、弹窗 `/tmp/pwtest/story-nostory-dialog.png` |
+| 边界 | 本轮只改前端 + 测试 + 文档，后端零改动；4 条 404 为历史遗留的 `assets/comfy_*.png`（两个页面各 2 条），与本轮无关。既有中文数字分卷按 `Intl.Collator('zh-Hans-CN')` 拼音排序（「第二卷」排在「第一卷」前）属原逻辑，按「功能不变」未改，可用 chips 的 ↑/↓ 手动微调 |
+
+## 2026-11-11 · ① 已上传小说时：AI 一键生成读原著出故事概略并配置全部项目信息
+
+| 项目 | 结果 |
+|---|---|
+| 反馈 | 「设置基础信息：如果已经上传了小说，AI 一键生成可以根据小说给出故事概略生成故事简介，并配置全部项目信息」。按「规划先行」给方案，用户拍板 **读小说生成概略 + 真实模型整组重写（推荐口径）**、**按方案执行** |
+| 新增生成能力 | `src/core/providers.mjs` 的 `SCHEMAS.storySynopsis`（150~300 字概略，只依据原著节选、不编造）+ `mockGenerate('storySynopsis')`：零 Key 时按开头 / 20% / 40% / 60% / 80% / 结尾均匀取原句、去重后截 300 字，不套主题模板（避免出现沈砚 / 星际飞船之类与用户小说无关的内容） |
+| 原著采样 | `src/api/routes/management.mjs` 新增导出 `buildNovelExcerpt(m)`：书名 + 最多 12 个章节标题（≤360 字）+ 开头 1200 字 + 中段均匀 3 段 + 结尾 600 字，**总计 ≤4000 字**。真实项目原著 13.6 万字，整本入模不可行 |
+| `/bible/ai` | 新增 `fromNovel = body.fromNovel && m.source.text.length >= 40`：先调 `storySynopsis` 得 `synopsis` → 用它当 `idea` 调 `storyIdea` → 8 个 bible 字段 + `synopsis` 一起写回，响应带 `synopsis`、message 前缀「已读小说生成故事概略（N 字）」。`overwrite = (regenerate \|\| fromNovel) && mode==='openai'`，即**只有真实模型才整组重写**；Mock 的 genre / tone / worldview 是内置模板，仍只补空字段，但概略始终写入。**无小说 / 普通请求的空简介仍 400**（上一轮约束保留） |
+| 持久化 | `src/core/project-steps.mjs` 的 `defaultBible` 加 `synopsis:''`、`applyManageAction('bible')` 白名单加 `b.synopsis = s('synopsis',2000) \|\| ''`（旧项目补空串不落 undefined）；① 简介框优先读 `bible.synopsis`，刷新不丢 |
+| 前端 | `infoCardHTML` 按 `hasNovel` 切换标记「必填」↔「可留空 · AI 读小说生成」（新增 `.pv-req.optional` 用 muted 色）与 hero 说明；`ai-fill` 无小说仍弹窗、小说 ≥40 字时带 `fromNovel:true` 且**空简介放行**，按钮显示「正在读小说生成概略…」，成功后用 `d.synopsis` 回填 `ui.synopsis` 并拿概略生成封面 |
+| 边界 | 画面风格 / 画幅 / 交付物 / 模型属用户偏好，不由 AI 改动；`data-act` 仍 63 个；长篇只采样片段，概略可能漏后段伏笔；Mock 项目不会出现「整组重写」，配置真实模型后才生效 |
+| 验证 | 新增 `tests/story-synopsis.test.mjs` **6/6**（采样范围 / Mock 概略取自原文 / 生成链路静态 / 后端空简介放行且 bible 持久化重开仍在 / 无小说 400 / 前端回填）；`tests/novel-ai.test.mjs` 补 1 项（Mock 只补空字段、synopsis 仍写入）；`tests/basic-info.test.mjs` 两项断言改为「有小说放行 / 无小说仍拦」；**`npm test` 786/786**、`npm run check` **186 文件**、四个改动文件 `node --check` 通过 |
+| 真实页面 | 45367 重启到新代码后 Playwright 直连（生成请求 route 拦截回显、**不落盘**）：已上传小说 → label「可留空 · AI 读小说生成」且 `.pv-req.optional` 生效、hero 文案更新；清空简介点一键生成 → **1 请求**且 body `fromNovel:true / idea:""`、简介框回填概略（完全匹配）、封面请求 `requirement` 就是该概略、按钮恢复原文；无小说 → 弹窗「还没有生成故事」、**0 请求**、标记回到「必填」；`docOverflowX=0`、**0 pageerror**。深浅主题截图 `/tmp/pwtest/novel-synopsis-{dark,light}.png`。4 条 404 仍是历史遗留 `assets/comfy_*.png` |
+
+## 2026-11-11 · 剧本生成 agent v3：可拍摄契约（集/场编号 + 六类行 + 跨集连续性）
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「④ 剧本创作：生成剧本参考给定格式，优化剧本生成 agent」——要求 `# EP001 【集名】` / `## EP001-SC001 内 · 地点 · 时间` / 圆括号动作（一段一个可见变化）/ `角色名（可执行的表演策略）：台词` / `[OS]` / `[VO]` / `[SFX]` / `[画面文字]` / `[连续性]`。按「规划先行」给书面方案，用户拍板 **改项目代码 + 新格式生成/双兼容解析 + 纯文本行行首标记 + [连续性] 提取并注入下一集** |
+| 契约 v3 | `core/screenplay.mjs` 重写 `SCREENPLAY_FORMAT_GUIDE`（12 行硬约束：集首行、场次头、动作一行一变化、表演策略必须可执行、台词不加引号、SFX 只写改变行动/信息的声音、画面文字必须给准确文字+载体、连续性只写跨场易丢状态、禁镜号景别运镜 BGM 心理活动、每场 ≥6 行含 ≥2 句对白）；`SCREENPLAY_GUIDE` / `PROJECT_GUIDE` 补集场编号、prevContinuity 承接、末场必须留状态；`SCREENPLAY_SCHEMA` 增 `episodeCode` / `sceneCode` / `continuity`。`providers.mjs` 的 system 提示经 `screenplayGuide(vars)` 自动带入，无需改调用点 |
+| 解析双兼容 | `parseScriptLine` 仍严格返回 `{kind,speaker,text}` 三字段（旧 deepEqual 断言不变），并继续认识 `动作：/画面：/旁白：/音效：/「台词」/【时间 · 地点】`；新增 `parseScriptLineRich` 读出 `tag / cue / carrier / sceneCode / interior / location / time`，识别 `# EP001 【集名】`、`## EP001-SC001 内 · 地点 · 时间`、圆括号动作、`[OS]→dialogue`、`[VO]→narration`、`[SFX]→sound`、`[画面文字]→subtitle`、`[连续性]→continuity` |
+| 生成链路 | `buildScriptVars` 下发 `episodeCode` / `sceneCodePrefix` / `prevContinuity`（从上一集 `script` 与 `scenes[].continuity` 抽 `[连续性]`，去重保序）；`narrative.episodeBriefs` 给整剧每集简报带编号；零 Key 兜底 `mockScene` 改输出 v3 行（场次头 / 圆括号动作 / 可执行表演策略 / `[VO]` / 末场 `[连续性]`），`mockEpisodeScreenplay` 把 prevRecap 写成 `[VO]`、prevContinuity 写成状态行；`enrichScreenplay` 补 `sceneCode` 与 `continuity` 且保持幂等 |
+| 归一 / 统计 / 导出 | `normalizeEpisodeScript` 补 `episodeCode` / `sceneCode` / `episodeNo` / `continuity`（`SCENE_EXTRA_KEYS` 同步增 2 个 key），`mergeScriptEdit` 在改过正文后按最终 `script` 重算状态；`scriptStats` / `scriptTiming` 增 `offscreenCount / screenTextCount / continuityCount / screenTextLines / continuityLines`，`[OS]` 算对白其余标记不算；`scriptIssues` 只对带 v3 场次头的剧本补 `no_continuity / no_scene_code`（info，旧剧本不刷屏）；`scriptToMarkdown` 带 `EP00x` 抬头、`EP00x-SC00x` 场号与「跨集状态」汇总 |
+| 前端 | `public/project-view.js` 新增 `scriptLineClass`（head/dlg/os/vo/sfx/screen/cont/act），阅读器按行首标记分色、场次头 title 带 sceneCode；`public/episode-view.js` 的 `lineKind` 与 `isScriptDialogueLine` 同步新口径，两处编辑器提示换 v3 写法；`styles.css` 全部走主题变量 + `color-mix`，**不新增 data-act**（63 个基线不变） |
+| 单元测试 | 新增 `tests/screenplay-format.test.mjs` **12/12**（rich 解析 / 旧格式三字段兼容 / 编号与连续性工具 / 提示词契约 / 零 Key 单集与整剧输出 / prevContinuity 注入 / 归一与编辑重算 / 统计口径 / 质量告警 / Markdown / 前端分行）；`screenplay-detail.test.mjs` 场次头断言改 v3、`episode-script.test.mjs` 的 `scriptStats({})` 断言补 3 个计数；**`npm test` 830/830**、`npm run check` **195 个文件**、6 个改动 JS 文件 `node --check` 全通过 |
+| 零 Key 实测 | 直接调 `providers.generate('screenplay', 单集 vars)` 打印三场正文：首行 `## EP001-SC00x 内外 · 地点 · 夜`、圆括号动作一行一变化、`沈砚（身体前倾）：这封信是谁送来的？`、末场 `[连续性] 信留在…（夜）。`；传入 `prevContinuity:['铜钱在沈砚左手里']` 后首场自动出现 `[连续性] 铜钱在沈砚左手里`，跨集注入链路成立 |
+| 边界 | 磁盘里已有的旧剧本**不迁移、不重写**，只影响新生成 / 重写的剧本；零 Key 兜底不编造 `[OS]` / `[SFX]` / `[画面文字]` 内容，这几类由真实模型按需产出；`data-act` 集合仍精确 63 个 |
+
+## 2026-11-11 · ④ 剧本创作：可选模型 + 失败弹窗
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「剧本创作可以选择模型，失败弹窗提示错误」。按「规划先行」给书面方案，用户拍板 **固定选择条 + 失败不回退且弹窗 + 弹窗只覆盖 HTTP 请求报错（批量部分成功维持 toast）** |
+| 现状修复 | 模型选择链路原本已有（`withModelId('episode')` 四处请求 → `resolveModelSettings`），但下拉只在批量按钮旁异步插入、模型库为空时整个消失、单集 / 流水线 / 分季入口看不到控件；真实模型失败会被 `providers.generate` 静默回退 Mock 并回报「剧本已生成」，用户看不到任何错误 |
+| 模型选择 | 新增 `public/script-model-bar.js`：工作台剧本台与剧集详情页剧本页各挂一条固定「本次剧本模型」选择条，按「项目 + episode 入口」记忆；库为空显示「未配置文本模型 · 将使用内置模板」+ 去配置模型；`model-picker.js` 新增 `modelRoster` / `clearStaleModelId`（10 秒节流刷新档案、清理已删除档案的残留选择）；`app.js` 的 `projectViewCtx` 补 `onSettings`。`styles.css` 主题化 `.smb` / `.script-error-*` 样式 |
+| 失败语义 | `providers.generate` 回退时带出 `__fallbackError`；`generateEpisodeScript` 在 `mode === 'openai'` 且有该字段时抛错并**不写回剧本**（零 Key `mock` 模式不受影响，仍用内置模板）；后端剧本端点校验 `modelId` 档案有效性，失效返回 400；批量全失败 502 的错误文案带首条原因并保留 `results: [{no,error}]` |
+| 弹窗 | 新增 `public/script-error-dialog.js`（复用 `#modal-root`，按钮一律 `data-se`）：工作台 `generateEpisode` / `generateBatch` 与详情页 `run()` 仅在请求报错（400 / 409 / 502）的 catch 中弹出，展示模型名与原因、批量逐集明细，提供「重试 / 模型设置 / 知道了」；`api()` / `post()` 把 502 的 `results` 挂到 Error 上；批量**部分成功**仍按原样 toast 汇总 |
+| 单元测试 | 新增 `tests/script-model-error.test.mjs` **11/11**（63 个 data-act 基线 / 弹窗不新增入口 / 模型槽与 withModelId 覆盖 / 请求报错才弹窗 / 后端契约 / 假端点回退原因 / 失效档案 400 / 单集 502 且剧本不写盘 / 批量 502 明细 / 零 Key 模板成功 / 失效记忆清理 / 弹窗文案转义与明细渲染）；**`npm test` 841/841**、`npm run check` **198 个文件**、9 个新增 / 改动 JS 文件 `node --check` 通过 |
+| 边界 | 弹窗只覆盖 HTTP 请求报错：批量部分成功（200 + `failed>0`）按用户选择保持原 toast；本机真实模型端点未实调，失败路径用不可达假端点 `127.0.0.1:9` 在临时数据目录内验证；不改动 `data/` 已有项目 |
+
+## 2026-11-11 · ④ 剧本创作：重写时「没有配置模型」且无处切换
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「重写剧本按钮提示没有配置模型，没有选择切换模型的选项」。按「规划先行」给书面方案，用户拍板 **三处同步切换 + 改判定与文案 + 空库常驻下拉并允许模板** |
+| 根因（实测） | ① `data/app-settings.json` 里模型库有 2 个 `configured=true` 档案（`/api/system/llm-models` 200），但 `episodes.mjs` 的 `config.llmConfigured` 只看旧全局 `llm`（本机 `provider=mock`、无 Key → `false`），详情页因此误报「⚠ 文本大模型未配置」；模板成功 message 也回「未配置大模型…（设置 → 模型可切换）」。② 失败弹窗让用户「在『本次剧本模型』里换一个模型」，弹窗内却没有下拉；③ 第③步流水线卡片「重写本集剧本」旁没有选择条；④ `model-picker.js` 的 `fetchRoster` 把一次接口失败永久缓存成空库，选择条会整条消失、整个会话都没有下拉 |
+| 修复 | `episodes.mjs` 新增导出 `scriptLlmConfigured`（按模型库 `configured` 档案判定，兼容旧全局 / 项目显式配置）并改提示文案；`model-picker.js` 失败结果不写 `roster`、新增 `modelRoster().error` 与 `setPickedModelId`；`script-model-bar.js` 每次挂载强制刷新（空库 / 失败时每次重试），空库也常驻下拉 +「刷新模型列表」「去配置模型」；`script-error-dialog.js` 内嵌「改用模型」下拉 +「用此模型重试」，选中写入与选择条共用的「项目 + episode」记忆；`project-view.js` 流水线重写按钮旁加 `data-smb="switch"` 跳转入口并聚焦选择条；`episode-view.js` 空态警示改准确；`styles.css` 补 `.script-error-model` / `.pv-step-model` / `.smb-flash` |
+| 单元测试 | `tests/script-model-error.test.mjs` 由 11 增至 **15/15**：新增 `scriptLlmConfigured` 5 例、弹窗下拉转义与「换模型重试」写入记忆、空库常驻下拉 + 刷新后出现档案并切换、接口失败标记 `error` 且可恢复；静态基线补刷新入口 / `setPickedModelId` / 失败不缓存 / 63 个 `data-act`。**`npm test` 845/845**、`npm run check` **198 个文件**、6 个改动 JS `node --check` 通过 |
+| 边界 | 不改生成语义、不动 `data/` 已有剧本；不新增 `data-act`，弹窗与流水线入口用 `data-se` / `data-smb`；本机真实模型端点未实调，默认档案 `deepseek-v4.1-flash` 若仍 401 会 502，此时弹窗可直接换 `mimo-v2.6-pro` 重试。**后端 Node 改动需重启服务**（Ctrl+C 后 `npm start`），前端刷新即可；未重启前旧进程仍会回旧文案 |
+
+## 2026-11-11 · ⑤ 角色与上下文：默认只展示正在处理的剧集
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「角色与上下文 只展示正在处理的剧集，其他的不要展示；只有用户点击展示全部的时候才展示其他剧集内容」。按「规划先行」先给书面方案（目标 / 涉及文件 / 修改点 / 影响 / 风险），用户下达继续指令后执行 |
+| 实现 | `public/project-view.js`：`ui.flowShowAll`（跨渲染保留、切项目由 `resetUi` 归零）+ 导出 `setFlowShowAll/flowScopeState`；`episodeFlowHTML(p,m,focusKey,opts)` 新增 `opts.onlyActive`，**仅 ⑤ `contextConsoleHTML` 启用**——非当前集的行与不含当前集的季组打 `data-fl-other` 并按状态加 `hidden`；卡头「▤ 展示全部剧集（另有 N 集）」/「▴ 收起其它剧集」与范围说明用两态 `data-fl-text` span 切换；`bindEvents` 点击后只翻本卡 DOM 的 `hidden`，**不重绘、不发请求**，SSE 重绘按 `ui.flowShowAll` 恢复 |
+| 边界 | ⑥⑦ 步不传 `onlyActive`，整表照旧全量展示；项目级共享角色库 / 定妆任务卡常驻（角色例外不变）；批量补齐、定稿、详情等入口一个不删；新入口走 `data-fl` 命名空间，63 个 `data-act` 基线不变。`.fl-row` 是 `display:flex` 会压过 UA 的 `[hidden]`，`styles.css` 第 27 节显式写 `.fl-row[hidden]…{display:none}` 才真正生效 |
+| 单元测试 | `tests/episode-scope.test.mjs` 由 7 增至 **13/13**：默认只 1 行可见 + 其它季整组隐藏、展开后全量可见且跨渲染保留、⑥⑦ 兼容、按钮不占 `data-act`、单集不出按钮、切集后仍只显示新的当前集、装配与 CSS 静态锁；**`npm test` 862/862**、`npm run check` **200 个文件**、2 个改动 JS `node --check` 通过 |
+| 真实页面 | Playwright 在 **45367**（用户实际在用端口）对 `prj_mw9v9e8g26wci`（4 集 / 3 季）跑深 · 浅两主题：默认 **1 行 / 1 季组**可见，点「展示全部剧集」→ **4 行 / 3 季组**且按钮与范围说明切到收起态，2.2s 后（含可能重绘）状态保持，再点收回 1 行 / 1 季组；`aria-pressed` false→true→false、`docOverflowX=0`、**0 pageerror / 0 console error**。截图 `/tmp/pwtest/context-focus-{dark,light}-{collapsed,expanded}.png`（脚本 `/tmp/pwtest/verify-context-focus.mjs`） |
+| 生效方式 | 纯前端改动：**浏览器刷新页面即可**，后端零改动、无需重启服务；本轮改动未 commit |
+
+## 2026-11-11 · ⑤ 角色与上下文：任务进度默认收起 / 展开明细 / 一键重试失败
+
+| 项目 | 结果 |
+|---|---|
+| 需求 | 「任务进度可以展开展示所有的生成任务，默认是收缩起来的，展开后可以一键重试失败的任务」。按「规划先行」先给书面方案（目标 / 涉及文件 / 修改点 / 影响 / 风险），用户确认后执行 |
+| 后端 | `src/core/character-portrait.mjs` 新增 `normalizeViewsByChar()`（只认 5 视图 + sheet，去重、挡非法字段）与 `portraitPlanFor()`（生成计划单一来源）；`ensureCharacterPortraits` 增 `viewsByChar`：显式列表的角色只生成指定视图且**不受 `onlyMissing` 跳过**（失败任务留着旧图也强制重出），缺正面仍自动前置补正面；`src/core/portrait-jobs.mjs` 透传并按同一计划算 `total` / `byChar[].total`，`viewsByChar` 写入落盘快照；`src/api/routes/management.mjs` 的 `/characters/views/all` 异步 / 同步两路都接受 `body.viewsByChar` |
+| 前端 | `public/project-view.js`：`ui.portraitTasksOpen` 默认 false（SSE 局部重绘保留、`resetUi` 切项目复位）；`portraitAreaHTML` 改成折叠面板——收起态只露汇总条 + 进度条 + 常驻主行动，展开态列出 `portraitTasksHTML()` 全部任务（2 位角色 × 6 项的状态 / 通道 / 失败原因）+ 角色卡；`collectFailedViewsForRetry()` 从 `job.byChar` 收集失败视图，正面失败导致的无图空洞一并恢复；「↻ 重试失败任务」下发 `viewsByChar`，按钮一律 `data-se`（63 个 `data-act` 基线不动）。`public/styles.css` 补 `.pvt-panel-*` / `.pvt-task-*`，显式 `.pvt-panel-body[hidden]{display:none}` |
+| 单元测试 | 新增 `tests/portrait-tasks.test.mjs` **8/8**：归一化与生成计划、业务层只重出 1 张且正面原样保留、后台任务 total 与快照、路由同步路径透传、前端默认收起 / 展开 12 行明细 / 失败原因 / 重试按钮 / 收集口径。**`npm test` 882/882**、`npm run check` **202 个文件**、`node --check` 通过 |
+| 实测口径 | Node 实测：显式计划 `{keys:['side'],sheet:true,explicit:true}`；`ensureCharacterPortraits({viewsByChar:{c1:['side']}})` → `total=1 / generated=1 / skipped=0`，旧正面 URL 未变；前端实测收起含 `data-portrait-body hidden`、展开 12 行任务、失败时出现重试按钮 |
+| 边界 / 生效 | 收起态仍可直接「补齐缺失图 / 全部重新生成」；刷新恢复的落盘快照含失败明细，重试按钮刷新后可用；纯前端刷新即生效，**后端 3 个文件需重启服务**；本轮改动未 commit |

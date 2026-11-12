@@ -6,7 +6,8 @@ import { esc } from './utils.js';
 
 /** 板块中文名；顺序即设置页绑定表的展示顺序 */
 export const SCOPE_LABELS = {
-  cover: '封面', character: '角色立绘', 'character-view': '角色多视图',
+  cover: '封面', character: '角色立绘',
+  'character-front': '角色正面基准图', 'character-view': '角色多视图',
   'character-sheet': '角色定妆板', keyframe: '关键帧', storyboard: '分镜图',
   transition: '转场', poster: '海报', grid: '宫格分镜',
   video: '视频片段', voice: '音色抽卡',
@@ -68,6 +69,28 @@ export function pickedInterfaceId(scopeId, projectId = scope.projectId) {
 export function withInterfaceId(scopeId, body = {}) {
   const id = pickedInterfaceId(scopeId);
   return id ? { ...body, interfaceId: id } : { ...body };
+}
+
+/**
+ * 角色出图的「按视图接口表」：正面基准图可单独指定工作流，其余视图共用
+ * character-view，定妆板用 character-sheet。所有项目页 / 管理页共用一份口径，
+ * 后端 normalizeInterfaceByView 会再过滤一次非法 key。
+ */
+export function characterInterfaceByView() {
+  const view = pickedInterfaceId('character-view');
+  const front = pickedInterfaceId('character-front');
+  const sheet = pickedInterfaceId('character-sheet');
+  const rows = {
+    front, threeQuarter: view, side: view, back: view, closeup: view, sheet,
+  };
+  return Object.fromEntries(Object.entries(rows).filter(([, v]) => Boolean(v)));
+}
+
+/** 角色出图请求：本次接口 + 按视图接口表一起下发；未选择时后端按板块绑定解析 */
+export function withCharacterInterface(body = {}, scopeId = 'character-view') {
+  const base = withInterfaceId(scopeId, body);
+  const byView = characterInterfaceByView();
+  return Object.keys(byView).length ? { ...base, interfaceByView: byView } : base;
 }
 
 function defaultLabel(data, scopeId) {

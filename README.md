@@ -74,7 +74,7 @@ cd lingximanju
 | ① 准备故事 | `upload` | **上传小说**（.txt/.md / 粘贴 / 示例，自动解析章节）或 **✦ AI 生成小说**（构想 → 分章大纲 → 可编辑 → 逐章生成全文 → 自动分集注入，等价完成 ①②） |
 | ② 分集拆解 | `episodes` | 按章节 / 字数 / 场景段落三种策略 + 每集目标字数 + 最多集数，一键重新分集，下方实时列出每集摘要与钩子 |
 | ③ 剧本创作 | `script` | 执行本步，编剧智能体把分集梗概写成统一格式剧本 |
-| ④ 角色与上下文 | `context` | **提取角色**（全书 BM25 召回 + 候选名原文窗口取证 → LLM 优先 / 启发式兜底，证据引用逐字校验，零 Key 明示占位来源并显示候选/片段/证据统计）、角色卡一览、跳转角色管理生成三视图定妆；同时跑原著 RAG 与事件→场景→镜头分解 |
+| ④ 角色与上下文 | `context` | **提取角色**（全书 BM25 召回 + 候选名原文窗口取证 → LLM 优先 / 启发式兜底，证据引用逐字校验，零 Key 明示占位来源并显示候选/片段/证据统计）、角色卡一览、跳转角色管理生成多视图定妆；同时跑原著 RAG 与事件→场景→镜头分解。分集制作时本步还会**先对账本集出场角色**（缺失人物补进全局角色库，见下文） |
 | ⑤ 分镜与画面 | `storyboard` | **只出分镜提示词 + 分镜图**：best-of-2 择优、机位锚点传播；**分镜画面设置**（九宫格 / 六宫格 / 四宫格 / 条漫四联 / 二十五宫格 / 单图 · 画幅 · 格内信息 · 构图参考 · 提示词公式）决定版面后，用真实关键帧合成每段**分镜板**；视频片段留给第⑥步 |
 | ⑥ 视频与交付 | `deliver` | 画面全部定版后才逐镜头调 ComfyUI 出视频，再拼成片 MP4 / 导出 `*.mmxpack.zip` 导演包；只打包时跳过视频渲染 |
 
@@ -115,12 +115,12 @@ cd lingximanju
 
 ### 分集制作：第③步之后，按季按集顺序走完 ④⑤⑥⑦
 
-分季分集完成后按**顺序制作**：默认第一季第一集，四段 ④⑤⑥⑦ 全部完成 → **定稿** → 自动进入同季下一集；本季全部定稿 → 进入顺序里的下一季第一集。每一集有**自己的本集剧本、出场角色关联、分镜板与成片**；角色设定与定妆图是唯一例外，全书共享、同名角色按角色 ID 直接复用。项目级六步状态机保持不变（demo / 导演全流程 / 骨架项目照旧），每集进度记在 `ep.steps[stepId]` 与 `ep.finalized`（episode record 自带），互不覆盖。
+分季分集完成后按**顺序制作**：默认第一季第一集，四段 ④⑤⑥⑦ 全部完成 → **定稿** → 自动进入同季下一集；本季全部定稿 → 进入顺序里的下一季第一集。每一集有**自己的本集剧本、出场角色名单、分镜板与成片**；角色设定与定妆图是唯一例外，全书共享、同名角色按角色 ID 直接复用——本集原文里出现、但全局库还没有的人物会**就地补建角色卡并入库全局**，不会丢失，也不会为每集另建一套设定。项目级六步状态机保持不变（demo / 导演全流程 / 骨架项目照旧），每集进度记在 `ep.steps[stepId]` 与 `ep.finalized`（episode record 自带），互不覆盖。
 
 | 按集步骤 | 做什么 | 产物 |
 |---|---|---|
 | ④ 剧本创作 | 生成本集剧本（带上一集结尾 / 本集钩子 / 本集原文 / 出场角色），可人工精修 | `ep.script` |
-| ⑤ 角色与上下文 | 角色库为空时先自动提取全书角色；出场角色按原文姓名 / 别名匹配（手动关联不覆盖）；确认本集上下文 | `ep.characterIds` + `ep.steps.context` |
+| ⑤ 角色与上下文 | 角色库为空时先提取全书角色；**每集先对账本集原文 / 剧本里的出场人物**：按姓名 / 别名匹配，缺失者依本集原文证据生成角色卡并写入全局库；手动关联不覆盖；确认本集上下文 | `ep.characterIds` + `management.characters` + `ep.steps.context` |
 | ⑥ 分镜与画面 | 本集原文分段 → 逐段生成分镜板；可选 `comfy:true` 逐格调用 ComfyUI 补真实画面（已有图不重烧） | `ep.segments[].gridUrl` + 每格物料 |
 | ⑦ 视频与交付 | 逐格视频（首帧 + 精确 videoPrompt → ComfyUI，已有片段自动跳过）→ **拼接本集成片 MP4**（与项目成片同一套 ffmpeg 归一 / 封顶 / 实测口径）→ 单集导演包 | `cell.video[]` + `ep.film` + `ep.pack` |
 
@@ -128,14 +128,50 @@ cd lingximanju
 - **当前剧集（季 + 集两级）**：季下拉（显示每季定稿数）+ 该季的集下拉 + 按队列跨季的上一集 / 下一集 + 四段进度 + 顺序制作位，整块控制区在**第③步「分季 · 分集」卡片内**。按项目记在 `localStorage`；导航条、控制区、流水线、说明条、区头、单集执行与剧本生成共用一个 `ui.activeNo`。切换剧集时剧本展开 / 编辑草稿 / 成片倍速 / 分镜灯箱按集存档、切回还原，**各集界面与产物完全独立**；④ 剧本台默认只显示当前集，其余集收进折叠列表。允许手动跳集，顺序只决定默认推进。
 - **当前剧集不再悬浮**：身份直接写在「左侧面板 ↔ 右侧工作台」之间的**制作步骤窄栏**里——展开态显示紧凑标签 `第1季-1`（无空格、连字符；集号沿用全局唯一编号，第二季首集写 `第2季-4`），收起态 40px 状态轨把同一串拆成「第1季 / -1」两行，窄屏 ≤1080px 的横向步骤条改成一行常驻。短标签由 `project-model.js` 的 `episodeLabelShort()` 单独提供，**其它位置仍用完整中文「第 1 季 第 1 集」**。原顶部 sticky 常驻条已去掉 `position: sticky / z-index / 覆盖阴影`，改为分集卡内的普通控制带，跟随内容滚动、不再压住步骤卡；63 个 `data-act` 功能入口一个不减。
 - **定稿与锁定**：四段全完成后，顶部条 / ③ 说明条 / 流水线面板出现「✓ 定稿本集并进入下一集」→ 写 `ep.finalized = {at, season, no}`（`ctx.onFinalizeEpisode` 走 mutate + `persist(true)` 落盘）→ 自动切到下一集并跳回第 ④ 步。已定稿集的行显示 🔒、四段执行与批量补齐全部禁用、区头主按钮变「🔒 本集已定稿」；后端 `runEpisodeStep(s)`、剧本生成 / 编辑接口一律拒绝，防止绕过界面覆盖产物。需要返工点「↩ 撤销定稿」（二次确认）。
-- **角色是唯一例外**：`management.characters`（角色设定与定妆图）是项目级共享资源，**已存在则沿用**——切集、跨季、`force` 重做、定稿 / 撤销都不会重新提取，也不为每集另建一套；不同集出现同一角色时直接复用设定与定妆图。只有角色库为空时，首次执行 ⑤ 才提取一次全书角色，之后所有集共用。每集独立的只是 `ep.characterIds`（本集出场哪几位）。第⑤步顶部有共享角色库说明卡，执行结果 note 里写明「沿用项目角色库 N 位（不重新提取）」。
+- **角色是唯一例外，但「不重抽」不等于「不补人」**：`management.characters`（角色设定与定妆图）仍是项目级共享资源，切集、跨季、`force` 重做、定稿 / 撤销都**不会全书重新提取**，也不为每集另建一套。变化在于**每集执行一次对本集的增量对账**：从本集原文 + 剧本场次 / 说话人抽候选人名，经姓名清洗与本集原文证据校验，按 name / alias 与全局库对账；已在库的角色直接按角色 ID 复用设定与定妆图，只在库里没有的人物才生成角色卡并写入 `management.characters`。LLM 优先，零 Key 走带原文证据的启发式；库满 12 位时不挤掉已有角色，只提示「N 位未入库」；手动关联过的 `ep.characterIds` 只追加、不改写。角色库为空时仍按老规矩先做一次全书提取。第⑤步顶部共享角色库说明卡与执行 note 都会写明本集新入库名单；剧集详情「出场角色」Tab 有「✦ 检查并补齐本集角色」可单独重跑（新按钮走 `data-se` 事件委托，63 个 `data-act` 基线不变）。口径收在 `core/episode-cast.mjs`（纯函数）+ `agents/character-agent.mjs` 的 `ensureProjectCharactersForEpisode`。
 - **工作台入口**：第③步分集完成后出现「分集之后怎么走 · 顺序制作」说明条（项目级 ①②③ / 剧集级 ④⑤⑥⑦ / 角色例外 / 顺序规则、每季定稿进度、制作队列、当前制作位与定稿按钮）；第④步之后各步顶部是同一张「▥ 剧集流水线」卡——**按季分组、每集一行，横向摊开四段任务**，点集名即选中该集，行内只展开这一集的四段任务与「下一步」；「下一步」永远取四段里第一个未完成的阶段，不会跳段。批量只补「这一段的未完成集」且跳过已定稿集，单集失败不阻断后续。分季分集卡每集标「🔒 已定稿 / ● 当前制作位 / 待制作」并可一键设为当前集。
+- **⑤ 角色与上下文默认只看正在处理的剧集**：该步顶部的「▥ 剧集流水线」卡默认只显示当前集那一行及其四段任务面板，其它集、其它季组整组隐藏；卡头「▤ 展示全部剧集（另有 N 集）」点击后才列出全部剧集，再点「▴ 收起其它剧集」回到聚焦态。切换只翻 DOM 的 `hidden`、不重绘不发请求，SSE 重绘保持展开态、切项目自动回到默认收起。⑥⑦ 步与项目级共享角色库 / 定妆任务卡不受影响；新入口走 `data-fl` 命名空间，63 个 `data-act` 基线不变（`.fl-row` 是 `display:flex`，CSS 需显式覆盖 `[hidden]` 才生效）。
 - **层级不再靠猜**：步骤导航在「分集拆解」与「剧本创作」之间有一条「以下按集执行」分界；④⑤⑥⑦ 的区头挂「剧集级 · 第 1 季 第 2 集 · 第 N/4 段」标签，区头主按钮只跑当前剧集，项目级整跑收进左侧导航的「执行下一步 / 全部执行」并附说明。
 - **剧集标签统一中文**：界面上不再出现 `EP 02`、`S01`、`S01E02` 这类英文缩略，季和集一律写全，例如「第 1 季 第 1 集」；季下拉、集下拉、当前剧集主标识、制作队列、定稿提示、流水线行、分季分集卡、区头、剧本台、剧集详情页都走 `project-model.js` 的 `seasonLabel / episodeNoLabel / episodeLabelFull / queueItemLabel`。集号沿用全局唯一编号（季只是分组视图），因此第二季首集会写成「第 2 季 第 4 集」。
 - **全局样式统一 · 界面精简（功能零删减）**：`public/styles.css` 建立共享设计令牌 `--radius-* / --sp-* / --fs-* / --btn-h`，`.pv-* / .sx-* / .sw-* / .fl-* / .epb-* / .ax-*` 六大组件族的圆角、内距、字号统一走令牌；补齐此前「用了 78 次却没定义」的 `.btn.sm`，并新增 `.btn.xs / .btn.ghost / .btn.block` 与状态胶囊统一基线。「分季 · 分集」从自带 `max-width:1460px + padding` 的页面级容器改为与工作台同构的标准 `.pv-card + .pv-card-head`，消除卡中卡与双重内距，统计条 / 季面板 / 集卡层级一致。第③步把顺序说明细则、章节映射、分季·定稿·角色库说明，以及季头和集卡的次要操作收进 `<details>` 折叠区，每张卡只留一个主行动 +「更多操作」——**所有 `data-act` 入口、筛选、批量、导出、定稿一个不删**，由 `tests/ui-style.test.mjs` 用 63 个动作基线集合锁死。
 - **剧集详情页**：「导出与生成」Tab 新增**本集成片**卡——逐格生成视频、拼接成片、在线播放与下载（`GET /episodes/:no/film`），另保留原「快速预览片段（单段）」。
 - 每集失败 / 预检不通过都会如实落 `error` 并给出「先做哪一步」提示（例：本集还没有带真实画面的分镜格）；成片只认 ComfyUI 真实片段拼接，静态图不冒充成片。
-- 接口：④ 剧本走 `POST /api/projects/:id/episodes/:no/script` 与批量 `POST /api/projects/:id/episodes/scripts`；⑤⑥⑦ 走 `POST /api/projects/:id/episodes/:no/step`（`{stepId:'context'|'storyboard'|'deliver', force?, comfy?, stitchOnly?}`）、`POST /api/projects/:id/episodes/steps`（批量，`{stepId, nos[], ...}`）。`EPISODE_STEPS` 的 no 已与工作台 ⑤⑥⑦ 对齐，业务口径收在 `core/episode-runner.mjs` + `core/episode-film.mjs`。
+- 接口：④ 剧本走 `POST /api/projects/:id/episodes/:no/script` 与批量 `POST /api/projects/:id/episodes/scripts`；⑤⑥⑦ 走 `POST /api/projects/:id/episodes/:no/step`（`{stepId:'context'|'storyboard'|'deliver', force?, comfy?, stitchOnly?}`）、`POST /api/projects/:id/episodes/steps`（批量，`{stepId, nos[], ...}`）。本集角色补齐单独走 `POST /api/projects/:id/episodes/:no/characters/ensure`（等价 `POST .../characters` 带 `{ensure:true}`，可传 `modelId` / `mode:'heuristic'` 显式离线）。`EPISODE_STEPS` 的 no 已与工作台 ⑤⑥⑦ 对齐，业务口径收在 `core/episode-runner.mjs` + `core/episode-film.mjs` + `core/episode-cast.mjs`。
+
+### 角色定妆：正面基准图 · 多视图一致性 · 按视图工作流
+
+针对「正面形象缺胳膊少腿、侧面 / 背景 / 特写与正面不一致、定妆照对不上」这一类问题，定妆链路改为**以正面全身图为唯一身份锚点**：
+
+| 环节 | 口径 |
+|---|---|
+| 正面提示词 | `character-style.mjs` 的 `FRONT_BODY_RULES` 强制「完整四肢、双手双脚可见、全身站姿、脚底同一基线、四周留白、不裁切」；`DEFAULT_NEGATIVE` 扩充断肢 / 缺手缺脚 / 半身像 / 腿部被裁 / 出画 / 透视畸变等；所有视图统一复用同一 `lighting` 与 `background` |
+| 其余视图 | 侧面 / 背面 / 3-4 侧显式声明「同一背景、同一光照、同一身高比例」，面部特写改为「由正面图放大得到同一张脸，不改五官发型」；定妆板只以提供的视图参考图为唯一依据，不再用文字重述一遍人设造成二次漂移 |
+| 生成顺序 | **正面 → 校验 → 其余视图 → 定妆板**严格串行；参考链为「正面必引 + 特写对齐 + 3/4 侧」（≤3~4 张）；**缺正面或正面失败即阻断其余视图**，不再凭文字硬出；定妆板要求 core 视图齐全且真实出图 |
+| 可回溯 | 每张视图记录 `refs / styleLock / provider / interfaceId / refsUsed`；ComfyUI 返回「实际参考图 0 张」时明确告警而非静默当作已参考。`characterConsistencyReport()` 检查各视图是否同源，角色卡显示「⚠ 来源不一致」并给出具体原因（缺正面 / 占位图 / 混入不同出图通道 / 风格锁不同 / 未回引正面 / 参考图未生效） |
+| 画布立绘 | 画布「角色造型」节点优先复用 `management.characters[].views.front` 的真实出图，避免面板修好后视频仍引用早年的单张合图 |
+
+**本地 ComfyUI 工作流可按视图分别配置**（设置 → 图片服务 →「板块 → 接口绑定」，下拉由 `scopeList` 自动带上新板块）：
+
+| 板块 scope | 用途 |
+|---|---|
+| `character-front` | **正面全身基准图**专用工作流（可配宽画幅 / 全身构图 / 多参考）；未绑定时回退 `character-view` 再回退出图类别默认，老项目零回归 |
+| `character-view` | 侧面 / 背面 / 3-4 侧 / 面部特写 |
+| `character-sheet` | 角色定妆板 |
+
+前端把三个板块的「本次接口」选择合成 `interfaceByView`（`{front, threeQuarter, side, back, closeup, sheet}`）随请求下发，后端 `interfaceForView()` 逐视图取用，与旧的单个 `interfaceId` 完全兼容；角色卡新增「↻ 正面」只重出正面基准图（提示重出后整组重出其余视图）。角色提取、定妆、导演能力与画布节点共用同一套 `interfaceByView` / 风格锁 / 参考链校验，日志会记录每个视图实际用的接口 id。
+
+> **能力边界**：以上保证的是「同一参考链 + 同一风格锁 + 同接口参数 + 可回溯」，不承诺像素级一致；本轮未引入 VLM 视觉复核（会额外耗模型与时间）。
+
+### 角色定妆任务进度：默认收起 · 展开明细 · 一键重试失败
+
+第⑤步「项目级角色资产」的生成任务默认**收成一行汇总**（角色数 / 真实出图 X/Y / 待生成 / 失败数 + 进度条 + 最近一次任务状态），主行动「补齐缺失图 / 全部重新生成」常驻，不必展开即可开工；点「▤ 展开生成任务（N 项）」才铺开**每位角色 × 5 视图 + 定妆板**的完整明细表（状态 / 出图通道 / 失败原因）与原有角色任务卡。展开态是模块态、跨 SSE 局部重绘保留，刷新页面回到默认收起，切项目复位。
+
+| 环节 | 口径 |
+|---|---|
+| 一键重试失败 | 明细表头「↻ 重试失败任务（N）」按最近一次任务快照 `job.byChar` 收集 `status=error` 的视图，组装 `viewsByChar = {角色ID:[视图key]}` 下发 `POST /characters/views/all`；后端 `portraitPlanFor()` 只生成显式列表里的视图并**强制重出**（不受 `onlyMissing` 跳过），已成功的图一律不覆盖 |
+| 中断恢复 | 角色若因「正面失败 → 其余视图不跑」留下空洞，重试清单会一并纳入这些无图视图；原任务含定妆板时才补定妆板。展示用 `失败 N` 是真实失败张数，重试清单长度另计，避免与任务日志自相矛盾 |
+| 任务进度一致 | `startPortraitJob` 的 `total` / `byChar[].total` 与业务层 `ensureCharacterPortraits` 共用同一份 `portraitPlanFor()` 计划，`done` 不会超过 `total`；`viewsByChar` 同时写进落盘快照，刷新 / 重启后可回溯 |
+| 兼容 | 未传 `viewsByChar` 的所有旧调用（角色卡单视图、批量补齐、导演能力、画布节点）行为零变化；新按钮走 `data-se` 事件委托，63 个 `data-act` 基线不变；`.pvt-panel-body[hidden]` 显式覆盖，防止布局类压过 `hidden` |
 
 ### 项目重组：原著统计 · 分季分集 · 每集画布 · 资源归纳
 
@@ -188,10 +224,38 @@ cd lingximanju
 |---|---|
 | 每集独立生成，互相不衔接 | 生成上下文带 `prevRecap`（上一集最后一场摘要 / 结尾台词）、`prevTail`、`nextHook`、`prevNo/nextNo`，写进剧本 `continuity` 字段并在阅读器展示「承接第 N 集结尾」 |
 | 不知道要写几场 | 按 `本集字数/600` 与 `总时长/12` 取大者钳到 3–10 场下发 `targetScenes` |
-| 对白格式随意 | `SCREENPLAY_GUIDE` 固定写进 system 提示（对白「角色：「台词」」、动作「动作：…」、禁止镜号/运镜、只用名单内角色、结尾落 hook、保留专有名词、单条对白 ≤60 字） |
+| 对白格式随意 | `SCREENPLAY_GUIDE` + `SCREENPLAY_FORMAT_GUIDE` 固定写进 system 提示：v3 可拍摄契约（集/场编号、圆括号动作一行一变化、`角色（表演策略）：台词`、[OS]/[VO]/[SFX]/[画面文字]/[连续性]），禁止镜号/运镜、只用名单内角色、结尾落 hook、保留专有名词、单条对白 ≤60 字；详见下一节 |
 | 零 Key 兜底是主题模板（凭空出现沈砚 / 顾言） | `mockEpisodeScreenplay` 按本集原文分段成场、抽取原文引号对白、使用本集真实角色，确定性与本集内容一致 |
 | 「生成成功」但可能没对白 / 只有一场 / 出现未登记角色 | `scriptStats` + `scriptIssues` 质量检查（no_dialogue / few_scenes / thin_scene / unknown_speaker / hook_unspoken…），生成与编辑后都落盘 `stats` + `issues`，界面直接展示 |
 | 模型输出行是字符串 / 超长 | 归一为逐行数组、单行 ≤220 字、场次 ≤20、去重角色 |
+
+**剧本 v3「可拍摄契约」**（优化剧本生成 agent，2026-11-11）：生成的剧本按下面这套格式书写，让分镜 / 配音 / 画面文字 / 跨集连续性都能直接按行首标记消费。
+
+```text
+# EP001 【集名】
+## EP001-SC001 内 · 地点 · 时间
+（可见、可表演的动作，一段只写一个可见变化）
+角色名（可执行的表演策略）：台词
+[OS] 角色名：同场画外对白
+[VO] 角色名：非现场叙述声音
+[SFX] 会改变行动或信息的声音
+[画面文字] 载体：观众必须读清的准确文字
+[连续性] 后续易丢失且影响故事的状态
+```
+
+- **单一来源**：`src/core/screenplay.mjs` 的 `SCREENPLAY_FORMAT_GUIDE` / `SCREENPLAY_GUIDE` / `SCREENPLAY_PROJECT_GUIDE` / `SCREENPLAY_SCHEMA`；`providers.mjs` 组装 system 提示时自动注入，零 Key 兜底 `mockScene` / `mockEpisodeScreenplay` 也按同一格式输出（真实模型才按需写 [OS] / [SFX] / [画面文字]，兜底不编造）。
+- **双兼容**：`parseScriptLine` 保持三字段返回，继续认识旧格式（`动作：` / `画面：` / `旁白：` / `「台词」` / `【时间 · 地点】`），磁盘里的历史项目不用迁移；新增 `parseScriptLineRich` 读出标记、表演策略、画面文字载体与场次头的内外景 / 地点 / 时间。
+- **集 / 场编号**：`buildScriptVars` 与 `episodeBriefs` 下发 `episodeCode`（`EP001`）与 `sceneCodePrefix`（`EP001-SC`）；归一后每场带 `sceneCode`，单集 Markdown 导出也带集号与场号。
+- **跨集连续性**：上一集正文里的 `[连续性]` 由 `screenplayContinuity` 抽成 `prevContinuity` 注入下一集生成上下文，末场状态同时落成 `scenes[].continuity`；人工编辑正文后该字段自动重算，`mergeScriptEdit` 不会把它弄丢。
+- **下游口径**：`[OS]` 计入对白，`[VO]` / `[SFX]` / `[画面文字]` / `[连续性]` 不计；`scriptStats` / `scriptTiming` 增加相应计数，`scriptIssues` 只对新剧本缺末场 `[连续性]` 给 info 提示（旧剧本不刷屏）；工作台阅读器、剧集详情页按行类型分色，编辑器提示同步换新格式。
+
+**④ 剧本创作：可选模型 + 失败弹窗**（2026-11-11）：
+
+- **固定选择条**：工作台剧本台与剧集详情页剧本页都显示「本次剧本模型」下拉（`public/script-model-bar.js`），选择按「项目 + `episode` 入口」记忆；本页所有剧本入口（生成本集 / 重写 / 补齐缺失 / 全部重写 / 分季补齐 / 详情页生成）共用同一个选择，请求统一经 `withModelId('episode')` 带上 `modelId`，后端由 `resolveModelSettings` 解析。模型库为空 / 接口读取失败时下拉仍常驻（至少「内置模板」选项），并提供「刷新模型列表」「去配置模型」；每次挂载强制拉最新库，一次网络抖动不会把空库缓存到整个会话。档案被删后的失效选择会自动清理。
+- **失败不再冒充成功**：真实模型调用失败以前会静默回退内置模板并回报「剧本已生成」。现在 `providers.generate` 把原始原因放在 `__fallbackError`，`generateEpisodeScript` 据此抛错且**不写回剧本**（已有剧本保持不变）；零 Key / 未配置模型走的 `mock` 模式不在此列，仍正常用内置模板并在来源中标明。
+- **失败弹窗**：`public/script-error-dialog.js` 复用全局 `#modal-root`，只在请求报错（所选档案失效 400 / 已定稿 409 / 模型调用失败 502）时弹出，展示模型名、错误原因、批量全失败的逐集明细，并提供「改用模型」下拉 +「用此模型重试 / 模型设置 / 知道了」；弹窗里换档案会写入与选择条共用的记忆，关掉弹窗就能接着生成。批量**部分成功**仍按原样用 toast 汇总（`已生成 N 集 · M 集失败`）。弹窗按钮一律 `data-se`，不新增 `data-act`，工作台 63 个功能入口基线不变。
+- **后端**：批量全失败返回 502，错误文案带首条失败原因并保留 `results: [{no, error}]`；剧本端点对非空 `modelId` 校验档案有效性，失效时明确要求重新选择。
+- **提示口径与就地切换**（同日补修）：剧集详情的 `config.llmConfigured` 原只看旧全局 `llm`（迁到模型库后常为 `mock`），库里明明有可用档案却提示「文本大模型未配置」。现由 `scriptLlmConfigured` 按模型库 `configured` 档案判定；走内置模板时的成功提示改为「本次未指定可用文本模型…可在『本次剧本模型』里选一个模型后点重写」。流水线卡片「重写本集剧本」旁新增「⚙ 本次剧本模型 · 切换」入口（点击跳到选择条并聚焦）；弹窗、选择条、流水线入口三处共用同一份选择，`data-act` 仍精确 63 个。
 
 REST 变化：`POST /api/projects/:id/episodes/scripts` 支持 `{ nos, onlyMissing, force }`（指定集 / 只补缺失 / 全量重写，逐集容错并回报 `generated/failed/skipped`）；`PUT /api/projects/:id/episodes/:no/script` 保存人工编辑；`GET /api/projects/:id/episodes/:no/script/export`、`GET /api/projects/:id/scripts/export` 导出 Markdown；剧集详情响应新增 `scriptCoverage` 与邻居集 `hasScript`。前端纯函数（`episodeProduction` / `scriptCoverage` / `filterSeasonGroups` / `EPISODE_FILTERS`）集中在 `public/project-model.js`，与后端 `episode-script.mjs` 同口径。
 
@@ -350,7 +414,10 @@ npm run check   # 关键文件语法检查（159 个文件）
 | `tests/chat-panel.test.mjs` | **统一对话面板**：档位切换条与计数徽标、**切档位换掉提示 / 按钮 / 占位文案**、同项目重复打开只切档位不叠页面、消息按来源档位带标签混排、「全部 / 仅当前档」筛选、滚到顶部自动载入更早一页 | 6 |
 | `tests/chat-counts.test.mjs` | **对话条数口径**：前端徽标计数与服务端 `threadCounts()` 逐档位一致（徽标与面板里的条数不能对不上）、脏数据不炸 | 5 |
 
-另有 `tests/bm25.test.mjs`、`tests/character-routes.test.mjs` 等角色检索增强用例由并行改动纳入；上表只列主要模块，全量以 `npm test` 实际输出为准。
+| `tests/episode-cast.test.mjs` | **本集出场角色对账**：原文 / 剧本候选抽取、姓名清洗与证据过滤、name / alias 匹配、缺员建卡入库全局、库满 12 不挤人、手动关联只追加、启发式显式离线不调模型 | 11 |
+| `tests/character-front.test.mjs` | **正面基准与一致性**：正面提示词含完整四肢 / 不裁切、负向词覆盖断肢半身、特写与其余视图复用同一光照背景、定妆板不重述文字人设、缺正面阻断、参考链回引正面、`characterConsistencyReport` 各类告警、按视图接口解析与旧 `interfaceId` 兼容 | 12 |
+
+另有 `tests/bm25.test.mjs`、`tests/character-routes.test.mjs`、`tests/comfy-interfaces.test.mjs`、`tests/interface-picker.test.mjs` 等角色检索与板块绑定用例由并行改动纳入；上表只列主要模块，全量以 `npm test` 实际输出为准。
 
 代码组织上，前端各视图 / 引擎模块共用零依赖的 `public/utils.js`（HTML 转义、截断、数值兜底等），画布范围的分组 / 签名 / 提示 / 只读判定集中在 `public/canvas-scope.js`；两者顶层都不触碰 DOM，可被 `node:test` 直接导入。模块职责见 [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md)。
 

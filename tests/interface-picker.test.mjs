@@ -46,11 +46,13 @@ test('interfacesForScope：按类别过滤，缺 scopes 元数据也能兜底', 
   assert.deepEqual(interfacesForScope({ interfaces: DATA.interfaces }, 'video').map((e) => e.id), ['wf_v']);
 });
 
-test('scopeList：11 个板块与后端 MEDIA_SCOPES 同序，标签齐全', () => {
+test('scopeList：12 个板块与后端 MEDIA_SCOPES 同序，标签齐全', () => {
   const list = scopeList(DATA);
-  assert.equal(list.length, 11);
+  assert.equal(list.length, 12);
   assert.deepEqual(list.map((s) => s.id), SCOPE_ORDER);
   assert.equal(list.find((s) => s.id === 'character-sheet').label, '角色定妆板');
+  assert.equal(list.find((s) => s.id === 'character-front').label, '角色正面基准图');
+  assert.equal(list.find((s) => s.id === 'character-front').kind, 'image');
   assert.equal(list.find((s) => s.id === 'voice').kind, 'audio');
   assert.equal(list.find((s) => s.id === 'video').kindLabel, '视频');
   assert.equal(SCOPE_LABELS.cover, '封面');

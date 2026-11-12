@@ -55,7 +55,9 @@ test('scriptStats：场次 / 行数 / 对白 / 字数 / 说话人', () => {
   assert.equal(st.dialogueCount, 4);
   assert.ok(st.chars > 40);
   assert.deepEqual(st.speakers.sort(), ['林夏', '沈砚'].sort());
-  assert.deepEqual(scriptStats({}), { sceneCount: 0, lineCount: 0, dialogueCount: 0, chars: 0, speakerCount: 0, characterCount: 0, speakers: [] });
+  assert.deepEqual(scriptStats({}), { sceneCount: 0, lineCount: 0, dialogueCount: 0,
+    offscreenCount: 0, screenTextCount: 0, continuityCount: 0,
+    chars: 0, speakerCount: 0, characterCount: 0, speakers: [] });
 });
 
 test('scriptIssues：无对白 / 场次过少 / 未登记角色 / 场次过薄', () => {

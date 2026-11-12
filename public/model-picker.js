@@ -36,20 +36,62 @@ export function setModelProjectScope(projectId = '', projectName = '') {
   });
 }
 
-async function fetchRoster(force = false) {
-  if (roster && !force) return roster;
+function fetchRoster(force = false) {
+  if (roster && !force) return Promise.resolve(roster);
   if (!rosterPromise || force) {
     rosterPromise = fetch('/api/system/llm-models')
-      .then((r) => r.json())
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((d) => { roster = { models: d.models || [], activeModelId: d.activeModelId || '' }; return roster; })
-      .catch(() => { roster = { models: [], activeModelId: '' }; return roster; });
+      .catch(() => {
+        // 关键：一次网络抖动不能把「空模型库」缓存到整个会话结束，否则选择条会永远
+        // 只剩「未配置」文字、不再出现下拉。失败结果不写 roster，并清掉 pending 允许重试。
+        rosterPromise = null;
+        return { models: [], activeModelId: '', error: true };
+      });
   }
   return rosterPromise;
+}
+
+/**
+ * 当前全局模型库（只读快照）。供模型选择条在「库为空」时也能渲染出可见状态，
+ * 而不是像 ensureModelPicker 那样整个控件消失，让用户以为不能选模型。
+ * 传 force=true 可在设置页新增 / 删除档案后强制刷新缓存。
+ * error=true 表示这次没读到模型库（接口失败），与「库里真的没有档案」区分开。
+ */
+export async function modelRoster(force = false) {
+  const r = await fetchRoster(force);
+  return { models: r.models || [], activeModelId: r.activeModelId || '', error: Boolean(r.error) };
 }
 
 /** 某入口当前选中的模型 id；'' 表示使用默认模型（后端 activeModelId） */
 export function pickedModelId(entryKey, projectId = scope.projectId) {
   try { return localStorage.getItem(modelScopeKey(entryKey, projectId)) || ''; } catch { return ''; }
+}
+
+/**
+ * 写入某入口本次选择的模型（'' = 跟随默认）。弹窗里的「换一个模型重试」与
+ * 剧本台选择条共用这一份「项目 + 入口」记忆，切换后立刻对下一次请求生效。
+ */
+export function setPickedModelId(entryKey, id = '') {
+  const value = String(id || '');
+  try {
+    const key = modelScopeKey(entryKey, scope.projectId);
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch { /* 隐私模式等场景忽略 */ }
+  return value;
+}
+
+/**
+ * 清掉已经失效的模型记忆（档案被删除 /换库后 localStorage 里还留着旧 id）。
+ * 返回仍然有效的所选 id；'' 表示已清理或本来就没选。
+ */
+export function clearStaleModelId(entryKey, models = []) {
+  const saved = pickedModelId(entryKey);
+  if (!saved) return '';
+  if (models.some((m) => String(m.id) === String(saved))) return saved;
+  try { localStorage.removeItem(modelScopeKey(entryKey, scope.projectId)); } catch { /* 隐私模式忽略 */ }
+  return '';
 }
 
 /** 请求体并上所选模型：withModelId('cover', {messages}) → {messages, modelId} */
@@ -74,13 +116,7 @@ export async function ensureModelPicker(entryKey, host, before = null) {
   }`;
   const saved = pickedModelId(entryKey);
   sel.value = [...sel.options].some((o) => o.value === saved) ? saved : '';
-  sel.addEventListener('change', () => {
-    try {
-      const key = modelScopeKey(entryKey, scope.projectId);
-      if (sel.value) localStorage.setItem(key, sel.value);
-      else localStorage.removeItem(key);
-    } catch { /* 隐私模式等场景忽略 */ }
-  });
+  sel.addEventListener('change', () => setPickedModelId(entryKey, sel.value));
   if (before) host.insertBefore(sel, before); else host.appendChild(sel);
   return sel;
 }

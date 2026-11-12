@@ -215,7 +215,8 @@ test('REST：导入带参数的接口文件 → 绑定板块 → 概览 → 局�
 
   const list = await api('GET', '/api/comfyui/interfaces');
   assert.equal(list.data.interfaces.length, 2);
-  assert.equal(list.data.scopes.length, 11);
+  assert.equal(list.data.scopes.length, 12, '新增 character-front 正面基准图板块');
+  assert.ok(list.data.scopes.some((s) => s.id === 'character-front' && s.kind === 'image'));
   assert.equal(list.data.interfaces[0].workflow, undefined, '概览不回传工作流本体');
   assert.deepEqual(list.data.interfaces.find((i) => i.id === id).boundScopes, ['cover']);
 

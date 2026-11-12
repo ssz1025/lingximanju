@@ -9,7 +9,10 @@
  * ==========================================================================*/
 import { extractCharacters, firstSentenceOf, mineFrequentNames } from './novel.mjs';
 import { chunkNovel, KnowledgeBase, retrieveRelevantChunks } from './bm25.mjs';
-import { characterStyleBits, DEFAULT_NEGATIVE, PORTRAIT_RULES } from './character-style.mjs';
+import {
+  characterStyleBits, DEFAULT_NEGATIVE, PORTRAIT_RULES,
+  FULL_BODY_RULES, FRONT_BODY_RULES, VIEW_CONSISTENCY_RULES,
+} from './character-style.mjs';
 import { isLikelyPersonName } from './character-names.mjs';
 
 /**
@@ -92,6 +95,13 @@ function normalizeViewShot(v) {
     angle: String(v.angle || '').slice(0, 80),
     refs: (Array.isArray(v.refs) ? v.refs : []).map((r) => String(r).slice(0, 300)).slice(0, 4),
     styleLock: String(v.styleLock || '').slice(0, 120),
+    // 参考图链是否真的进了工作流：ComfyUI 分支回传 refsUsed；0 表示工作流没接收参考图，
+    // 此时一致性不保证，角色卡应给出「来源不一致/未参考」告警。
+    refsUsed: v.refsUsed === null || v.refsUsed === undefined ? null : (Number(v.refsUsed) || 0),
+    refsWarning: String(v.refsWarning || '').slice(0, 200),
+    // 本次出图用的接口档案（用于按视图配置工作流的回溯）
+    interfaceId: String(v.interfaceId || '').slice(0, 60),
+    scope: String(v.scope || '').slice(0, 60),
     at: Number(v.at) || 0,
   };
 }
@@ -273,12 +283,17 @@ export function buildViewPrompt(c = {}, viewKey = 'front', opts = {}) {
     : '以文字描述为准，保持同一人物的脸型/五官/发型/服装/配饰完全一致';
 
   if (isFace) {
-    // 面部特写：不要求全身，但要求「同一张脸」，正面图则是它的唯一依据
+    // 面部特写：不要求全身，但必须是「正面基准图放大出来的同一张脸」。
+    // 旧实现只用文字重述五官，模型会重新画一张脸，与镜头特写完全对不上。
     return [
       `角色定妆面部特写，${v.angle}`,
       `${c.name || '该角色'}的面部近景特写，正面平视镜头，五官与发际线清晰锐利`,
       refNote,
-      '齐胸以上构图，纯色中性背景，柔和正面补光，眼神光可见',
+      '齐胸以上构图（由正面基准图裁切放大得到同一张脸，不改变五官、脸型、发际线、发型、服装领口与配饰）',
+      PORTRAIT_RULES.background,
+      PORTRAIT_RULES.lighting,
+      PORTRAIT_RULES.quality,
+      '眼神光可见，与正面基准图同一背景色与光照方向',
       ...charStyle,
       styleText && `画面风格：${styleText}`,
       negative && `避免：${negative}`,
@@ -286,12 +301,17 @@ export function buildViewPrompt(c = {}, viewKey = 'front', opts = {}) {
   }
 
   if (!isFront) {
-    // 侧面 / 背面 / 3-4 侧：以正面图为参考，只描述朝向与画面要求
+    // 侧面 / 背面 / 3-4 侧：以正面图为参考，只描述朝向与画面要求。
+    // 完整四肢、同一背景、同一光照、同一身高比例都是硬约束，否则各视图各画各的。
     return [
       `角色多视图定妆，${v.angle}`,
       refNote,
+      VIEW_CONSISTENCY_RULES,
+      FULL_BODY_RULES,
       PORTRAIT_RULES.framing,
       PORTRAIT_RULES.background,
+      PORTRAIT_RULES.lighting,
+      PORTRAIT_RULES.quality,
       v.key === 'back' ? '背面不可见五官，仅交代发型后侧轮廓与服装背部结构' : '',
       ...charStyle,
       styleText && `画面风格：${styleText}`,
@@ -314,11 +334,14 @@ export function buildViewPrompt(c = {}, viewKey = 'front', opts = {}) {
   const dupFeatures = features && staticF
     && base.includes(staticF) && (!dynamicF || base.includes(dynamicF));
   return [
-    `角色多视图定妆 · 身份基准图，${v.angle}`,
+    `角色多视图定妆 · 身份基准图（正面全身），${v.angle}`,
     base,
     dupFeatures ? '' : features,
+    FRONT_BODY_RULES,
     PORTRAIT_RULES.framing,
     PORTRAIT_RULES.background,
+    PORTRAIT_RULES.lighting,
+    PORTRAIT_RULES.quality,
     ...charStyle,
     styleText && `画面风格：${styleText}`,
     negative && `避免：${negative}`,
@@ -338,14 +361,15 @@ export function buildSheetPrompt(c = {}, opts = {}) {
   const views = (Array.isArray(opts.views) && opts.views.length ? opts.views : DEFAULT_VIEW_KEYS)
     .map((k) => viewDef(k)).filter(Boolean);
   const layout = views.map((v) => v.label).join(' / ');
-  // buildCharacterPrompt 自带「角色「名」」前缀，拼进去会重复一次，这里去掉角色名后复用
-  const body = buildCharacterPrompt(c).replace(/^角色「.*?」；?/, '').trim();
+  // 旧实现把 buildCharacterPrompt 的人设文字整段重述一遍，等于让模型「照文字再画一个人」，
+  // 与已经生成好的各视图必然对不上。设定板只做排版：唯一外观依据是传进去的视图参考图。
   return [
-    `角色设定板 / character reference sheet，同一角色的 ${views.length} 个视角并排：${layout}`,
-    `角色「${c.name || '角色'}」，${body || '造型按参考图'}`,
-    ...characterStyleBits(c),
+    `角色设定板 / character reference sheet：角色「${c.name || '角色'}」的 ${views.length} 个视角并排：${layout}`,
+    '以提供的各视图参考图（尤其是正面基准图）为唯一外观依据：只做同版排布与清晰化重绘，不依据文字重新设计五官、脸型、发型、服装与配色',
+    FULL_BODY_RULES,
     '横向排布，各视角人物身高比例一致、脚底对齐同一基线，视角之间留白色间隔',
-    '每一格都是纯色中性背景，无场景道具、无文字标注、无水印',
+    '每一格都是纯色中性背景，与正面基准图同一背景色与光照方向，无场景道具、无文字标注、无水印',
+    ...characterStyleBits(c),
     styleText && `画面风格：${styleText}`,
     negative && `避免：${negative}`,
   ].filter(Boolean).join('；') + '。';
@@ -354,6 +378,51 @@ export function buildSheetPrompt(c = {}, opts = {}) {
 /** 是否为真实出图（非 mock 自绘占位）：Mock SVG 只是零 Key 演示占位，不算「已生成」 */
 export function isRealShot(v) {
   return Boolean(v?.url) && String(v?.provider || '') !== 'mock';
+}
+
+/**
+ * 角色多视图一致性报告：只做可回溯的静态校验（不调模型、不比对像素）。
+ *
+ * 检查四件事：① 有没有正面基准图；② 其余视图是否真的引用了正面图；
+ * ③ 各视图是否来自同一 provider；④ 各视图是否用同一份风格锁。
+ * 任何一项不成立都意味着「正面 / 侧面 / 特写 / 定妆板」可能不是同一个人，
+ * 前端角色卡据此显示「⚠ 来源不一致」，用户可只重出正面或整组重出。
+ *
+ * @param {object} c 角色
+ * @param {object} opts { scope }
+ * @returns {{ok:boolean, label:string, scope:string[], issues:Array,
+ *            providers:string[], styleLocks:string[], frontUrl:string}}
+ */
+export function characterConsistencyReport(c = {}, opts = {}) {
+  const scope = resolveViewKeys(opts.scope || 'core');
+  const views = c?.views || {};
+  const frontUrl = String(views.front?.url || '');
+  const shots = scope.map((key) => ({ key, shot: views[key] })).filter((x) => Boolean(x.shot?.url));
+  const issues = [];
+  if (!frontUrl) issues.push({ code: 'no-front', view: 'front', message: '缺正面基准图' });
+  else if (!isRealShot(views.front)) issues.push({ code: 'front-placeholder', view: 'front', message: '正面基准图是占位图' });
+
+  const providers = [...new Set(shots.map((x) => String(x.shot.provider || '')).filter(Boolean))];
+  if (providers.length > 1) issues.push({ code: 'mixed-provider', message: `视图来自不同出图通道：${providers.join(' / ')}` });
+  const locks = [...new Set(shots.map((x) => String(x.shot.styleLock || '')).filter(Boolean))];
+  if (locks.length > 1) issues.push({ code: 'mixed-style-lock', message: '视图用了不同风格锁' });
+
+  for (const { key, shot } of shots) {
+    if (key === 'front') continue;
+    const refs = Array.isArray(shot.refs) ? shot.refs.map(String).filter(Boolean) : [];
+    if (!refs.length) issues.push({ code: 'no-refs', view: key, message: `${viewDef(key)?.label || key} 未记录参考图链` });
+    else if (frontUrl && !refs.includes(frontUrl)) {
+      issues.push({ code: 'front-not-referenced', view: key, message: `${viewDef(key)?.label || key} 未回引正面基准图` });
+    }
+    if (String(shot.refsWarning || '')) issues.push({ code: 'refs-unused', view: key, message: String(shot.refsWarning) });
+  }
+  if (c?.sheet?.url && c.sheet.styleLock && locks.length && !locks.includes(String(c.sheet.styleLock))) {
+    issues.push({ code: 'sheet-style-lock', message: '定妆板与各视图的风格锁不同源' });
+  }
+  const label = issues.length
+    ? `⚠ 来源不一致（${issues.slice(0, 2).map((x) => x.message).join('；')}${issues.length > 2 ? ' 等' : ''}）`
+    : (shots.length ? '✓ 同一正面基准 / 同一风格锁 / 同一出图通道' : '尚无定妆图');
+  return { ok: issues.length === 0, label, scope, issues, providers, styleLocks: locks, frontUrl };
 }
 
 /**

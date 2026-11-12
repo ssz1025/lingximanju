@@ -1652,6 +1652,9 @@ button.pmm-ep:hover { border-color: var(--accent); }
 .ev-edit-craft small { font-size: var(--fs-2xs); color: var(--muted); }
 .ev-line { font-size: var(--fs-sm); color: var(--text-2); line-height: 1.8; padding-left: 10px; border-left: 2px solid var(--border); margin-top: 4px; }
 .ev-char-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 11px; margin-top: 12px; }
+/* 本集角色对账结果：新入库名单 / 满员未入库名单可逐条回溯 */
+.ev-cast-result { display: flex; flex-direction: column; gap: 4px; margin-top: 9px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-soft); background: var(--panel-2); }
+.ev-cast-result span.warn { color: var(--amber); }
 .ev-char-card { display: flex; gap: 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 11px; background: var(--panel-2); }
 .ev-char-portrait { width: 58px; height: 74px; flex: 0 0 58px; border-radius: var(--radius-sm); background: var(--panel-3); display: grid; place-items: center; overflow: hidden; color: var(--muted); font-size: 22px; }
 .ev-char-portrait img { width: 100%; height: 100%; object-fit: cover; }
@@ -1939,7 +1942,9 @@ body:not(.view-home) .in-more { display: none !important; }
 .sv-empty-ico { display: block; font-size: 34px; color: var(--accent); margin-bottom: 8px; }
 
 /* ---------------- 分季 / 分集 ---------------- */
-.sx-wrap, .ax-wrap { display: flex; flex-direction: column; gap: var(--sp-3); padding: 0; max-width: none; margin: 0; }
+.sx-wrap, .ax-wrap { display: flex; flex-direction: column; gap: var(--sp-3); max-width: none; margin: 0; }
+/* 恢复与 .pv-card 一致的标准内边距：分季 · 分集 / 资源归纳作为顶级卡片，内容不再贴边，与工作台其它卡片边距统一 */
+.sx-wrap, .ax-wrap { padding: var(--sp-3) var(--sp-4); }
 .sx-head, .ax-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
 .sx-head h2, .ax-head h2 { margin: 0; font-size: var(--fs-xl); font-weight: 700; }
 .sx-head p, .ax-head p { margin: 3px 0 0; font-size: var(--fs-xs); color: var(--muted); line-height: 1.5; }
@@ -2658,6 +2663,37 @@ body:not(.view-home) .in-more { display: none !important; }
   border-radius: var(--radius-sm); padding: 9px 10px; display: flex; flex-direction: column; gap: 2px; }
 .sw-stat b { font-size: var(--fs-2xl); color: var(--text); }
 .sw-stat span { font-size: var(--fs-2xs); color: var(--muted); }
+/* ④ 剧本创作 · 「本次剧本模型」固定选择条（工作台与剧集详情页共用） */
+.sw-model-bar, .ev-model-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  padding: 7px 10px; margin: 0 0 8px; }
+.ev-model-bar { margin: 10px 0; background: var(--panel-2); }
+.smb-label { font-size: var(--fs-xs); color: var(--text-2); font-weight: 700; white-space: nowrap; }
+.smb .model-picker { max-width: 220px; }
+.smb-state { font-size: var(--fs-xs); color: var(--muted); }
+.smb-warn { color: var(--warn, #f59e0b); }
+/* 剧本生成失败弹窗（沿用 .modal-backdrop / .modal，按钮一律 data-se） */
+.script-error-modal { max-width: 560px; }
+.script-error-body { padding: 2px 2px 6px; }
+.script-error-msg { color: var(--red); font-size: var(--fs-sm); line-height: 1.7; white-space: pre-wrap;
+  word-break: break-word; background: color-mix(in srgb, var(--red) 9%, transparent);
+  border-left: 3px solid var(--red); border-radius: var(--radius-xs); padding: 9px 11px; margin: 4px 0 12px; }
+.script-error-rows h4, .script-error-hints h4 { font-size: var(--fs-xs); color: var(--text-2); margin: 0 0 5px; }
+.script-error-rows ul, .script-error-hints ul { margin: 0 0 12px; padding-left: 18px; }
+.script-error-rows li, .script-error-hints li { font-size: var(--fs-xs); color: var(--text-2); line-height: 1.7; }
+.script-error-rows li { color: var(--red); }
+.script-error-more { font-size: var(--fs-xs); color: var(--muted); margin: -6px 0 10px; }
+/* 失败弹窗内直接换模型：与剧本台「本次剧本模型」选择条共用同一份记忆 */
+.script-error-model { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 9px 11px; margin: 0 0 12px; }
+.script-error-model label { font-size: var(--fs-xs); font-weight: 700; color: var(--text-2); white-space: nowrap; }
+.script-error-model select { flex: 1 1 180px; min-width: 160px; background: var(--panel-3); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit; font-size: var(--fs-xs); }
+.script-error-model-tip { flex: 1 1 100%; font-size: var(--fs-xs); color: var(--muted); line-height: 1.6; }
+/* 流水线卡片「重写本集剧本」旁的切换入口 + 跳转到选择条时的高亮 */
+.pv-step-model { white-space: nowrap; }
+.smb-flash { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sw-toolbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; background: var(--panel);
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
 .sw-tip { font-size: var(--fs-sm); color: var(--muted); flex: 1 1 220px; }
@@ -2704,6 +2740,15 @@ body:not(.view-home) .in-more { display: none !important; }
   border-left: 2px solid transparent; }
 .sw-line.dlg { color: var(--text); border-left-color: var(--accent-2); }
 .sw-line.act { color: var(--muted); font-style: italic; border-left-color: var(--border); }
+/* v3 可拍摄契约：场次头 / OS / VO / SFX / 画面文字 / 连续性 分行上色 */
+.sw-line.head { color: var(--accent); font-family: ui-monospace, monospace; font-weight: 600; border-left-color: var(--accent); }
+.sw-line.os { font-style: italic; }
+.sw-line.vo { color: var(--muted); border-left-color: var(--border); font-style: italic; }
+.sw-line.sfx { color: var(--accent-2); border-left-color: var(--accent-2); }
+.sw-line.screen { color: var(--text); border-left-color: var(--accent-2); font-family: ui-monospace, monospace;
+  background: color-mix(in srgb, var(--accent-2) 9%, transparent); }
+.sw-line.cont { color: var(--muted); font-size: var(--fs-xs); border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .sw-foot { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 10px;
   padding-top: 9px; border-top: 1px dashed var(--border-soft); }
 .sw-foot-note { font-size: var(--fs-xs); color: var(--muted); }
@@ -2739,6 +2784,10 @@ body:not(.view-home) .in-more { display: none !important; }
 .ev-script-issues span.error { color: var(--red); }
 .ev-line.dlg { color: var(--text); border-left-color: var(--accent-2); }
 .ev-line.act { color: var(--muted); font-style: italic; border-left-color: var(--border); }
+.ev-line.screen { color: var(--text); font-family: ui-monospace, monospace;
+  background: color-mix(in srgb, var(--accent-2) 9%, transparent); }
+.ev-line.cont { color: var(--muted); font-size: var(--fs-xs);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .ev-script-editor { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: 10px; }
 .ev-editor-tip { font-size: var(--fs-xs); color: var(--muted); line-height: 1.6; background: var(--panel-2);
   border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 7px 9px; }
@@ -2824,6 +2873,43 @@ body:not(.view-home) .in-more { display: none !important; }
 .pvt-stat.warn b { color: var(--amber); }
 .pvt-head-acts { margin-left: auto; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 
+/* 18.1 生成任务面板：默认只露一行汇总 + 进度条 + 主行动；展开后才是全部任务明细 */
+.pvt-panel { margin-top: 8px; padding: 10px; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); background: var(--panel-1); }
+.pvt-panel-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.pvt-panel-title { display: flex; flex-direction: column; gap: 2px; min-width: 230px; }
+.pvt-panel-title b { color: var(--text); font-size: var(--fs-sm); }
+.pvt-panel-sub { font-size: var(--fs-2xs); color: var(--muted); }
+.pvt-panel-sub em.err, .pvt-task-group-head em.err { font-style: normal; color: var(--red); }
+.pvt-panel-bar { flex: 1; min-width: 90px; height: 5px; border-radius: var(--radius-pill);
+  background: var(--panel-3); overflow: hidden; }
+.pvt-panel-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); transition: width .4s; }
+.pvt-panel-acts { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-left: auto; }
+.pvt-panel-body { margin-top: 10px; }
+/* grid/flex 容器会压过 UA 的 hidden：必须显式声明，否则「默认收起」失效 */
+.pvt-panel-body[hidden] { display: none; }
+.pvt-stat.err b { color: var(--red); }
+.pvt-tasks { margin: 4px 0 12px; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); overflow: hidden; }
+.pvt-task-thead, .pvt-task-row { display: grid; align-items: center; gap: 8px; padding: 5px 10px;
+  grid-template-columns: minmax(72px, 1fr) 84px 96px minmax(120px, 1.8fr); }
+.pvt-task-thead { background: var(--panel-3); color: var(--muted); font-size: var(--fs-2xs); }
+.pvt-task-group + .pvt-task-group { border-top: 1px solid var(--border-soft); }
+.pvt-task-group-head { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px;
+  background: var(--panel-2); font-size: var(--fs-xs); color: var(--text-2); }
+.pvt-task-row { font-size: var(--fs-2xs); color: var(--text-2); border-top: 1px solid var(--border-soft); }
+.pvt-task-row .pvt-task-prov, .pvt-task-row .pvt-task-msg { color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pvt-task-row.st-ok .pvt-task-state { color: var(--green); }
+.pvt-task-row.st-skip .pvt-task-state, .pvt-task-row.st-idle .pvt-task-state { color: var(--muted); }
+.pvt-task-row.st-run .pvt-task-state { color: var(--accent); }
+.pvt-task-row.st-mock .pvt-task-state { color: var(--amber); }
+.pvt-task-row.st-err .pvt-task-state, .pvt-task-row.st-err .pvt-task-msg { color: var(--red); }
+@media (max-width: 700px) {
+  .pvt-task-thead, .pvt-task-row { grid-template-columns: minmax(60px, 1fr) 78px minmax(100px, 1.4fr); }
+  .pvt-task-thead > :nth-child(3), .pvt-task-row .pvt-task-prov { display: none; }
+}
+
 .pvt-job { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 9px;
   padding: 7px 10px; border-radius: var(--radius-sm); font-size: 11px; color: var(--text-2);
   background: var(--panel-2); border: 1px solid var(--border-soft); }
@@ -2886,6 +2972,10 @@ body:not(.view-home) .in-more { display: none !important; }
 .pvt-sheet.ok { color: var(--green); border-color: rgba(52,211,153,.35); }
 .pvt-sheet.mock { color: var(--amber); border-color: rgba(251,191,36,.35); }
 .pvt-sub { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 多视图一致性告警：出图通道 / 风格锁 / 参考链不同源时如实提示 */
+.pvt-cons { margin-top: 5px; font-size: var(--fs-2xs); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pvt-cons.warn { color: var(--amber); }
 
 .pvt-bar { height: 3px; border-radius: var(--radius-pill); background: var(--panel-3); overflow: hidden; }
 .pvt-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--green), var(--accent-2)); transition: width .35s; }
@@ -3289,6 +3379,16 @@ body.pvs-lb-open { overflow: hidden; }
 .fl-count.ok b { color: var(--green); }
 .fl-count.on { border-color: var(--accent); color: var(--accent); }
 .fl-count.on b { color: var(--accent); }
+/* ⑤ 角色与上下文：默认只看正在处理的剧集，其它集 / 其它季组由「展示全部剧集」切换。
+   .fl-row 是 display:flex，会压过 UA 的 [hidden]，必须显式覆盖（否则隐藏完全无效）。 */
+.fl-row[hidden], .fl-season-group[hidden], .pv-flow [data-fl-text][hidden] { display: none; }
+.pv-flow > .pv-card-head { flex-wrap: wrap; }
+.fl-head-acts { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2);
+  flex-wrap: wrap; min-width: 0; }
+.fl-head-acts .pv-hint-inline { text-align: right; }
+.fl-all-toggle { flex: none; }
+.fl-focus-line { padding-top: 8px; }
+.fl-focus-line .fl-scope-v { color: var(--accent); }
 .fl-list { display: flex; flex-direction: column; }
 .fl-row { display: flex; align-items: center; gap: var(--sp-2); padding: 8px 14px; flex-wrap: wrap;
   border-top: 1px solid var(--border-soft); }

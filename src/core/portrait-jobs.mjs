@@ -11,7 +11,8 @@
  * 广播进度，前端与 /characters/jobs/:id 都能查到同一份任务状态。
  * ==========================================================================*/
 import { emit } from './events.mjs';
-import { characterReadyForVideo, ensureCharacterPortraits } from './character-portrait.mjs';
+import { normalizeViewsByChar, portraitPlanFor, characterReadyForVideo, ensureCharacterPortraits, normalizeInterfaceByView } from './character-portrait.mjs';
+import { resolveViewKeys } from './characters.mjs';
 
 /** 任务保留时长：完成后仍可查询，便于刷新页面恢复「刚跑完」的状态 */
 const KEEP_MS = 30 * 60 * 1000;
@@ -94,6 +95,9 @@ export function publicJob(job) {
     total: job.total, done: job.done, generated: job.generated, skipped: job.skipped,
     sheets: job.sheets, failed: job.failed.slice(0, 20), failedCount: job.failed.length,
     characters: job.characters, scope: job.scope, sheet: job.sheet,
+    // 本次按视图选用的接口档案（正面可用专用工作流），便于任务回溯
+    interfaceId: job.interfaceId || '', interfaceByView: job.interfaceByView || null,
+    viewsByChar: job.viewsByChar || null,
     current: job.current, byChar: job.byChar,
     message: job.message, error: job.error || '',
     videoReady: job.videoReady,
@@ -130,8 +134,13 @@ export function startPortraitJob({ project, m, opts = {}, hooks = {} } = {}) {
   const targetIds = Array.isArray(opts.characterIds) && opts.characterIds.length
     ? new Set(opts.characterIds.map(String)) : null;
   const targets = (m.characters || []).filter((c) => !targetIds || targetIds.has(String(c.id)));
-  const viewCount = scope === 'all' ? 5 : 4;
-  const total = targets.length * viewCount + (includeSheet ? targets.length : 0);
+  // 「重试失败任务」会带 viewsByChar：每位角色只重出指定的失败视图。
+  // 任务总数与 byChar.total 必须和业务层 ensureCharacterPortraits 用同一份计划，
+  // 否则 done 会超过 total、进度条失真。
+  const explicitViews = normalizeViewsByChar(opts.viewsByChar);
+  const planOpts = { views: resolveViewKeys(scope), sheet: includeSheet, onlyMissing: opts.onlyMissing !== false };
+  const plans = new Map(targets.map((c) => [String(c.id), portraitPlanFor(c, explicitViews, planOpts)]));
+  const total = [...plans.values()].reduce((n, p) => n + p.keys.length + (p.sheet ? 1 : 0), 0);
 
   const job = {
     id: nextId(), projectId, projectName: project?.name || '',
@@ -139,10 +148,14 @@ export function startPortraitJob({ project, m, opts = {}, hooks = {} } = {}) {
     total, done: 0, generated: 0, skipped: 0, sheets: 0,
     failed: [], characters: targets.length, scope, sheet: includeSheet,
     current: null, byChar: {}, message: '任务已开始', error: '',
+    interfaceId: String(opts.interfaceId || '').slice(0, 60),
+    interfaceByView: normalizeInterfaceByView(opts.interfaceByView),
+    viewsByChar: explicitViews,
     startedAt: Date.now(), finishedAt: null, cancel: false,
   };
   for (const c of targets) {
-    job.byChar[c.id] = { id: c.id, name: c.name, status: 'pending', views: {}, total: viewCount + (includeSheet ? 1 : 0) };
+    const plan = plans.get(String(c.id));
+    job.byChar[c.id] = { id: c.id, name: c.name, status: 'pending', views: {}, total: plan.keys.length + (plan.sheet ? 1 : 0) };
   }
   jobs.set(job.id, job);
   activeByProject.set(projectId, job.id);
@@ -184,6 +197,8 @@ export function startPortraitJob({ project, m, opts = {}, hooks = {} } = {}) {
         regenerateMock: opts.regenerateMock === true,
         requireReal: opts.requireReal === true,
         interfaceId: String(opts.interfaceId || '').slice(0, 60),
+        interfaceByView: normalizeInterfaceByView(opts.interfaceByView),
+        viewsByChar: explicitViews,
         concurrency: Math.max(1, Math.min(3, Number(opts.concurrency) || 2)),
         shouldStop: () => job.cancel,
         modelId: opts.modelId || '',

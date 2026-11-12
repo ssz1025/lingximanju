@@ -20,7 +20,8 @@
  *   }
  * ==========================================================================*/
 import { resolveRuntimeSpec } from './runtime-spec.mjs';
-import { parseScriptLine, guessInterior, formatDuration, SCENE_EXTRA_KEYS } from './screenplay.mjs';
+import { parseScriptLine, parseScriptLineRich, guessInterior, formatDuration, SCENE_EXTRA_KEYS,
+  screenplayContinuity, episodeCodeOf, sceneCodeFor, continuityOf } from './screenplay.mjs';
 
 const str = (v) => String(v ?? '');
 const cut = (s, n) => { const t = str(s).trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
@@ -46,6 +47,9 @@ export function scriptStats(script = {}) {
   let lineCount = 0;
   let dialogueCount = 0;
   let chars = 0;
+  let offscreenCount = 0;
+  let screenTextCount = 0;
+  let continuityCount = 0;
   for (const s of scenes) {
     chars += str(s?.location).length + str(s?.time).length + str(s?.summary).length;
     const lines = Array.isArray(s?.script) ? s.script : str(s?.script).split('\n');
@@ -54,18 +58,23 @@ export function scriptStats(script = {}) {
       if (!line) continue;
       lineCount += 1;
       chars += line.length;
-      // 对白行：`角色（情绪）：「台词」` / `角色：台词`；说明行由 parseScriptLine 统一过滤
-      const parsed = parseScriptLine(line);
+      // v3：[OS] 仍算该角色的对白；[VO] / [SFX] / [画面文字] / [连续性] 不算现场对白
+      const parsed = parseScriptLineRich(line);
       if (parsed.kind === 'dialogue' && parsed.speaker) {
         dialogueCount += 1;
         speakers.add(parsed.speaker);
-      }
+        if (parsed.tag === 'OS') offscreenCount += 1;
+      } else if (parsed.kind === 'subtitle') screenTextCount += 1;
+      else if (parsed.kind === 'continuity') continuityCount += 1;
     }
   }
   return {
     sceneCount: scenes.length,
     lineCount,
     dialogueCount,
+    offscreenCount,
+    screenTextCount,
+    continuityCount,
     chars,
     speakerCount: speakers.size,
     characterCount: Array.isArray(script?.characters) ? script.characters.length : 0,
@@ -83,15 +92,19 @@ export function scriptTiming(script = {}) {
   let dialogueLines = 0;
   let actionLines = 0;
   let narrationLines = 0;
+  let screenTextLines = 0;
+  let continuityLines = 0;
   let seconds = 0;
   const perScene = scenes.map((s, i) => {
     const lines = (Array.isArray(s?.script) ? s.script : str(s?.script).split('\n'))
       .map((l) => cleanScriptLine(l)).filter(Boolean);
     for (const line of lines) {
-      const p = parseScriptLine(line);
+      const p = parseScriptLineRich(line);
       if (p.kind === 'dialogue') dialogueLines += 1;
       else if (p.kind === 'action') actionLines += 1;
       else if (p.kind === 'narration') narrationLines += 1;
+      else if (p.kind === 'subtitle') screenTextLines += 1;
+      else if (p.kind === 'continuity') continuityLines += 1;
     }
     const given = Number(s?.durationSec);
     const sec = Number.isFinite(given) && given > 0 ? given : Math.max(8, Math.min(90, lines.length * 4));
@@ -100,6 +113,7 @@ export function scriptTiming(script = {}) {
   });
   return {
     sceneCount: scenes.length, dialogueLines, actionLines, narrationLines,
+    screenTextLines, continuityLines,
     estimatedSeconds: Math.round(seconds), perScene,
     declaredSeconds: Number(script?.durationSec) || 0,
   };
@@ -150,12 +164,27 @@ export function scriptIssues(script = {}, opts = {}) {
     // 只提示，不强制：钩子可以靠画面/字幕完成
     push('info', 'hook_unspoken', '结尾没有落到本集钩子，可检查是否留下了下一集的悬念');
   }
+  // v3 契约检查：只对带新场次头的剧本提示，避免历史旧格式剧本被刷屏
+  const isV3 = scenes.some((s) => (Array.isArray(s?.script) ? s.script : [])
+    .some((l) => /^#{1,2}\s*EP\d{3}-SC\d{3}\b/.test(String(l))));
+  if (isV3) {
+    const lastScene = scenes[scenes.length - 1];
+    const hasState = (Array.isArray(lastScene?.continuity) && lastScene.continuity.length)
+      || (Array.isArray(lastScene?.script) ? lastScene.script : [])
+        .some((l) => /^[\[［]连续性[\]］]/.test(String(l)));
+    if (!hasState) {
+      push('info', 'no_continuity', '本集末场没有 [连续性] 状态，下一集可能丢失道具归属 / 伤势 / 门锁等设定');
+    }
+    const noCode = scenes.filter((s) => !str(s?.sceneCode)).length;
+    if (noCode) push('info', 'no_scene_code', `${noCode} 场缺 sceneCode，跨集引用与导出时无法定位场次`);
+  }
   return issues;
 }
 
 /** 把模型输出 / 旧数据归一成统一剧本结构（不依赖磁盘，便于测试） */
 export function normalizeEpisodeScript(out = {}, ctx = {}) {
   const { ep = {}, vars = {}, source = 'mock', provider = 'mock' } = ctx;
+  const epNo = num(ep?.no, 0) || num(out?.episodeNo, 0) || num(vars?.episodeNo, 0) || 1;
   const characters = (() => {
     const list = Array.isArray(out?.characters) && out.characters.length
       ? out.characters
@@ -182,6 +211,12 @@ export function normalizeEpisodeScript(out = {}, ctx = {}) {
     base.no = num(base.no) || i + 1;
     base.interior = /^(内景|外景|内外景)$/.test(str(base.interior)) ? base.interior : guessInterior(base.location);
     base.durationSec = num(base.durationSec) || Math.max(8, Math.min(90, base.script.length * 4));
+    // v3 可拍摄契约：场次编号与 [连续性] 状态从正文行推导，缺了不给下游留空洞
+    base.episodeNo = num(s?.episodeNo) || epNo;
+    base.sceneCode = cut(s?.sceneCode, 16) || sceneCodeFor(epNo, base.no);
+    base.continuity = Array.isArray(s?.continuity)
+      ? s.continuity.map((x) => cut(x, 120)).filter(Boolean).slice(0, 8)
+      : continuityOf(base.script);
     if (!Array.isArray(base.characters)) {
       base.characters = str(base.characters).split(/[,，、]/).map((c) => cut(c, 24)).filter(Boolean);
     }
@@ -201,6 +236,9 @@ export function normalizeEpisodeScript(out = {}, ctx = {}) {
     const location = cut(ep.title || '本集开场', 30);
     scenes = [{
       id: 'S1', no: 1, location, time: '未指定', interior: guessInterior(location),
+      episodeNo: epNo,
+      sceneCode: sceneCodeFor(epNo, 1),
+      continuity: continuityOf(lines),
       durationSec: Math.max(8, Math.min(90, lines.length * 4)),
       characters: [], summary: cut(ep.summary || '', 160), script: lines,
     }];
@@ -208,6 +246,7 @@ export function normalizeEpisodeScript(out = {}, ctx = {}) {
 
   const script = {
     episodeNo: num(ep.no, 0) || num(out?.episodeNo, 0),
+    episodeCode: cut(out?.episodeCode || vars.episodeCode, 16) || episodeCodeOf(epNo),
     title: cut(out?.title || vars.title || ep.title || '未命名剧本', 120),
     genre: cut(out?.genre || vars.genre || '', 60),
     logline: cut(out?.logline || vars.logline || '', 300),
@@ -251,6 +290,10 @@ export function buildScriptVars(project = {}, m = {}, ep = {}, opts = {}) {
   const prevRecap = cut(prevLast?.summary || prev?.summary || prevTail || '', 180);
   const nextHook = cut(next?.hook || '', 180);
   const nextSummary = cut(next?.summary || '', 180);
+  // v3：上一集正文里 [连续性] 留下的状态（伤势 / 道具归属 / 门锁 / 时间跳跃），
+  // 注入下一集的编剧上下文，避免每集各自生成时把「上一集谁拿着东西」弄丢。
+  const prevContinuity = screenplayContinuity(prev?.script || {}).slice(0, 8);
+  const epCode = episodeCodeOf(num(ep?.no, 1));
   let spec = { totalSeconds: 30, clipCount: 10, clipSeconds: 3 };
   try { spec = resolveRuntimeSpec(project); } catch { /* 规格异常不影响写剧本 */ }
   const chars = num(ep?.chars, 0) || str(ep?.text).length;
@@ -269,6 +312,9 @@ export function buildScriptVars(project = {}, m = {}, ep = {}, opts = {}) {
       artStyle: bible.artStyle || project?.settings?.style || '',
     },
     episodeNo: num(ep?.no, 1),
+    episodeCode: epCode,
+    sceneCodePrefix: `${epCode}-SC`,
+    prevContinuity,
     episodeIndex: idx + 1,
     episodeCount: eps.length,
     episodeTitle: ep?.title || '',
@@ -319,6 +365,8 @@ export function mergeScriptEdit(existing = {}, patch = {}, ctx = {}) {
     for (const key of SCENE_EXTRA_KEYS) {
       if (s?.[key] !== undefined) next[key] = Array.isArray(s[key]) ? s[key] : cut(s[key], 160);
     }
+    // 正文行可能被人工增删：[连续性] 状态以最终 script 为准重算，不沿用过期数组
+    if (s?.continuity === undefined) next.continuity = continuityOf(next.script);
     return next;
   });
   if (!scenes.length) throw new Error('剧本至少需要保留一场');
@@ -346,7 +394,8 @@ export function scriptToMarkdown(script = {}, opts = {}) {
   // 片名本身已带「第 N 集」时不再重复前缀（模型两种写法都会出现）
   const hasNo = opts.episodeNo && new RegExp(`^第\\s*${opts.episodeNo}\\s*集`).test(title);
   const head = opts.episodeNo && !hasNo ? `第 ${opts.episodeNo} 集` : '';
-  lines.push(`# ${head ? `${head} · ` : ''}${title}`);
+  const epCode = cut(script.episodeCode, 16);
+  lines.push(`# ${epCode ? `${epCode} · ` : ''}${head ? `${head} · ` : ''}${title}`);
   const timing = scriptTiming(script);
   const metas = [
     script.genre, script.tone ? `基调：${script.tone}` : '',
@@ -379,7 +428,8 @@ export function scriptToMarkdown(script = {}, opts = {}) {
   }
   if (script.continuity?.prevRecap) lines.push('', `**上集回顾**：${script.continuity.prevRecap}`);
   (script.scenes || []).forEach((s, i) => {
-    const sceneHead = `## 第 ${i + 1} 场 · ${s.location || '未指定'}${s.time ? `（${s.time}）` : ''}`;
+    const sceneCode = cut(s.sceneCode, 16);
+    const sceneHead = `## 第 ${i + 1} 场 · ${s.location || '未指定'}${s.time ? `（${s.time}）` : ''}${sceneCode ? ` · ${sceneCode}` : ''}`;
     lines.push('', sceneHead);
     const headBits = [
       /^(内景|外景|内外景)$/.test(str(s.interior)) ? s.interior : guessInterior(s.location),
@@ -402,6 +452,8 @@ export function scriptToMarkdown(script = {}, opts = {}) {
     if (notes.length) lines.push('', notes.join(' ｜ '));
     for (const line of (s.script || [])) lines.push('', line);
   });
+  const states = screenplayContinuity(script);
+  if (states.length) lines.push('', `**跨集状态**：${states.slice(0, 8).join('；')}`);
   if (script.continuity?.nextHook) lines.push('', '---', '', `**下集钩子**：${script.continuity.nextHook}`);
   lines.push('');
   return lines.join('\n');

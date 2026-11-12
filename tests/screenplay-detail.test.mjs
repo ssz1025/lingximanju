@@ -78,7 +78,8 @@ test('整剧兜底：每场都写满可拍摄结构（人物 / 内外景 / 时�
     assert.ok(s.beat && s.transition, `缺节拍/转场：${s.id}`);
     assert.ok(Array.isArray(s.characters) && s.characters.length, `缺出场人物：${s.id}`);
     assert.ok(s.script.length >= 3, `正文太薄：${s.id}`);
-    assert.match(s.script[0], /^【.+】$/, '首行应是场次头');
+    assert.match(s.script[0], /^## EP\d{3}-SC\d{3}\s+(内|外|内外)\s*·/, '首行应是 v3 场次头（集/场编号 + 内外景 + 地点 + 时间）');
+    assert.ok(s.sceneCode, '每场应有 sceneCode');
     const kinds = s.script.slice(1).map((l) => parseScriptLine(l).kind);
     assert.ok(kinds.some((k) => k === 'action' || k === 'narration'), '正文至少要有动作或旁白');
   }

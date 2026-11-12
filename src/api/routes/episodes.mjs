@@ -10,7 +10,7 @@ import { loadProject, saveProject } from '../../core/store.mjs';
 import { ensureManagement, stepProgress } from '../../core/project-steps.mjs';
 import { emit } from '../../core/events.mjs';
 import { resolveComfyConfig, hasWorkflowFor } from '../../core/comfy-config.mjs';
-import { appSettingsSummary } from '../../core/app-settings.mjs';
+import { appSettingsSummary, loadAppSettings } from '../../core/app-settings.mjs';
 import { buildEpisodeGraph, matchEpisodeCharacters, reconstructEpisodeText, splitSegments } from '../../core/episode-model.mjs';
 import {
   ensureEpisodeBody, generateEpisodeScript, saveEpisodeScript, generateEpisodeGrids, generateSegmentGrid,
@@ -19,6 +19,7 @@ import {
 import { describeStoryboardSettings, resolveStoryboardSettings } from '../../core/storyboard-settings.mjs';
 import { scriptToMarkdown, scriptsToMarkdown, scriptsCoverage } from '../../core/episode-script.mjs';
 import { runEpisodeStep, runEpisodeSteps, EPISODE_STEP_BY_ID } from '../../core/episode-runner.mjs';
+import { ensureProjectCharactersForEpisode } from '../../agents/character-agent.mjs';
 
 function findEpisode(m, no) {
   const target = Number(no);
@@ -28,6 +29,30 @@ function findEpisode(m, no) {
 
 function fail(res, message, status = 400) {
   return json(res, { ok: false, error: message }, status), true;
+}
+
+/**
+ * 剧本入口选中的模型档案是否还有效。localStorage 里可能残留已被删除的档案 id，
+ * 以前 resolveModelSettings 会静默回退到默认模型（用户以为选了 A，实际用的是 B）。
+ * 剧本生成改为显式报错，由前端弹窗提示重新选择。只校验剧本相关端点。
+ */
+function invalidScriptModel(body = {}) {
+  const id = String(body.modelId || '').trim().slice(0, 60);
+  if (!id) return '';
+  const roster = loadAppSettings().models || [];
+  if (roster.some((p) => String(p.id) === id)) return '';
+  return `所选模型「${id}」已不存在：请在「本次剧本模型」里重新选择，或到 设置 → 模型与运行 → 全局模型库 更新档案`;
+}
+
+/**
+ * 剧本页「是否已配置文本模型」：迁移到模型库后，旧全局 llm 可能仍是 provider=mock / 无 Key，
+ * 但库里已有可用档案。旧判定只看全局 llm，导致明明能在「本次剧本模型」里切换模型，
+ * 详情页却提示「⚠ 文本大模型未配置」，用户以为没有模型可选。
+ */
+export function scriptLlmConfigured(summary = appSettingsSummary(), project = {}) {
+  if (summary?.llm?.configured) return true;
+  if ((summary?.models || []).some((m) => m.configured)) return true;
+  return project?.settings?.provider === 'openai' && Boolean(project?.settings?.apiKey);
 }
 
 function commit(project, ep, reason) {
@@ -43,12 +68,13 @@ export async function handleEpisodes(req, res, url) {
   const scriptsMatch = pathname.match(MATCH.episodeScripts);
   const stepBatchMatch = pathname.match(MATCH.episodeStepBatch);
   const scriptExportMatch = pathname.match(MATCH.episodeScriptExport);
+  const castEnsureMatch = pathname.match(MATCH.episodeCastEnsure);
   const projectExportMatch = pathname.match(MATCH.projectScriptExport);
   const itemMatch = pathname.match(MATCH.episodeItem);
   const actionMatch = pathname.match(MATCH.episodeAction);
-  if (!scriptsMatch && !stepBatchMatch && !scriptExportMatch && !projectExportMatch && !itemMatch && !actionMatch) return false;
+  if (!scriptsMatch && !stepBatchMatch && !scriptExportMatch && !projectExportMatch && !itemMatch && !actionMatch && !castEnsureMatch) return false;
 
-  const id = decodeURIComponent((scriptsMatch || stepBatchMatch || scriptExportMatch || projectExportMatch || itemMatch || actionMatch)[1]);
+  const id = decodeURIComponent((scriptsMatch || stepBatchMatch || scriptExportMatch || projectExportMatch || itemMatch || actionMatch || castEnsureMatch)[1]);
   const project = loadProject(id);
   if (!project) return fail(res, '项目不存在', 404);
   const m = ensureManagement(project);
@@ -75,6 +101,8 @@ export async function handleEpisodes(req, res, url) {
     const list = m.episodes || [];
     if (!list.length) return fail(res, '尚未拆分剧集');
     const body = await readBody(req);
+    const badModel = invalidScriptModel(body);
+    if (badModel) return fail(res, badModel, 400);
     // nos：只跑指定的几集（工作台勾选 / 单季批量）；onlyMissing：跳过已有剧本的集（「补齐缺失」）
     const nos = Array.isArray(body.nos) && body.nos.length
       ? new Set(body.nos.map((n) => Number(n)))
@@ -106,7 +134,12 @@ export async function handleEpisodes(req, res, url) {
       });
     }
     if (done.length) commit(project, targets[0], 'scripts');
-    if (!done.length) return json(res, { ok: false, error: `全部 ${failed.length} 集剧本生成失败`, results: failed }, 502), true;
+    if (!done.length) {
+      const first = failed[0] ? `：${String(failed[0].error).slice(0, 180)}` : '';
+      return json(res, {
+        ok: false, error: `全部 ${failed.length} 集剧本生成失败${first}`, results: failed,
+      }, 502), true;
+    }
     return json(res, {
       ok: true, generated: done.length, failed: failed.length,
       skipped: list.length - targets.length, nos: done, results: failed,
@@ -141,7 +174,7 @@ export async function handleEpisodes(req, res, url) {
     } catch (err) { return fail(res, err.message, 409); }
   }
 
-  const no = Number((itemMatch || actionMatch || scriptExportMatch)[2]);
+  const no = Number((itemMatch || actionMatch || scriptExportMatch || castEnsureMatch)[2]);
   const ep = findEpisode(m, no);
   if (!ep) return fail(res, `第 ${no} 集不存在`, 404);
   const action = actionMatch ? actionMatch[3] : null;
@@ -180,7 +213,7 @@ export async function handleEpisodes(req, res, url) {
       scriptCoverage: scriptsCoverage(eps),
       progress: stepProgress(m),
       config: {
-        llmConfigured: appSettingsSummary().llm.configured || (project.settings?.provider === 'openai' && !!project.settings?.apiKey),
+        llmConfigured: scriptLlmConfigured(appSettingsSummary(), project),
         comfyVideo: Boolean(cfg.enabled && hasWorkflowFor(cfg, 'video')),
         comfyImage: Boolean(cfg.enabled && hasWorkflowFor(cfg, 'image')),
         comfyBaseUrl: cfg.baseUrl || '',
@@ -205,25 +238,55 @@ export async function handleEpisodes(req, res, url) {
     } catch (err) { return fail(res, err.message, 400); }
   }
 
-  if (!action) return fail(res, '不支持的方法', 405);
-  if (method !== 'POST' && !(action === 'director-pack' && method === 'GET') && !(action === 'video' && method === 'GET') && !(action === 'film' && method === 'GET')) {
+  // castEnsure 是独立端点（路径里没有 action 段），不能按「无 action」判 405
+  if (!action && !castEnsureMatch) return fail(res, '不支持的方法', 405);
+  if (method !== 'POST' && !castEnsureMatch
+    && !(action === 'director-pack' && method === 'GET') && !(action === 'video' && method === 'GET') && !(action === 'film' && method === 'GET')) {
     return fail(res, '需要 POST', 405);
   }
+  if (castEnsureMatch && method !== 'POST') return fail(res, '需要 POST', 405);
   const body = (method === 'POST') ? await readBody(req) : {};
   const requestInterfaceId = String(body.interfaceId || '').trim().slice(0, 60);
   cfg = cfgForRequest(body.interfaceId);
+
+  /* ---------- 本集出场角色对账：缺的角色就地生成并入库全局角色库 ----------
+   * 独立端点与 action='characters' {ensure:true} 两条入口共用同一业务函数。
+   * 只补本集新出现的人物，不重抽全书、不为每集建库；角色库满 12 位时只提示不挤人。 */
+  if (castEnsureMatch || (action === 'characters' && body.ensure === true)) {
+    if (ep.finalized?.at) {
+      return fail(res, `第 ${no} 集已定稿：请先撤销定稿再补齐本集角色`, 409);
+    }
+    try {
+      const out = await ensureProjectCharactersForEpisode({
+        project, m, ep, modelId: body.modelId || '',
+        // mode:'heuristic' = 显式离线，只用本集原文证据建卡，绝不发起模型请求
+        mode: body.mode === 'heuristic' ? 'heuristic' : 'llm', log,
+      });
+      commit(project, ep, 'characters-ensure');
+      return json(res, {
+        ok: out.ok, message: out.message, source: out.source,
+        added: out.added, addedNames: out.addedNames || [], skipped: out.skipped || [],
+        matched: out.matched || 0, notes: out.notes || [],
+        characterIds: ep.characterIds, characters: m.characters,
+      }, out.ok ? 200 : 422), true;
+    } catch (err) { return fail(res, err.message, 502); }
+  }
 
   /* ---------- 生成本集剧本 ---------- */
   if (action === 'script') {
     if (ep.finalized?.at) {
       return fail(res, `第 ${no} 集已定稿：请在工作台撤销定稿后再生成 / 重写本集剧本`, 409);
     }
+    const badModel = invalidScriptModel(body);
+    if (badModel) return fail(res, badModel, 400);
     try {
       const script = await generateEpisodeScript(project, m, ep, { log, modelId: body.modelId });
       commit(project, ep, 'script');
       return json(res, {
         ok: true, script,
-        message: (script.source === 'llm' ? '已由大模型生成本集剧本' : '未配置大模型，已用内置模板生成本集剧本（设置 → 模型可切换）')
+        message: (script.source === 'llm'
+          ? '已由大模型生成本集剧本'
+          : '本次未指定可用文本模型，已用内置模板生成；可在「本次剧本模型」里选一个模型后点重写')
           + ` · ${script.stats.sceneCount} 场 · ${script.stats.dialogueCount} 句对白`,
       }), true;
     } catch (err) { return fail(res, err.message, 502); }

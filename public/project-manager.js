@@ -5,17 +5,18 @@
  * ==========================================================================*/
 import { openAssetLibrary } from './asset-manager.js';
 import { ensureModelPicker, withModelId } from './model-picker.js';
-import { ensureInterfacePicker, withInterfaceId } from './interface-picker.js';
+import { ensureInterfacePicker, withInterfaceId, withCharacterInterface } from './interface-picker.js';
 import { openPage } from './page.js';
 import { $, esc, cut } from './utils.js';
 import { GENRES, AUDIENCES, TONES, ART_STYLES, ENDINGS, EPISODE_COUNTS, selectOptions } from './project-options.js';
 import { speakText, stopSpeak, isSpeechSupported, onSpeakState } from './voice-preview.js';
 import { chatCount } from './chat-counts.js';
 
-/** 出图请求：按板块并上「本次使用的接口档案」；未选择时由后端按板块绑定 / 默认解析 */
-const withCharImage = (body = {}) => withInterfaceId(
-  body?.view === 'sheet' ? 'character-sheet' : 'character-view',
+/** 出图请求：正面基准图 / 其它多视图 / 定妆板各有独立板块，批量生成时按视图分别下发 */
+const withCharImage = (body = {}) => withCharacterInterface(
   withModelId('chars', body),
+  body?.view === 'sheet' ? 'character-sheet'
+    : body?.view === 'front' ? 'character-front' : 'character-view',
 );
 const withVoiceDraw = (body = {}) => withInterfaceId('voice', withModelId('chars', body));
 const withCoverImage = (body = {}) => withInterfaceId('cover', withModelId('cover', body));
@@ -1370,7 +1371,8 @@ export function openProjectManager(ctx = {}) {
 
     // 模型选择器：提取与多视图生成都用它选中的模型（库为空时不出现）
     ensureModelPicker('chars', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
-    // 本次使用的 ComfyUI 接口：多视图 / 定妆板 / 音色抽卡分别按板块记忆（只有 1 份档案时不出现）
+    // 本次使用的 ComfyUI 接口：正面基准图 / 其它多视图 / 定妆板 / 音色抽卡分别按板块记忆
+    ensureInterfacePicker('character-front', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
     ensureInterfacePicker('character-view', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
     ensureInterfacePicker('character-sheet', body.querySelector('.cf-row'), body.querySelector('#pmm-char-status'));
     const voiceDrawBtn = body.querySelector('#pmm-voice-draw');

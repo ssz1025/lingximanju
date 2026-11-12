@@ -25,23 +25,94 @@ import { buildStyleLock } from './character-style.mjs';
 import {
   ALL_VIEW_KEYS, CORE_VIEW_KEYS, DEFAULT_VIEW_KEYS, CHARACTER_VIEWS,
   buildSheetPrompt, buildViewPrompt, characterViewStatus, projectPortraitStatus,
-  resolveViewKeys, viewDef, isRealShot,
+  resolveViewKeys, viewDef, isRealShot, characterConsistencyReport,
 } from './characters.mjs';
 
 /** 视频 / 关键帧侧最多消费几张参考图：与 ComfyUI 多 LoadImage 插槽上限（8）留余量 */
 export const MAX_REFS_PER_CHARACTER = 4;
 
-/** 生成参考图时的默认参考链：正面是身份基准，其余视图一律回引它 */
-function refChainFor(character, viewKey) {
+/** 生成参考图时的默认参考链：正面是身份基准，其余视图一律回引它。
+ *
+ * 过去只回引 front + 3/4 侧（最多 2 张），且正面缺图时仍允许纯文字硬出，
+ * 于是「侧面与正面不是同一个人」「特写是另一张脸」几乎必然发生。现在：
+ *   - front 必引，缺 front 直接阻断（见 generateCharacterView）；
+ *   - 3/4 侧、面部特写、侧面作为补强参考，让模型同时看到转身中间态与同一张脸；
+ *   - 上限 3 张，给 ComfyUI 多 LoadImage 插槽留余量。
+ */
+export function refChainFor(character, viewKey) {
+  if (viewKey === 'front') return [];
+  const views = character?.views || {};
   const out = [];
-  const front = character?.views?.front?.url;
-  if (front && viewKey !== 'front') out.push({ view: 'front', url: front });
-  // 3/4 侧既能补「转身中间态」也能补侧脸轮廓，作为第二参考（不参与自身生成）
-  const threeQ = character?.views?.threeQuarter?.url;
-  if (threeQ && viewKey !== 'threeQuarter' && viewKey !== 'front') {
-    out.push({ view: 'threeQuarter', url: threeQ });
+  const push = (key) => {
+    const url = views[key]?.url;
+    if (url && !out.some((r) => r.url === url)) out.push({ view: key, url });
+  };
+  push('front');
+  if (viewKey !== 'threeQuarter') push('threeQuarter');
+  if (viewKey !== 'closeup') push('closeup');
+  if (viewKey !== 'side') push('side');
+  return out.slice(0, MAX_REFS_PER_CHARACTER - 1);
+}
+
+/** 按视图解析本次接口：interfaceByView 优先，其次单个 interfaceId，兼容旧调用 */
+export function interfaceForView(interfaceByView = null, viewKey = '', interfaceId = '') {
+  const byView = interfaceByView && typeof interfaceByView === 'object' ? interfaceByView : null;
+  const hit = byView ? (byView[viewKey] || byView.default) : '';
+  return String(hit || interfaceId || '').slice(0, 60);
+}
+
+/** 请求体里的按视图接口表归一：只认已知视图 key，挡住任意字段注入 */
+export function normalizeInterfaceByView(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const keys = [...ALL_VIEW_KEYS, 'sheet', 'default'];
+  const out = {};
+  for (const k of keys) {
+    const v = String(raw[k] || '').trim().slice(0, 60);
+    if (v) out[k] = v;
   }
-  return out.slice(0, 2);
+  return Object.keys(out).length ? out : null;
+}
+
+/** 「一键重试失败任务」用的按角色视图表归一：{角色ID: [视图key]}。
+ *  只认真实角色视图 + sheet，挡住任意字段注入 / 超长名单；空表返回 null（旧调用零回归）。
+ *  合法 key 与 ALL_VIEW_KEYS 同源，正面永远排在最前（身份基准）。 */
+export function normalizeViewsByChar(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const allowed = new Set([...ALL_VIEW_KEYS, 'sheet']);
+  const out = {};
+  for (const [id, list] of Object.entries(raw).slice(0, 24)) {
+    const key = String(id).trim().slice(0, 60);
+    if (!key || key.startsWith('__')) continue;
+    if (!Array.isArray(list)) continue;
+    const keys = ALL_VIEW_KEYS.concat('sheet')
+      .filter((k) => allowed.has(k) && list.includes(k));
+    if (keys.length) out[key] = keys;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * 单个角色本次要生成哪些视图（任务明细表、批量补全、精确重试共用同一口径）。
+ *  - 未给 viewsByChar：沿用 scope 视图表；缺正面且 onlyMissing 时自动前置补正面。
+ *  - 给了显式列表：只生成列表里的视图，且列表代表「强制重出」（不受 onlyMissing 跳过），
+ *    这样「一张图旧图仍在但重生成失败」的失败任务也能被精确重试；sheet 单独成项。
+ * @returns {{keys:string[], sheet:boolean, explicit:boolean}}
+ */
+export function portraitPlanFor(character, viewsByChar = null, opts = {}) {
+  const { views = CORE_VIEW_KEYS, sheet = false, onlyMissing = true } = opts;
+  const base = Array.isArray(views) && views.length ? views : CORE_VIEW_KEYS;
+  const explicit = normalizeViewsByChar(viewsByChar);
+  const list = explicit?.[String(character?.id || '')];
+  if (!list?.length) {
+    const keys = (!onlyMissing || base.includes('front') || character?.views?.front?.url)
+      ? [...base] : ['front', ...base];
+    return { keys, sheet, explicit: false };
+  }
+  const wanted = new Set(list);
+  const keys = ALL_VIEW_KEYS.filter((k) => wanted.has(k));
+  // 显式重试也不破「无正面不出其余视图」：正面缺图且列表没写正面时自动补上
+  if (!character?.views?.front?.url && !keys.includes('front')) keys.unshift('front');
+  return { keys, sheet: wanted.has('sheet'), explicit: true };
 }
 
 /** 角色定妆专用 provider 设置：模型走模型库，ComfyUI 连接与工作流是全局配置（与编排器同口径）。
@@ -65,30 +136,39 @@ function portraitProviders(project, modelId, log, interfaceId = '') {
  */
 export async function generateCharacterView({
   project, m, character, viewKey, modelId = '', styleLock = null, requireReal = false,
-  interfaceId = '', log = () => {}, signal,
+  interfaceId = '', interfaceByView = null, log = () => {}, signal,
 } = {}) {
   const view = viewDef(viewKey);
   if (!view) throw new Error(`未知视图：${viewKey}（可用：${ALL_VIEW_KEYS.join(' / ')}）`);
 
   const lock = styleLock || buildStyleLock({ project, management: m });
   const chain = refChainFor(character, view.key);
+  // 正面基准图是其余所有视图的唯一外观依据：缺它时纯文字硬出必然漂移，直接阻断。
+  // 老项目只有占位图时由 ensureCharacterPortraits 自动先补正面，再补其余视图。
+  if (view.key !== 'front' && !chain.some((r) => r.view === 'front')) {
+    throw new Error(`${character.name || '该角色'}缺正面基准图：请先生成正面全身图，再生成${view.label}（不允许凭文字硬出造成多视图不一致）`);
+  }
   const prompt = buildViewPrompt(character, view.key, { styleLock: lock, refs: chain });
   const refs = chain.map((r) => r.url);
+  const usedInterfaceId = interfaceForView(interfaceByView, view.key, interfaceId);
 
-  if (view.key !== 'front' && !refs.length) {
-    log('warn', `角色定妆 · ${character.name} 缺正面基准图，${view.label}将仅依据文字特征生成，一致性会下降`);
-  }
-
-  const providers = portraitProviders(project, modelId, log, interfaceId);
+  const providers = portraitProviders(project, modelId, log, usedInterfaceId);
   const img = await providers.image({
-    kind: 'character-view', view: view.key, interfaceId,
+    kind: 'character-view', view: view.key, interfaceId: usedInterfaceId,
     label: `${character.name}·${view.label}`,
-    prompt, palette: character.palette, views: DEFAULT_VIEW_KEYS,
+    prompt, negative: lock.negative, palette: character.palette, views: DEFAULT_VIEW_KEYS,
     style: project.settings?.style || 'cinematic',
     seed: `${project.id}-${character.id}-${view.key}`,
     refs,
     requireReal,
   }, signal);
+
+  // ComfyUI 回传 refsUsed：请求了参考图但工作流一张都没接收时明确告警，
+  // 不能再静默当作「已按正面图对齐」写进项目。
+  const refsUsed = img.refsUsed ?? null;
+  const refsWarning = refs.length > 0 && refsUsed !== null && Number(refsUsed) === 0
+    ? '工作流未接收任何参考图（请检查接口档案的 LoadImage 插槽绑定）：本次多视图一致性不保证' : '';
+  if (refsWarning) log('warn', `角色定妆 · ${character.name}·${view.label}：${refsWarning}`);
 
   const file = String(img.url || '').split('/').pop();
   registerAsset({
@@ -103,6 +183,8 @@ export async function generateCharacterView({
     [view.key]: {
       file, url: img.url, prompt, provider: img.provider,
       angle: view.angle, refs, styleLock: lock.source, at: Date.now(),
+      refsUsed, refsWarning, interfaceId: usedInterfaceId,
+      scope: img.scope || '',
     },
   };
   character.styleLock = `${lock.label} · ${lock.source}`.slice(0, 120);
@@ -123,21 +205,33 @@ export async function generateCharacterView({
  */
 export async function generateCharacterSheet({
   project, m, character, modelId = '', styleLock = null, views = null, requireReal = false,
-  interfaceId = '', log = () => {}, signal,
+  interfaceId = '', interfaceByView = null, log = () => {}, signal,
 } = {}) {
   const lock = styleLock || buildStyleLock({ project, management: m });
   const keys = (Array.isArray(views) && views.length ? views : DEFAULT_VIEW_KEYS)
     .filter((k) => ALL_VIEW_KEYS.includes(k));
-  const refs = keys.map((k) => character.views?.[k]?.url).filter(Boolean).slice(0, MAX_REFS_PER_CHARACTER);
-  if (!refs.length) {
-    log('warn', `角色定妆板 · ${character.name} 尚无任何视图，将仅按文字描述生成设定板`);
+  // 定妆板必须是「把已生成的各视图排进一张图」，而不是再照文字新画一个角色。
+  // 基础组不齐时直接阻断；真实出图口径下占位图也不算齐（Mock 演示只给告警）。
+  const coreMissing = CORE_VIEW_KEYS.filter((k) => !character.views?.[k]?.url);
+  if (coreMissing.length) {
+    throw new Error(`${character.name || '该角色'}的基础定妆组不齐（缺 ${coreMissing.map((k) => viewDef(k)?.label || k).join('、')}）：请先生成各视图，再生成定妆板`);
   }
+  const corePlaceholders = CORE_VIEW_KEYS.filter((k) => !isRealShot(character.views?.[k]));
+  if (requireReal && corePlaceholders.length) {
+    throw new Error(`${character.name || '该角色'}有 ${corePlaceholders.length} 张占位视图：真实出图口径下不生成定妆板，请先用 ComfyUI 重出这些视图`);
+  }
+  if (corePlaceholders.length) {
+    log('warn', `角色定妆板 · ${character.name} 有 ${corePlaceholders.length} 张占位视图，设定板一致性会下降`);
+  }
+  const refKeys = [...new Set([...keys, ...ALL_VIEW_KEYS])];
+  const refs = refKeys.map((k) => character.views?.[k]?.url).filter(Boolean).slice(0, MAX_REFS_PER_CHARACTER);
   const prompt = buildSheetPrompt(character, { styleLock: lock, views: keys });
+  const usedInterfaceId = interfaceForView(interfaceByView, 'sheet', interfaceId);
 
-  const providers = portraitProviders(project, modelId, log, interfaceId);
+  const providers = portraitProviders(project, modelId, log, usedInterfaceId);
   const img = await providers.image({
-    kind: 'character-sheet', label: `${character.name}·设定板`, interfaceId,
-    prompt, palette: character.palette, views: keys,
+    kind: 'character-sheet', label: `${character.name}·设定板`, interfaceId: usedInterfaceId,
+    prompt, negative: lock.negative, palette: character.palette, views: keys,
     style: project.settings?.style || 'cinematic',
     seed: `${project.id}-${character.id}-sheet`,
     refs,
@@ -151,14 +245,22 @@ export async function generateCharacterSheet({
     sourceProjectId: project.id, sourceProjectName: project.name,
   });
 
+  const sheetRefsUsed = img.refsUsed ?? null;
+  const sheetRefsWarning = refs.length > 0 && sheetRefsUsed !== null && Number(sheetRefsUsed) === 0
+    ? '工作流未接收任何视图参考图：设定板一致性不保证' : '';
+  if (sheetRefsWarning) log('warn', `角色定妆板 · ${character.name}：${sheetRefsWarning}`);
+
   character.sheet = {
     file, url: img.url, prompt, provider: img.provider,
     views: keys, refs, styleLock: lock.source, at: Date.now(),
+    refsUsed: sheetRefsUsed, refsWarning: sheetRefsWarning, interfaceId: usedInterfaceId,
+    scope: img.scope || '',
   };
   character.updatedAt = Date.now();
   m.updatedAt = Date.now();
   return {
     url: img.url, provider: img.provider, prompt, refs, views: keys, styleLock: lock.source,
+    refsUsed: sheetRefsUsed, refsWarning: sheetRefsWarning, interfaceId: usedInterfaceId,
     note: img.note || '', character,
   };
 }
@@ -183,8 +285,8 @@ export async function generateCharacterSheet({
  */
 export async function ensureCharacterPortraits({
   project, m, scope = 'core', onlyMissing = true, sheet = false, characterIds = null,
-  regenerateMock = false, requireReal = false, interfaceId = '',
-  concurrency = 1, shouldStop = () => false,
+  regenerateMock = false, requireReal = false, interfaceId = '', interfaceByView = null,
+  viewsByChar = null, concurrency = 1, shouldStop = () => false,
   modelId = '', onProgress = () => {}, log = () => {}, save = () => {}, signal,
 } = {}) {
   const all = Array.isArray(m?.characters) ? m.characters : [];
@@ -212,13 +314,28 @@ export async function ensureCharacterPortraits({
 
   const views = resolveViewKeys(scope);
   const lock = buildStyleLock({ project, management: m });
-  log('info', `角色定妆 · 风格锁来自 ${lock.source}：${lock.label} · 目标 ${targets.length} 位角色 × ${views.length} 视图${sheet ? ' + 定妆板' : ''}${requireReal ? ' · 只认 ComfyUI 真实出图' : ''}`);
+  // 每位角色一份生成计划：显式列表 = 精确重试失败任务（强制重出指定视图），
+  // 其余沿用 scope 视图表。task total / 明细 / 实际执行都读同一份 plan。
+  const explicitViews = normalizeViewsByChar(viewsByChar);
+  const plans = new Map(targets.map((c) => [String(c.id), portraitPlanFor(c, explicitViews, {
+    views, sheet, onlyMissing,
+  })]));
+  const retryCount = [...plans.values()].filter((p) => p.explicit).length;
+  log('info', `角色定妆 · 风格锁来自 ${lock.source}：${lock.label} · 目标 ${targets.length} 位角色${retryCount ? ` · 其中 ${retryCount} 位按失败视图精确重试` : ` × ${views.length} 视图`}${sheet ? ' + 定妆板' : ''}${requireReal ? ' · 只认 ComfyUI 真实出图' : ''}`);
 
-  /** 「只补缺失」时该视图是否真的可以跳过：占位图在 regenerateMock 模式下视同未生成 */
+  /** 「只补缺失」时该视图是否真的可以跳过：占位图在 regenerateMock 模式下视同未生成。
+   *  显式重试计划不看旧图：失败那张即使还留着上一次的图片，也必须重新出图。 */
   const skippable = (shot) => onlyMissing && Boolean(shot?.url)
     && !(regenerateMock && !isRealShot(shot));
 
-  const total = targets.length * views.length + (sheet ? targets.length : 0);
+  /** 老项目 / 只补单个侧面视图时：缺正面就先把正面补出来，再生成其余视图。
+   *  这样「无正面不出其余视图」的强约束不会把老项目卡死，onlyMissing 语义也保留。 */
+  const autoFrontCount = [...plans.values()].filter((p) => !p.explicit && p.keys[0] === 'front' && !views.includes('front')).length;
+  if (autoFrontCount) {
+    log('info', `角色定妆 · ${autoFrontCount} 位角色缺正面基准图：自动前置补正面，避免其余视图凭文字硬出`);
+  }
+
+  const total = [...plans.values()].reduce((n, p) => n + p.keys.length + (p.sheet ? 1 : 0), 0);
   let done = 0;
   let generated = 0;
   let skipped = 0;
@@ -231,13 +348,17 @@ export async function ensureCharacterPortraits({
     onProgress({ done, total, ...evt });
   };
 
-  /** 单个角色内的视图必须按顺序生成（正面是其余视图的身份基准），
-   *  跨角色可以并行：ComfyUI 是队列制，2~3 路并行能把 12 位角色的总时长从 40min 压到十几分钟。 */
+  /** 单个角色内严格串行：正面 → 校验 → 其余视图 → 定妆板。
+   *  正面是其余视图的唯一外观依据，生成失败 / 缺图时立即停止该角色，不产漂移图。
+   *  跨角色可以并行：ComfyUI 是队列制，2~3 路并行能显著压缩总时长。
+   *  显式重试计划（explicit）只跑指定视图，且强制重出、不看 onlyMissing。 */
   const runCharacter = async (c) => {
-    for (const key of views) {
+    const plan = plans.get(String(c.id));
+    const keys = plan.keys;
+    for (const key of keys) {
       if (shouldStop()) { cancelled = true; return; }
       const label = viewDef(key)?.label || key;
-      if (skippable(c.views?.[key])) {
+      if (!plan.explicit && skippable(c.views?.[key])) {
         skipped += 1;
         tick({ characterId: c.id, name: c.name, view: key, label, status: 'skip' });
         continue;
@@ -246,21 +367,29 @@ export async function ensureCharacterPortraits({
       try {
         const r = await generateCharacterView({
           project, m, character: c, viewKey: key, modelId, styleLock: lock, requireReal,
-          interfaceId, log, signal,
+          interfaceId, interfaceByView, log, signal,
         });
         generated += 1;
         // 每张都落盘：中途失败 / 关闭页面也不丢已完成的定妆图
         save();
         tick({ characterId: c.id, name: c.name, view: key, label, status: 'done', provider: r.provider, url: r.url });
+        // 正面校验：没拿到图就停，后续视图不凭文字硬出
+        if (key === 'front' && !c.views?.front?.url) {
+          failed.push(`${c.name}·正面基准图未生成：已停止该角色其余视图`);
+          return;
+        }
+        if (r.refsWarning) log('warn', `角色定妆 · ${c.name}·${label}：${r.refsWarning}`);
       } catch (err) {
         failed.push(`${c.name}·${label}：${err.message}`);
         tick({ characterId: c.id, name: c.name, view: key, label, status: 'error', error: err.message });
+        // 正面失败 / 缺正面：其余视图一律不再生成，避免整组图各自漂移
+        if (key === 'front' || !c.views?.front?.url) return;
       }
     }
-    if (sheet) {
+    if (plan.sheet) {
       if (shouldStop()) { cancelled = true; return; }
       onProgress({ done, total, characterId: c.id, name: c.name, view: 'sheet', label: '定妆板', status: 'running' });
-      if (skippable(c.sheet)) {
+      if (!plan.explicit && skippable(c.sheet)) {
         skipped += 1;
         tick({ characterId: c.id, name: c.name, view: 'sheet', label: '定妆板', status: 'skip' });
         return;
@@ -268,7 +397,7 @@ export async function ensureCharacterPortraits({
       try {
         const sh = await generateCharacterSheet({
           project, m, character: c, modelId, styleLock: lock, views, requireReal,
-          interfaceId, log, signal,
+          interfaceId, interfaceByView, log, signal,
         });
         sheets += 1;
         save();
@@ -292,12 +421,19 @@ export async function ensureCharacterPortraits({
   }));
 
   const status = projectPortraitStatus(all, { scope, requireSheet: sheet });
+  // 可回溯的一致性报告：哪些角色的正面 / 侧面 / 特写 / 定妆板来自不同通道或不同风格锁
+  const consistency = Object.fromEntries(all.map((c) => [c.id, characterConsistencyReport(c, { scope })]));
+  const inconsistent = Object.values(consistency).filter((r) => !r.ok).length;
   const message = cancelled
     ? `已暂停角色定妆：${targets.length} 位角色 · 新生成 ${generated} 张`
     : `角色定妆完成：${targets.length} 位角色 · 新生成 ${generated} 张`
       + `${sheets ? ` / 定妆板 ${sheets}` : ''}${skipped ? ` · 跳过 ${skipped}` : ''}`
-      + `${failed.length ? ` · 失败 ${failed.length}` : ''}`;
-  return { ok: failed.length === 0 && !cancelled, cancelled, total, generated, skipped, failed, sheets, styleLock: lock, status, message };
+      + `${failed.length ? ` · 失败 ${failed.length}` : ''}`
+      + `${inconsistent ? ` · ⚠ ${inconsistent} 位角色来源不一致（见角色卡）` : ''}`;
+  return {
+    ok: failed.length === 0 && !cancelled, cancelled, total, generated, skipped,
+    failed, sheets, styleLock: lock, status, consistency, message,
+  };
 }
 
 /**
@@ -348,4 +484,4 @@ export function emitPortraitProgress(projectId, evt = {}) {
   });
 }
 
-export { CORE_VIEW_KEYS, ALL_VIEW_KEYS, CHARACTER_VIEWS };
+export { CORE_VIEW_KEYS, ALL_VIEW_KEYS, CHARACTER_VIEWS, characterConsistencyReport };

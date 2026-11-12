@@ -7,7 +7,7 @@ import { chunkNovel, KnowledgeBase, retrieveRelevantChunks,
   saveKnowledgeCache, loadKnowledgeCache, formatFragments } from '../core/knowledge.mjs';
 import { topoLayers } from '../core/graph.mjs';
 import { resolveRuntimeSpec, allocateShots, shotSequenceStarts } from '../core/runtime-spec.mjs';
-import { parseScriptLine, formatDuration } from '../core/screenplay.mjs';
+import { parseScriptLine, formatDuration, episodeCodeOf } from '../core/screenplay.mjs';
 import { extractCharacters } from '../core/novel.mjs';
 import { isLikelyPersonName, SURNAMES, NON_PERSON_NAMES } from '../core/character-names.mjs';
 import { resolveStoryboardSettings, panelIndexOf, describeStoryboardSettings } from '../core/storyboard-settings.mjs';
@@ -42,8 +42,13 @@ function episodeBriefs(project, node = {}) {
   const src = list.length ? list : (Array.isArray(node.data?.novelEpisodes) ? node.data.novelEpisodes : []);
   return src.slice(0, SCRIPT_MAX_EPISODES).map((e, i) => {
     const raw = String(e.text || e.excerpt || '').replace(/\s+/g, ' ').trim();
+    const no = Number(e.no) || i + 1;
+    const code = episodeCodeOf(no);
     return {
-      no: Number(e.no) || i + 1,
+      no,
+      // v3：集 / 场编号随分集简报下发，模型才知道该把场次头写成 EP003-SC001
+      episodeCode: code,
+      sceneCodePrefix: `${code}-SC`,
       title: textOf(e.title),
       summary: brief(textOf(e.summary), 200),
       hook: brief(textOf(e.hook), 160),
@@ -370,7 +375,7 @@ defineAgent({
 
 defineAgent({
   id: 'character', label: '角色造型智能体', group: '资产', icon: '◉', color: '#f472b6',
-  description: '抽取角色、生成三视图定妆资产，供所有镜头以 ref 边复用；优先匹配资源库已生成的角色',
+  description: '抽取角色并复用项目角色库的正面基准图（缺图时才生成），供所有镜头以 ref 边复用；优先匹配资源库已生成的角色',
   async run(ctx) {
     const script = findScript(ctx) || { characters: [] };
     ctx.progress(0.2);
@@ -382,8 +387,14 @@ defineAgent({
         name: c.name, role: c.role || '原著角色',
         appearance: buildCharacterPrompt(c) || c.appearance || `${c.name}角色设定`,
         palette: c.palette || [],
+        // 画布立绘直接复用项目管理里已经修好的「正面基准图」：
+        // 过去这里只带文字人设，角色节点会另出一张早期合图，于是角色面板修好了
+        // 定妆图、视频与关键帧仍在用那张老图，身份永远对不上。
+        frontUrl: String(c.views?.front?.url || ''),
+        frontPrompt: String(c.views?.front?.prompt || ''),
+        frontRefs: Array.isArray(c.views?.front?.refs) ? c.views.front.refs : [],
       }));
-      ctx.log('info', `使用项目管理中维护的 ${wanted.length} 位角色属性驱动造型生成`);
+      ctx.log('info', `使用项目管理中维护的 ${wanted.length} 位角色属性驱动造型生成（${wanted.filter((c) => c.frontUrl).length} 位已有正面基准图，画布直接复用）`);
     } else {
       const res = await ctx.providers.generate('characters', { characters: script.characters }, ctx.signal);
       wanted = res.characters || [];
@@ -395,6 +406,16 @@ defineAgent({
     let generated = 0;
     for (let i = 0; i < wanted.length; i++) {
       const c = wanted[i];
+      // 项目角色库里的正面基准图优先于跨项目资源库命中：它是本项目当前这版定妆，
+      // 也是后续所有视图 / 关键帧 / 视频参考图的唯一身份锚点。
+      if (c.frontUrl) {
+        characters.push({
+          ...c, portraitUrl: c.frontUrl, assetKind: '正面基准图',
+          reused: true, matchedAssetId: '', matchedFrom: '项目角色库 · 正面视图',
+        });
+        ctx.progress(0.2 + (i + 1) / (wanted.length + 1) * 0.7);
+        continue;
+      }
       const hit = matched[c.name];
       if (hit) {
         characters.push({

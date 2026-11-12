@@ -1321,6 +1321,8 @@ function projectViewCtx() {
     onRunStep: (id, all, force) => runStep(id, all, force),
     onChatStep: (id) => openStepChatFor(id),
     onManage: (tab) => openManagePanel(tab),
+    // 剧本台「本次剧本模型」条与失败弹窗的去配置入口
+    onSettings: () => openSettingsDialog(),
     onOpenCanvas: () => setView('canvas'),
     onOpenEpisode: (no) => openEpisode(no),
     onOpenEpisodeCanvas: (no) => openEpisodeCanvas(no),

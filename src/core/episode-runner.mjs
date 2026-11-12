@@ -14,20 +14,22 @@
  *     工作台第④⑤⑥⑦步面板与剧集详情页都读这一份，互不覆盖。
  *
  * 每步内容（全部复用既有按集产物链路，不另起炉灶）：
- *   context    出场角色（必要时先提取全书角色）+ 本集剧本（上下文骨架）
+ *   context    本集出场角色对账（缺失者补进全局角色库）+ 本集剧本（上下文骨架）
  *   storyboard 分段确认 + 本集分镜板逐段补齐（可选 ComfyUI 逐格出图）
  *   deliver    逐格视频片段 + 拼接本集成片 MP4 + 单集导演包
  *
  * 「切换剧集后后续步骤完全独立」的边界：剧本 / 出场角色关联 / 分镜 / 视频成片
  * 都记在各自 ep 上，互不覆盖；唯一例外是 management.characters（角色设定与定妆图），
- * 它是全项目共享资源——已存在则沿用，同名角色直接复用，切集 / 定稿都不重抽、不每集建一份。
+ * 它是全项目共享资源——已存在则沿用，同名角色直接复用，切集 / 定稿都不重抽全书、
+ * 不每集建一份；但每集会做一次「出场角色对账」，本集新出现、全局库没有的人物会
+ * 增量补进这份共享角色库，避免中后集登场的人物永远缺设定与定妆图。
  * ==========================================================================*/
 import { emit } from './events.mjs';
 import { saveProject } from './store.mjs';
 import { isRunning } from './orchestrator.mjs';
 import { ensureManagement } from './project-steps.mjs';
 import { resolveComfyConfig, hasWorkflowFor } from './comfy-config.mjs';
-import { extractProjectCharacters } from '../agents/character-agent.mjs';
+import { extractProjectCharacters, ensureProjectCharactersForEpisode } from '../agents/character-agent.mjs';
 import { mergeExtracted } from './characters.mjs';
 import { matchEpisodeCharacters } from './episode-model.mjs';
 import {
@@ -84,9 +86,14 @@ export function episodeStepStatus(ep, stepId) {
  * ④ 角色和上下文：出场角色确认 + 本集剧本
  *
  * 角色库是「按集任务」里唯一的例外：它挂在 management.characters 上，属于全项目，
- * 不为每一集各建一份。只要已有角色就直接沿用，切换剧集、force 重做本步都不会
- * 重新提取（重提取是项目级手动动作）；只有角色库为空时，才在首次执行时抽一次，
- * 之后所有剧集共用这一份。每集独立的只是「本集出场哪几位」(ep.characterIds)。
+ * 不为每一集各建一份。已有角色不重抽（重提取是项目级手动动作）；只有角色库为空时，
+ * 才在首次执行时抽一次全书角色，之后所有剧集共用这一份。
+ *
+ * 每集独立的只是「本集出场哪几位」(ep.characterIds)。本步每次执行都会做一次
+ * 「本集出场角色对账」：本集原文 / 剧本里出现、但全局角色库里没有的人物，
+ * 会就地生成角色卡并补进全局库（见 agents/character-agent.ensureProjectCharactersForEpisode），
+ * 再回写本集名单。这样中后集新登场的人物不会永远缺设定 / 缺定妆图，
+ * 又不破坏「角色设定与定妆图全项目共享」的边界。
  */
 async function runEpisodeContext(project, m, ep, opts = {}) {
   const log = opts.log || (() => {});
@@ -104,13 +111,28 @@ async function runEpisodeContext(project, m, ep, opts = {}) {
     charNote = `首次提取全书角色 ${merged.characters.length} 位（${r.message}）`;
     log('info', `第 ${ep.no} 集 · ${charNote}，之后所有剧集沿用`);
   } else {
-    // 已存在 → 沿用，绝不重抽（即使 opts.force 要求重做本集上下文）
+    // 已存在 → 沿用，绝不重抽全书（即使 opts.force 要求重做本集上下文）
     charNote = `沿用项目角色库 ${m.characters.length} 位（不重新提取）`;
     log('info', `第 ${ep.no} 集 · ${charNote}`);
   }
-  // 出场角色：手动关联过的集不覆盖；空缺时按原文姓名 / 别名自动匹配
-  if (!Array.isArray(ep.characterIds) || !ep.characterIds.length) {
-    ep.characterIds = matchEpisodeCharacters(ep, m.characters || []);
+  // 本集出场角色对账：只补「本集出现但全局库没有」的人，仍写入全项目角色库；
+  // 已有名单（含用户手动关联）只追加新入库角色，不被自动匹配覆盖。
+  const ensured = await ensureProjectCharactersForEpisode({
+    project, m, ep, modelId: opts.modelId || '',
+    log: (level, msg) => log(level, msg),
+    signal: opts.signal,
+  });
+  if (ensured.ok) {
+    charNote = [charNote, ensured.message].filter(Boolean).join(' · ');
+    log('info', `第 ${ep.no} 集 · ${ensured.message}`);
+    for (const note of ensured.notes || []) log('info', `第 ${ep.no} 集 · ${note}`);
+  } else {
+    // 对账失败不应让整步失败：退回旧的姓名匹配，并在 note 里如实写明
+    charNote = `${charNote} · 本集角色对账未完成（${ensured.message || '未知原因'}），已按姓名匹配`;
+    log('warn', `第 ${ep.no} 集 · 本集角色对账未完成：${ensured.message || '未知原因'}`);
+    if (!Array.isArray(ep.characterIds) || !ep.characterIds.length) {
+      ep.characterIds = matchEpisodeCharacters(ep, m.characters || []);
+    }
   }
   const scriptExisted = Boolean(ep.script);
   if (!ep.script || opts.force) {

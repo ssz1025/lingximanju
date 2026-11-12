@@ -18,6 +18,7 @@ import {
 import { buildStyleLock } from '../core/character-style.mjs';
 import {
   characterReadyForVideo, emitPortraitProgress, ensureCharacterPortraits,
+  normalizeInterfaceByView, characterConsistencyReport,
 } from '../core/character-portrait.mjs';
 
 /** 智能体默认参数：core = 正面 / 3-4 侧 / 侧面 / 背面（全身组），另加面部特写 */
@@ -37,18 +38,30 @@ export const DEFAULT_PORTRAIT_SCOPE = 'all';
 export async function ensureProjectPortraits({
   project, m, scope = DEFAULT_PORTRAIT_SCOPE, onlyMissing = true, sheet = true,
   characterIds = null, modelId = '', onProgress = () => {}, log = () => {}, save = () => {}, signal,
+  interfaceId = '', interfaceByView = null, requireReal = false, regenerateMock = false,
 } = {}) {
+  const byView = normalizeInterfaceByView(interfaceByView);
   const result = await ensureCharacterPortraits({
     project, m, scope, onlyMissing, sheet, characterIds, modelId, onProgress, log, save, signal,
+    interfaceId: String(interfaceId || '').slice(0, 60), interfaceByView: byView,
+    requireReal, regenerateMock,
   });
   const characters = Array.isArray(m?.characters) ? m.characters : [];
   const status = projectPortraitStatus(characters, { scope, requireSheet: sheet });
   const ready = Object.fromEntries(characters.map((c) => [c.id, characterReadyForVideo(c)]));
   const blocked = characters.filter((c) => !ready[c.id]?.ok).map((c) => `${c.name}（缺 ${ready[c.id].missing.join('、')}）`);
+  // 与业务层同一口径的一致性报告：哪些角色的正面 / 其它视图 / 定妆板来源不一致
+  const consistency = Object.fromEntries(characters.map((c) => [c.id, characterConsistencyReport(c, { scope })]));
+  const inconsistent = characters.filter((c) => !consistency[c.id]?.ok).map((c) => c.name);
   return {
     ...result,
     // 项目级完整度：多少角色「真的可以进视频」，多少还缺基准图
     portraitStatus: status,
+    consistency,
+    byViewInterfaces: byView,
+    consistencyLabel: inconsistent.length
+      ? `⚠ ${inconsistent.length} 位角色来源不一致（${inconsistent.slice(0, 3).join('、')}${inconsistent.length > 3 ? '…' : ''}）`
+      : '✓ 全部角色共用正面基准 / 风格锁 / 出图通道',
     videoReady: {
       total: characters.length,
       ready: characters.filter((c) => ready[c.id]?.ok).length,
@@ -69,7 +82,8 @@ defineAgent({
   color: '#f59e0b',
   description:
     '按全片风格锁为每位角色生成完整多视图定妆（正面 / 3/4 侧 / 侧面 / 背面 / 面部特写）与定妆板，'
-    + '以正面图为身份基准逐张回引参考，保证跨视图与跨镜头造型一致；生成的定妆图会进入关键帧、'
+    + '以正面图为身份基准逐张回引参考（缺正面即阻断，不凭文字硬出），支持按视图指定 ComfyUI 工作流，'
+    + '保证跨视图与跨镜头造型一致；生成的定妆图会进入关键帧、'
     + '镜头片段与导演包的参考图链路。',
   async run(ctx) {
     const m = ctx.project.management || (ctx.project.management = {});
@@ -86,11 +100,21 @@ defineAgent({
     const scope = data.scope || DEFAULT_PORTRAIT_SCOPE;
     const onlyMissing = data.onlyMissing !== false;
     const sheet = data.includeSheet !== false;
+    // 按视图接口档案：正面可单独指定「完整全身基准图」工作流，其余视图 / 定妆板各自可选
+    const interfaceByView = normalizeInterfaceByView(data.interfaceByView);
+    const interfaceId = String(data.interfaceId || '').slice(0, 60);
 
     const lock = buildStyleLock({ project: ctx.project, management: m });
     ctx.progress(0.05);
     ctx.log('info', `角色定妆 · 风格锁来源 ${lock.source}：${lock.label}`);
-    ctx.patch({ styleLock: lock, scope, onlyMissing, includeSheet: sheet });
+    ctx.log('info', '角色定妆 · 严格串行：正面基准图 → 校验 → 其余视图回引正面 → 定妆板；正面失败即停，不产漂移图');
+    if (interfaceByView) {
+      ctx.log('info', `角色定妆 · 按视图接口：${Object.entries(interfaceByView).map(([k, v]) => `${k}=${v}`).join(' / ')}`);
+    }
+    ctx.patch({
+      styleLock: lock, scope, onlyMissing, includeSheet: sheet,
+      interfaceId, interfaceByView, refChain: 'front → 3/4侧 / 特写 / 侧面；缺正面即阻断',
+    });
 
     const views = scope === 'all' ? ALL_VIEW_KEYS : (Array.isArray(scope) ? scope : CORE_VIEW_KEYS);
     ctx.log('info', `角色定妆 · 目标 ${characters.length} 位角色 × ${views.length} 视图${sheet ? ' + 定妆板' : ''}`);
@@ -99,6 +123,9 @@ defineAgent({
       project: ctx.project, m, scope, onlyMissing, sheet,
       characterIds: Array.isArray(data.characterIds) && data.characterIds.length ? data.characterIds : null,
       modelId: data.modelId || '',
+      interfaceId, interfaceByView,
+      requireReal: data.requireReal === true,
+      regenerateMock: data.regenerateMock === true,
       signal: ctx.signal,
       log: (level, msg) => ctx.log(level, msg),
       // 编排器统一落盘：这里不重复写，避免一次运行内多次全量覆盖项目 JSON
@@ -125,6 +152,9 @@ defineAgent({
       styleLock: result.styleLock || lock,
       portraitStatus: result.portraitStatus,
       videoReady: result.videoReady,
+      consistency: result.consistency,
+      consistencyLabel: result.consistencyLabel,
+      byViewInterfaces: result.byViewInterfaces,
       characters: m.characters,
       summary: result.message || result.error || '',
     });
@@ -134,6 +164,7 @@ defineAgent({
     }
     ctx.log('info', result.message || result.error || '');
     ctx.log('info', `角色定妆 · ${result.videoReady?.label || ''}`);
+    ctx.log('info', `角色定妆 · ${result.consistencyLabel || '一致性报告不可用'}`);
     if (result.videoReady?.blocked?.length) {
       ctx.log('warn', `以下角色仍缺视频基准图：${result.videoReady.blocked.join('；')}`);
     }

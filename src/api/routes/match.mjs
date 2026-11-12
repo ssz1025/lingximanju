@@ -34,6 +34,8 @@ export const MATCH = {
   episodeStepBatch: /^\/api\/projects\/([^/]+)\/episodes\/steps$/,
   // 单集剧本导出 / 全项目剧本导出（必须在 script 动作与 :no 之前理解，路径多一层）
   episodeScriptExport: /^\/api\/projects\/([^/]+)\/episodes\/(\d+)\/script\/export$/,
+  // 本集出场角色对账：把本集原文/剧本里出现、但全局角色库没有的人物补齐入库
+  episodeCastEnsure: /^\/api\/projects\/([^/]+)\/episodes\/(\d+)\/characters\/ensure$/,
   projectScriptExport: /^\/api\/projects\/([^/]+)\/scripts\/export$/,
   episodeItem: /^\/api\/projects\/([^/]+)\/episodes\/(\d+)$/,
   // step = 分集制作单集执行（④角色和上下文 / ⑤分镜与画面 / ⑥视频与交付）
